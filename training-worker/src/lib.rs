@@ -48,11 +48,14 @@
 
 pub mod backend;
 pub mod chain;
+pub mod http_chain_pipeline;
+pub mod http_chain_training;
 pub mod merkle;
 pub mod pipeline;
 pub mod quantize;
 pub mod transport;
 pub mod types;
+pub mod wallet;
 pub mod worker;
 
 pub use backend::{DeterministicTinyModel, MaliciousTinyModel, ModelBackend, Tensor};
@@ -65,6 +68,10 @@ pub use types::{
     TrainingJobSpec, WeightsHash, WorkerAddress,
 };
 pub use worker::{Worker, WorkerConfig, WorkerOutcome};
+
+pub use http_chain_pipeline::HttpPipelineChainClient;
+pub use http_chain_training::HttpChainClient;
+pub use wallet::{tx_hash_of_signed, Eip1559Tx, Wallet, WalletError};
 
 pub use pipeline::{
     pipeline_stage_forward, MockPipelineChainClient, PipelineChainClient, PipelineChainError,
