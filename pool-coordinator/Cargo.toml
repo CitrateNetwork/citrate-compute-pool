@@ -49,6 +49,13 @@ ethereum-types = "0.14"
 k256 = { version = "0.13", features = ["ecdsa"] }
 rlp = "0.5"
 
+# Web3 SSv3 keystore unlock (matches the JS SDK's W-01 format so
+# keystores roundtrip between JS and Rust wallets byte-for-byte)
+pbkdf2 = "0.12"
+sha2 = "0.10"
+aes = "0.8"
+ctr = "0.9"
+
 # Observability
 tracing = { workspace = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
