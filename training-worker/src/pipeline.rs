@@ -260,6 +260,30 @@ impl MockPipelineChainClient {
             .and_then(|r| r.payment_earned.get(&worker).copied())
             .unwrap_or(0)
     }
+
+    /// Test-side helper: fault a stage — sets the owner to None,
+    /// matching what `ComputePoolPipeline.faultStage` would do
+    /// on-chain. Used by the stage-fault-recovery integration test.
+    pub fn fault_stage(&self, job_id: PipelineJobId, stage: StageIndex) {
+        let mut state = self.inner.lock();
+        if let Some(job) = state.jobs.get_mut(&job_id) {
+            job.stage_owners.remove(&stage);
+        }
+    }
+
+    /// Test-side helper: reassign a faulted stage to a new worker.
+    /// Mirrors `ComputePoolPipeline.reassignStage`.
+    pub fn reassign_stage(
+        &self,
+        job_id: PipelineJobId,
+        stage: StageIndex,
+        new_owner: WorkerAddress,
+    ) {
+        let mut state = self.inner.lock();
+        if let Some(job) = state.jobs.get_mut(&job_id) {
+            job.stage_owners.insert(stage, new_owner);
+        }
+    }
 }
 
 impl Default for MockPipelineChainClient {
@@ -473,6 +497,113 @@ where
             "pipeline stage served"
         );
         Ok(final_output)
+    }
+
+    /// Stage-fault-tolerant wrapper around `serve_request`. If an
+    /// intermediate stage faults during the wait for incoming
+    /// activation, retries with an upstream-owner re-check + a
+    /// fresh `recv` loop. Max retries bounded by
+    /// `max_fault_retries` (default 3); per-recv timeout bounded
+    /// by `recv_timeout`.
+    ///
+    /// CM-08 WP-08.2 S1 follow-up (`pipeline-worker-stage-fault-recovery`).
+    /// Detection policy: after each `recv_timeout` with no
+    /// matching activation, the worker queries the chain for its
+    /// UPSTREAM stage's current owner. If the owner is `None`
+    /// (faulted, awaiting reassignment) or changed, we note +
+    /// keep waiting for a `reassignStage` resolution. If the
+    /// change is detected and a NEW owner is now responsible, the
+    /// new owner will re-forward the activation — we just keep
+    /// draining `recv` until it arrives.
+    ///
+    /// `first_stage_input = None` for non-first stages.
+    pub async fn serve_request_resilient(
+        &self,
+        request_id: PipelineRequestId,
+        first_stage_input: Option<Vec<u8>>,
+        recv_timeout: std::time::Duration,
+        max_fault_retries: u32,
+    ) -> anyhow::Result<Option<Vec<u8>>> {
+        use crate::pipeline::PipelineRequestState;
+
+        // First stage and last stage both have deterministic wait
+        // patterns — the fault-recovery wrapper only changes behavior
+        // for intermediate-stage waits (where a previous stage might
+        // fault). For simplicity, share the serve_request body and
+        // layer a retry around it.
+        //
+        // Intermediate / last stage path goes through a bounded-wait
+        // loop that checks upstream stage_owner between attempts.
+
+        if self.role.is_first_stage() {
+            return self.serve_request(request_id, first_stage_input).await;
+        }
+
+        let upstream_stage = self.role.stage_index - 1;
+        let job_id = self.role.job_id;
+        let mut retries = 0u32;
+
+        loop {
+            let attempt = tokio::time::timeout(
+                recv_timeout,
+                self.serve_request(request_id, None),
+            )
+            .await;
+            match attempt {
+                Ok(Ok(out)) => return Ok(out),
+                Ok(Err(e)) => {
+                    // serve_request returned an error — propagate.
+                    return Err(e);
+                }
+                Err(_) => {
+                    // Timeout on recv. Check upstream for fault.
+                    let upstream_owner = self
+                        .chain
+                        .stage_owner(job_id, upstream_stage)
+                        .await
+                        .map_err(|e| anyhow::anyhow!("stage_owner query: {}", e))?;
+                    if upstream_owner.is_none() {
+                        // Upstream is faulted, awaiting reassignment.
+                        retries += 1;
+                        tracing::warn!(
+                            job_id = job_id,
+                            upstream = upstream_stage,
+                            retries = retries,
+                            "upstream stage faulted; waiting for reassignment"
+                        );
+                    } else {
+                        retries += 1;
+                        tracing::debug!(
+                            job_id = job_id,
+                            upstream = upstream_stage,
+                            upstream_owner = ?upstream_owner,
+                            retries = retries,
+                            "recv timeout; upstream still owned, retrying"
+                        );
+                    }
+
+                    if retries >= max_fault_retries {
+                        // Check if the request has already been
+                        // marked Failed on chain — if so, exit
+                        // cleanly rather than retry forever.
+                        if let Ok(snap) = self.chain.request_snapshot(request_id).await
+                        {
+                            if snap.state == PipelineRequestState::Failed {
+                                return Err(anyhow::anyhow!(
+                                    "request {} marked Failed on chain",
+                                    request_id
+                                ));
+                            }
+                        }
+                        return Err(anyhow::anyhow!(
+                            "exhausted {} fault-recovery retries for request {}",
+                            max_fault_retries,
+                            request_id
+                        ));
+                    }
+                }
+            }
+        }
     }
 }
 
