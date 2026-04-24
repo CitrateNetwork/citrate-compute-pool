@@ -20,6 +20,11 @@ use crate::error::CoordinatorError;
 /// + the daemon decodes the job's `PoolJobSpec` from the on-chain
 ///   storage to recover prompt + max_tokens (the event itself only
 ///   carries IDs + payment to keep gas costs bounded).
+///
+/// `tx_hash`, `log_index`, and `block_number` are populated from
+/// the on-chain log envelope and used by the event loop for
+/// deduplication across overlapping polling windows (reorg
+/// tolerance).
 #[derive(Debug, Clone)]
 pub struct ComputeRequestedEvent {
     pub pool_id: u64,
@@ -28,6 +33,9 @@ pub struct ComputeRequestedEvent {
     pub payment_grains: U256,
     pub prompt: String,
     pub max_tokens: u32,
+    pub tx_hash: H256,
+    pub log_index: u32,
+    pub block_number: u64,
 }
 
 /// Subset of `PoolMember` fields the daemon needs for member-pool

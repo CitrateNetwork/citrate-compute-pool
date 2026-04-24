@@ -34,16 +34,26 @@
 //!   default "latest" (start at the current tip; historical
 //!   events are ignored)
 
+use std::collections::HashSet;
 use std::env;
 use std::process::ExitCode;
+use std::sync::Arc;
 use std::time::Duration;
 
-use ethereum_types::H160;
+use ethereum_types::{H160, H256};
+use tokio::sync::Mutex;
 use tracing_subscriber::{fmt, EnvFilter};
 
 use citrate_pool_coordinator::{
     handle_event, log_identity, CoordinatorConfig, CoordinatorError, HttpChainAdapter, Wallet,
 };
+
+/// Maximum number of (tx_hash, log_index) entries the dedup set
+/// tracks. Entries older than the current `last_block -
+/// confirmations_buffer` age out naturally; this cap is a
+/// memory-safety bound for chains with unexpectedly long reorg
+/// tails or misconfigured buffer values.
+const SEEN_EVENTS_CAP: usize = 10_000;
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -114,22 +124,37 @@ async fn main() -> ExitCode {
             .unwrap_or(3),
     );
 
+    // Reorg tolerance: re-scan `[last_block - buffer, latest]` each
+    // tick, deduping seen events by (tx_hash, log_index). A chain
+    // re-org within `buffer` blocks may surface NEW events at
+    // previously-seen block numbers or drop events we already
+    // dispatched; the dedup set prevents re-dispatch of stable
+    // events and lets genuinely new events through.
+    let confirmations_buffer: u64 = env::var("CITRATE_POOL_CONFIRMATIONS_BUFFER")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(12);
+
+    let seen: Arc<Mutex<HashSet<(H256, u32)>>> =
+        Arc::new(Mutex::new(HashSet::new()));
+
     // Event polling loop.
     //
-    // Per tick: fetch latest block, poll [last_block+1, latest]
-    // for ComputeRequested, dispatch each event to handle_event
-    // in a spawned task (so one slow dispatch doesn't block the
-    // next poll), advance last_block to latest.
+    // Per tick: fetch latest block, poll [max(0, last_block - buffer),
+    // latest] for ComputeRequested, dedupe seen events, dispatch
+    // fresh ones to handle_event in spawned tasks, advance
+    // last_block to latest.
     //
     // Safety properties this design maintains:
-    // - Each event dispatches at most once per daemon run (we
-    //   advance last_block only after the poll completes).
+    // - Each event dispatches at most once per daemon run (dedup
+    //   set keyed on (tx_hash, log_index)).
+    // - Chain reorgs within `buffer` blocks surface new events
+    //   automatically on the next tick without manual intervention.
     // - Slow handle_event runs don't delay event discovery.
-    // - Backpressure: if handle_event panics (it shouldn't —
-    //   CoordinatorError is the error surface), the daemon keeps
-    //   polling; tokio reports the join failure.
+    // - Backpressure: dedup set capped at SEEN_EVENTS_CAP; beyond
+    //   that we clear half to bound memory.
     loop {
-        match tick(&adapter, &cfg, last_block, &wallet).await {
+        match tick(&adapter, &cfg, last_block, confirmations_buffer, &seen).await {
             Ok(new_last) => last_block = new_last,
             Err(e) => {
                 tracing::warn!(error = %e, "poll tick failed; retrying after interval");
@@ -143,15 +168,44 @@ async fn tick(
     adapter: &HttpChainAdapter,
     cfg: &CoordinatorConfig,
     last_block: u64,
-    _wallet: &Wallet,
+    confirmations_buffer: u64,
+    seen: &Arc<Mutex<HashSet<(H256, u32)>>>,
 ) -> Result<u64, CoordinatorError> {
     let latest = adapter.latest_block().await?;
     if latest <= last_block {
         return Ok(last_block);
     }
-    let from = last_block + 1;
+    // Widen the window backwards by `confirmations_buffer` so reorg
+    // backfills are observed. Floor at 0.
+    let from = last_block.saturating_sub(confirmations_buffer).max(1);
     let events = adapter.poll_compute_requested(from, latest).await?;
+
+    // Evict old entries + check cap before inserting new ones.
+    {
+        let mut set = seen.lock().await;
+        if set.len() >= SEEN_EVENTS_CAP {
+            // When capped, drop half. Brute-force but deterministic.
+            let drop_count = set.len() / 2;
+            let to_remove: Vec<_> = set.iter().take(drop_count).cloned().collect();
+            for k in to_remove {
+                set.remove(&k);
+            }
+            tracing::warn!(
+                dropped = drop_count,
+                "dedup set hit cap; dropped oldest half"
+            );
+        }
+    }
+
     for event in events {
+        // Dedup: skip if we've already dispatched this (tx_hash, log_index).
+        {
+            let mut set = seen.lock().await;
+            let key = (event.tx_hash, event.log_index);
+            if !set.insert(key) {
+                continue;
+            }
+        }
         let cfg_clone = cfg.clone();
         let adapter_clone = adapter.clone();
         tokio::spawn(async move {
