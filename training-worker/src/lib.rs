@@ -49,6 +49,7 @@
 pub mod backend;
 pub mod chain;
 pub mod merkle;
+pub mod pipeline;
 pub mod quantize;
 pub mod transport;
 pub mod types;
@@ -64,3 +65,9 @@ pub use types::{
     TrainingJobSpec, WeightsHash, WorkerAddress,
 };
 pub use worker::{Worker, WorkerConfig, WorkerOutcome};
+
+pub use pipeline::{
+    pipeline_stage_forward, MockPipelineChainClient, PipelineChainClient, PipelineChainError,
+    PipelineJobId, PipelineJobSpec, PipelineRequestId, PipelineRequestSnapshot,
+    PipelineRequestState, PipelineWorker, StageIndex, StageRole,
+};
