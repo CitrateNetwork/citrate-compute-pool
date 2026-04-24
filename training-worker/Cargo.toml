@@ -1,0 +1,39 @@
+[package]
+name = "citrate-training-worker"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "DataParallel training-worker binary for CM-07. Joins training pools, runs forward+backward passes via a pluggable ModelBackend, participates in ring all-reduce, posts per-step commitments and receives per-epoch payouts via ComputePoolTraining."
+
+# See:
+# - .agentile/planset/compute-marketplace-buildout/CM-07-dataparallel-scoped.md
+# - .agentile/formal/specs/compute/DataParallelTrainingJob.tla
+# - citrate_v0.01.1/docs/adr/ADR-008-gradient-commitment.md
+# - citrate_v0.01.1/contracts/src/ComputePoolTraining.sol
+
+[lib]
+name = "citrate_training_worker"
+path = "src/lib.rs"
+
+[[bin]]
+name = "citrate-training-worker"
+path = "src/bin/main.rs"
+
+[dependencies]
+tokio = { workspace = true }
+async-trait = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha3 = { workspace = true }
+hex = "0.4"
+parking_lot = { workspace = true }
+ethereum-types = "0.14"
+
+[dev-dependencies]
+tokio = { workspace = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
