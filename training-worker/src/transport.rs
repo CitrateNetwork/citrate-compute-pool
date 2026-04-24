@@ -6,6 +6,7 @@
 //! behind this same trait.
 
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use tokio::sync::{Mutex, Notify};
@@ -13,7 +14,7 @@ use tokio::sync::{Mutex, Notify};
 use crate::types::{StepCommit, WorkerAddress};
 
 /// Messages exchanged between workers + coordinator on the mesh.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum WorkerMessage {
     /// A worker announces their step commitment. Consumed by the
     /// coordinator for Merkle aggregation; also seen by all other
