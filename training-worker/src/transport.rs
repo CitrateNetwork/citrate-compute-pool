@@ -30,6 +30,21 @@ pub enum WorkerMessage {
     EpochClose {
         epoch: u32,
     },
+    /// CM-08 pipeline activation forwarding. Stage i sends this to
+    /// stage i+1 carrying the computed activation bytes. The
+    /// `request_id` binds the activation to a specific in-flight
+    /// request so the receiver can match it against the on-chain
+    /// request state.
+    ///
+    /// Activation payload is opaque at this layer — concrete tensor
+    /// shapes are decided by the ModelBackend impl. For S0 the
+    /// deterministic backend uses a keccak-chained byte vector.
+    PipelineActivation {
+        request_id: u64,
+        from_stage: u32,
+        to_stage: u32,
+        payload: Vec<u8>,
+    },
 }
 
 #[async_trait]
