@@ -64,12 +64,14 @@ pub mod http_chain;
 pub mod metrics;
 pub mod provider;
 pub mod wallet;
+pub mod ws_chain;
 
 pub use chain::{ChainAdapter, ComputeRequestedEvent, EPOCH_LENGTH};
 pub use config::CoordinatorConfig;
 pub use error::CoordinatorError;
 pub use http_chain::HttpChainAdapter;
 pub use wallet::{tx_hash_of_signed, Eip1559Tx, Wallet, WalletError};
+pub use ws_chain::{EventStream, WsChainSubscriber};
 
 use crate::dispatcher::{select_member, MemberId};
 use crate::provider::{dispatch_to_member, PoolInferRequest};
