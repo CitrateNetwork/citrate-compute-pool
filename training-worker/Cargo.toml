@@ -46,9 +46,13 @@ sha2 = "0.10"
 aes = "0.8"
 ctr = "0.9"
 
+# Daemon binary needs tracing-subscriber at runtime (was dev-only
+# when the binary was a stub). Kept a single dep line — the dev
+# section below no longer re-declares it.
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
 [dev-dependencies]
 tokio = { workspace = true }
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # Stub JSON-RPC server for http_chain_* tests, mirroring the
 # pool-coordinator pattern (axum is dev-only for training-worker).
 axum = "0.7"
