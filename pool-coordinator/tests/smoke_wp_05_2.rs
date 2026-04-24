@@ -24,7 +24,7 @@ use async_trait::async_trait;
 use axum::extract::Json as JsonExtractor;
 use axum::routing::post;
 use axum::Json as JsonResp;
-use ethereum_types::{H160, U256};
+use ethereum_types::{H160, H256, U256};
 use serde_json::Value;
 use tokio::net::TcpListener;
 
@@ -202,6 +202,9 @@ async fn happy_path_dispatches_records_completes() {
         payment_grains: U256::from(1_000_000_000_000_000_000u128),
         prompt: "ping".to_string(),
         max_tokens: 16,
+        tx_hash: H256::zero(),
+        log_index: 0,
+        block_number: 1,
     };
 
     let outcome = handle_event(&chain, &cfg, &event).await;
@@ -235,6 +238,9 @@ async fn skips_event_when_not_coordinator() {
         payment_grains: U256::from(1u64),
         prompt: "x".to_string(),
         max_tokens: 1,
+        tx_hash: H256::zero(),
+        log_index: 0,
+        block_number: 1,
     };
 
     let outcome = handle_event(&chain, &cfg, &event).await;
@@ -266,6 +272,9 @@ async fn provider_failure_marks_job_failed() {
         payment_grains: U256::from(1u64),
         prompt: "ping".to_string(),
         max_tokens: 1,
+        tx_hash: H256::zero(),
+        log_index: 0,
+        block_number: 1,
     };
 
     let outcome = handle_event(&chain, &cfg, &event).await;
