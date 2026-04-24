@@ -44,6 +44,12 @@ pub enum ChainError {
     NotCoordinator,
     #[error("job not ready to finalize")]
     NotReadyToFinalize,
+    #[error("caller not joined; only joined workers can trigger reassignment")]
+    CallerNotJoined,
+    #[error("proposed replacement is not a joined worker")]
+    ReplacementNotJoined,
+    #[error("coordinator still active within timeout")]
+    CoordinatorStillActive,
 }
 
 /// Summary of a training job's on-chain state as seen by a worker.
@@ -104,6 +110,18 @@ pub trait ChainClient: Send + Sync {
     /// Finalize the job. Reverts with ChallengeWindowOpen if
     /// called too early.
     async fn finalize(&self, job_id: JobId) -> Result<(), ChainError>;
+
+    /// Reassign a stalled coordinator. Caller must be a joined
+    /// worker; reassignment is only accepted if the last coordinator
+    /// activity was more than `coordination_timeout` blocks ago.
+    /// Triggers a liveness slash on the old coordinator. Mirrors
+    /// `ComputePoolTraining.reassignCoordinator`.
+    async fn reassign_coordinator(
+        &self,
+        job_id: JobId,
+        caller: WorkerAddress,
+        new_coordinator: WorkerAddress,
+    ) -> Result<(), ChainError>;
 }
 
 /// In-memory implementation of the ComputePoolTraining state
@@ -131,6 +149,8 @@ struct MockJob {
     joined: HashSet<WorkerAddress>,
     epoch_roots: HashMap<EpochIndex, B256>,
     all_epochs_committed_block: u64,
+    last_activity_block: u64,
+    liveness_slashed: HashSet<WorkerAddress>,
 }
 
 impl MockChainClient {
@@ -162,11 +182,30 @@ impl MockChainClient {
                 joined: HashSet::new(),
                 epoch_roots: HashMap::new(),
                 all_epochs_committed_block: 0,
+                last_activity_block: 0,
+                liveness_slashed: HashSet::new(),
             },
         );
         id
     }
+
+    /// Test-side helper: has a worker been liveness-slashed for
+    /// coordinator-stall? Mirrors the on-chain WorkerInfo.stakeSlashed
+    /// being non-zero after a reassign call.
+    pub fn was_liveness_slashed(&self, job_id: JobId, worker: WorkerAddress) -> bool {
+        self.inner
+            .lock()
+            .jobs
+            .get(&job_id)
+            .map(|j| j.liveness_slashed.contains(&worker))
+            .unwrap_or(false)
+    }
 }
+
+/// Coordination-timeout constant mirroring the Solidity contract's
+/// COORDINATION_TIMEOUT. The mock reuses the on-chain value so tests
+/// don't drift from the deployed behavior.
+const COORDINATION_TIMEOUT: u64 = 100;
 
 impl Default for MockChainClient {
     fn default() -> Self {
@@ -232,6 +271,7 @@ impl ChainClient for MockChainClient {
         coordinator: WorkerAddress,
     ) -> Result<(), ChainError> {
         let mut state = self.inner.lock();
+        let block = state.block_number;
         let job = state
             .jobs
             .get_mut(&job_id)
@@ -247,6 +287,7 @@ impl ChainClient for MockChainClient {
         }
         job.state = JobChainState::Training;
         job.coordinator = Some(coordinator);
+        job.last_activity_block = block;
         Ok(())
     }
 
@@ -280,6 +321,7 @@ impl ChainClient for MockChainClient {
         }
         job.epoch_roots.insert(epoch, root);
         job.current_epoch += 1;
+        job.last_activity_block = block;
         if job.current_epoch == job.spec.epoch_count {
             job.state = JobChainState::Awaiting;
             job.all_epochs_committed_block = block;
@@ -307,6 +349,38 @@ impl ChainClient for MockChainClient {
             return Err(ChainError::ChallengeWindowOpen);
         }
         job.state = JobChainState::Finalized;
+        Ok(())
+    }
+
+    async fn reassign_coordinator(
+        &self,
+        job_id: JobId,
+        caller: WorkerAddress,
+        new_coordinator: WorkerAddress,
+    ) -> Result<(), ChainError> {
+        let mut state = self.inner.lock();
+        let block = state.block_number;
+        let job = state
+            .jobs
+            .get_mut(&job_id)
+            .ok_or(ChainError::UnknownJob(job_id))?;
+        if job.state != JobChainState::Training {
+            return Err(ChainError::WrongState("not training".into()));
+        }
+        if !job.joined.contains(&caller) {
+            return Err(ChainError::CallerNotJoined);
+        }
+        if !job.joined.contains(&new_coordinator) {
+            return Err(ChainError::ReplacementNotJoined);
+        }
+        if block <= job.last_activity_block + COORDINATION_TIMEOUT {
+            return Err(ChainError::CoordinatorStillActive);
+        }
+        if let Some(old) = job.coordinator {
+            job.liveness_slashed.insert(old);
+        }
+        job.coordinator = Some(new_coordinator);
+        job.last_activity_block = block;
         Ok(())
     }
 }
@@ -403,6 +477,59 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, ChainError::NotCoordinator));
+    }
+
+    #[tokio::test]
+    async fn reassign_after_timeout_swaps_coordinator() {
+        let chain = MockChainClient::new();
+        let job_id = chain.create_job(spec());
+        let w1 = Address::repeat_byte(1);
+        let w2 = Address::repeat_byte(2);
+        let w3 = Address::repeat_byte(3);
+        for w in [w1, w2, w3] {
+            chain
+                .join_training_job(job_id, w, spec().per_worker_stake)
+                .await
+                .unwrap();
+        }
+        chain.close_recruitment(job_id, w1).await.unwrap();
+
+        // Too early.
+        chain.advance_blocks(50).await;
+        let err = chain.reassign_coordinator(job_id, w2, w3).await.unwrap_err();
+        assert!(matches!(err, ChainError::CoordinatorStillActive));
+
+        // Past timeout.
+        chain.advance_blocks(60).await;
+        chain.reassign_coordinator(job_id, w2, w3).await.unwrap();
+
+        let snap = chain.snapshot(job_id).await.unwrap();
+        assert_eq!(snap.coordinator, Some(w3), "coordinator swapped");
+        assert!(chain.was_liveness_slashed(job_id, w1));
+    }
+
+    #[tokio::test]
+    async fn reassign_rejects_non_member_caller() {
+        let chain = MockChainClient::new();
+        let job_id = chain.create_job(spec());
+        let w1 = Address::repeat_byte(1);
+        let w2 = Address::repeat_byte(2);
+        let w3 = Address::repeat_byte(3);
+        for w in [w1, w2, w3] {
+            chain
+                .join_training_job(job_id, w, spec().per_worker_stake)
+                .await
+                .unwrap();
+        }
+        chain.close_recruitment(job_id, w1).await.unwrap();
+        chain.advance_blocks(200).await;
+
+        let outsider = Address::repeat_byte(0xEE);
+        let err = chain
+            .reassign_coordinator(job_id, outsider, w3)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ChainError::CallerNotJoined));
     }
 
     #[tokio::test]
