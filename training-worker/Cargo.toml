@@ -34,6 +34,21 @@ hex = "0.4"
 parking_lot = { workspace = true }
 ethereum-types = "0.14"
 
+# S1 HTTP chain clients: JSON-RPC + EIP-1559 signing. Mirrors the
+# deps in pool-coordinator's http_chain path so the two wallet
+# surfaces roundtrip on the same Web3 SSv3 keystore format
+# (see FIXME at top of wallet.rs — unify post-pilot).
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+k256 = { version = "0.13", features = ["ecdsa"] }
+rlp = "0.5"
+pbkdf2 = "0.12"
+sha2 = "0.10"
+aes = "0.8"
+ctr = "0.9"
+
 [dev-dependencies]
 tokio = { workspace = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# Stub JSON-RPC server for http_chain_* tests, mirroring the
+# pool-coordinator pattern (axum is dev-only for training-worker).
+axum = "0.7"
