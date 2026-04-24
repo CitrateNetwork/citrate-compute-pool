@@ -54,7 +54,7 @@ pub mod transport;
 pub mod types;
 pub mod worker;
 
-pub use backend::{DeterministicTinyModel, ModelBackend, Tensor};
+pub use backend::{DeterministicTinyModel, MaliciousTinyModel, ModelBackend, Tensor};
 pub use chain::{ChainClient, ChainError, JobChainSnapshot, MockChainClient};
 pub use merkle::{compute_epoch_root, compute_leaf};
 pub use quantize::{quantize_tensor, QuantizedGradient};
