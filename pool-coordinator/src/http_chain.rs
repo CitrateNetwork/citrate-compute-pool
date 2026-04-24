@@ -328,6 +328,32 @@ impl HttpChainAdapter {
             }
             let payment = U256::from_big_endian(&data_bytes[..32]);
 
+            // Extract envelope fields for dedup across overlapping
+            // polling windows. Missing fields are extremely unlikely
+            // from a real node but we tolerate them defensively.
+            let tx_hash = entry
+                .get("transactionHash")
+                .and_then(|v| v.as_str())
+                .and_then(|s| hex::decode(s.trim_start_matches("0x")).ok())
+                .and_then(|bytes| {
+                    if bytes.len() == 32 {
+                        Some(H256::from_slice(&bytes))
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or_default();
+            let log_index = entry
+                .get("logIndex")
+                .and_then(|v| v.as_str())
+                .and_then(|s| parse_hex_u64(s).ok())
+                .unwrap_or(0) as u32;
+            let block_number = entry
+                .get("blockNumber")
+                .and_then(|v| v.as_str())
+                .and_then(|s| parse_hex_u64(s).ok())
+                .unwrap_or(0);
+
             // Fetch PoolJobSpec from chain to populate prompt +
             // max_tokens. One extra eth_call per event; the happy
             // path is under tens of events per poll window, so this
@@ -352,6 +378,9 @@ impl HttpChainAdapter {
                 payment_grains: payment,
                 prompt,
                 max_tokens,
+                tx_hash,
+                log_index,
+                block_number,
             });
         }
         Ok(out)
@@ -1202,6 +1231,7 @@ mod tests {
         let state = StubState::new();
         let requester = H160::repeat_byte(0xAB);
         let payment = 123_000_000_000_000_000u64; // 0.123 ether
+        let tx_hash = H256::repeat_byte(0xEE);
 
         // Compose a ComputeRequested log: topics[0]=sig, topics[1..4]=
         // indexed fields, data=payment.
@@ -1217,6 +1247,8 @@ mod tests {
             ],
             "data": format!("0x{}", hex::encode(data_buf)),
             "blockNumber": "0x10",
+            "transactionHash": format!("0x{}", hex::encode(tx_hash.as_bytes())),
+            "logIndex": "0x3",
         });
         state.queue("eth_getLogs", json!([log]));
 
@@ -1233,9 +1265,13 @@ mod tests {
         assert_eq!(ev.job_id, 42);
         assert_eq!(ev.requester, requester);
         assert_eq!(ev.payment_grains, U256::from(payment));
-        // Stub fields until PoolJobSpec decode lands.
+        // fetch_job_spec falls back (no queued response) → defaults.
         assert_eq!(ev.prompt, "");
-        assert_eq!(ev.max_tokens, 1000);
+        assert_eq!(ev.max_tokens, DEFAULT_MAX_TOKENS);
+        // Envelope fields populated for reorg-dedup.
+        assert_eq!(ev.tx_hash, tx_hash);
+        assert_eq!(ev.log_index, 3);
+        assert_eq!(ev.block_number, 0x10);
     }
 
     #[tokio::test]
