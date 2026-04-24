@@ -51,6 +51,26 @@ ctr = "0.9"
 # section below no longer re-declares it.
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
+# S1 libp2p transport (see src/libp2p_transport.rs + ADR-009).
+# Feature set is deliberately minimal — we use tcp + noise + yamux
+# for real peer-to-peer, memory for in-process tests, gossipsub
+# for the message layer, and identify+ping for liveness.
+# macros enables `#[derive(NetworkBehaviour)]`.
+libp2p = { workspace = true, features = [
+    "tokio",
+    "tcp",
+    "noise",
+    "yamux",
+    "gossipsub",
+    "identify",
+    "ping",
+    "macros",
+    "ed25519",
+    "secp256k1",
+] }
+bincode = { workspace = true }
+futures = "0.3"
+
 [dev-dependencies]
 tokio = { workspace = true }
 # Stub JSON-RPC server for http_chain_* tests, mirroring the

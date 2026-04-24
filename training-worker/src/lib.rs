@@ -51,6 +51,7 @@ pub mod chain;
 pub mod events;
 pub mod http_chain_pipeline;
 pub mod http_chain_training;
+pub mod libp2p_transport;
 pub mod merkle;
 pub mod pipeline;
 pub mod quantize;
@@ -63,6 +64,7 @@ pub use backend::{DeterministicTinyModel, MaliciousTinyModel, ModelBackend, Tens
 pub use chain::{ChainClient, ChainError, JobChainSnapshot, MockChainClient};
 pub use merkle::{compute_epoch_root, compute_leaf};
 pub use quantize::{quantize_tensor, QuantizedGradient};
+pub use libp2p_transport::{LibP2pTransport, LibP2pTransportError};
 pub use transport::{InProcessTransport, Transport, WorkerMessage};
 pub use types::{
     B256, CommitmentHash, EpochIndex, JobId, PrevWeightsHash, StepCommit, StepIndex,

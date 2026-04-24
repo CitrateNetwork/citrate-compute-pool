@@ -3,6 +3,7 @@
 //! shapes where applicable.
 
 use ethereum_types::{Address, H256};
+use serde::{Deserialize, Serialize};
 
 /// 32-byte hash (keccak256). Re-export of ethereum_types::H256 so
 /// callers don't need a direct dep.
@@ -41,7 +42,7 @@ pub type CommitmentHash = B256;
 /// workers gossip to the coordinator (and to challengers via the
 /// libp2p mesh archive). The coordinator aggregates these into a
 /// Merkle tree; only the tree root hits the chain.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StepCommit {
     pub epoch: EpochIndex,
     pub step: StepIndex,
