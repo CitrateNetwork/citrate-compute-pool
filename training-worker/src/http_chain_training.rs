@@ -382,6 +382,54 @@ impl HttpChainClient {
             epoch_roots: std::collections::HashMap::new(),
         })
     }
+
+    /// Fetch the latest block number from the node. Used by the
+    /// event-loop to bound each poll's `to_block`.
+    pub async fn latest_block(&self) -> Result<u64, ChainError> {
+        let result = self.rpc("eth_blockNumber", serde_json::json!([])).await?;
+        let hex_str = result.as_str().ok_or_else(|| {
+            ChainError::WrongState("eth_blockNumber not a string".into())
+        })?;
+        parse_hex_u64(hex_str).map_err(|e| {
+            ChainError::WrongState(format!("blockNumber decode: {}", e))
+        })
+    }
+
+    /// Poll all ComputePoolTraining events in `[from_block, to_block]`
+    /// optionally filtered by indexed jobId. Returns raw logs the
+    /// caller classifies via `crate::events::classify`.
+    pub async fn poll_raw_logs(
+        &self,
+        from_block: u64,
+        to_block: u64,
+        job_id_filter: Option<u64>,
+    ) -> Result<Vec<crate::events::RawLog>, ChainError> {
+        let address_hex = format!("0x{}", hex::encode(self.contract_addr.as_bytes()));
+        let params = match job_id_filter {
+            Some(id) => serde_json::json!([{
+                "fromBlock": format!("0x{:x}", from_block),
+                "toBlock":   format!("0x{:x}", to_block),
+                "address":   address_hex,
+                "topics":    crate::events::job_id_topic_filter(id),
+            }]),
+            None => serde_json::json!([{
+                "fromBlock": format!("0x{:x}", from_block),
+                "toBlock":   format!("0x{:x}", to_block),
+                "address":   address_hex,
+            }]),
+        };
+        let result = self.rpc("eth_getLogs", params).await?;
+        let arr = result.as_array().ok_or_else(|| {
+            ChainError::WrongState("eth_getLogs not array".into())
+        })?;
+        let mut out = Vec::with_capacity(arr.len());
+        for entry in arr {
+            if let Some(log) = crate::events::decode_log_entry(entry) {
+                out.push(log);
+            }
+        }
+        Ok(out)
+    }
 }
 
 #[async_trait]

@@ -248,6 +248,54 @@ impl HttpPipelineChainClient {
         tracing::warn!(tx_hash = ?tx_hash, "receipt not found within timeout");
         Ok(None)
     }
+
+    /// Fetch the latest block number from the node for the event
+    /// poller's `to_block` bound.
+    pub async fn latest_block(&self) -> Result<u64, PipelineChainError> {
+        let result = self.rpc("eth_blockNumber", serde_json::json!([])).await?;
+        let hex_str = result.as_str().ok_or_else(|| {
+            PipelineChainError::WrongState("eth_blockNumber not a string".into())
+        })?;
+        u64::from_str_radix(hex_str.trim_start_matches("0x"), 16).map_err(|e| {
+            PipelineChainError::WrongState(format!("blockNumber decode: {}", e))
+        })
+    }
+
+    /// Poll all ComputePoolPipeline events in `[from_block,
+    /// to_block]` optionally filtered by indexed jobId. Returns
+    /// raw logs the caller classifies via `crate::events::classify`.
+    pub async fn poll_raw_logs(
+        &self,
+        from_block: u64,
+        to_block: u64,
+        job_id_filter: Option<u64>,
+    ) -> Result<Vec<crate::events::RawLog>, PipelineChainError> {
+        let address_hex = format!("0x{}", hex::encode(self.contract_addr.as_bytes()));
+        let params = match job_id_filter {
+            Some(id) => serde_json::json!([{
+                "fromBlock": format!("0x{:x}", from_block),
+                "toBlock":   format!("0x{:x}", to_block),
+                "address":   address_hex,
+                "topics":    crate::events::job_id_topic_filter(id),
+            }]),
+            None => serde_json::json!([{
+                "fromBlock": format!("0x{:x}", from_block),
+                "toBlock":   format!("0x{:x}", to_block),
+                "address":   address_hex,
+            }]),
+        };
+        let result = self.rpc("eth_getLogs", params).await?;
+        let arr = result.as_array().ok_or_else(|| {
+            PipelineChainError::WrongState("eth_getLogs not array".into())
+        })?;
+        let mut out = Vec::with_capacity(arr.len());
+        for entry in arr {
+            if let Some(log) = crate::events::decode_log_entry(entry) {
+                out.push(log);
+            }
+        }
+        Ok(out)
+    }
 }
 
 #[async_trait]

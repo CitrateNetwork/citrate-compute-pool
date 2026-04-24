@@ -48,6 +48,7 @@
 
 pub mod backend;
 pub mod chain;
+pub mod events;
 pub mod http_chain_pipeline;
 pub mod http_chain_training;
 pub mod merkle;
@@ -69,6 +70,7 @@ pub use types::{
 };
 pub use worker::{Worker, WorkerConfig, WorkerOutcome};
 
+pub use events::{classify, EventKind, RawLog};
 pub use http_chain_pipeline::HttpPipelineChainClient;
 pub use http_chain_training::HttpChainClient;
 pub use wallet::{tx_hash_of_signed, Eip1559Tx, Wallet, WalletError};
