@@ -60,12 +60,14 @@ pub mod chain;
 pub mod config;
 pub mod dispatcher;
 pub mod error;
+pub mod http_chain;
 pub mod provider;
 pub mod wallet;
 
 pub use chain::{ChainAdapter, ComputeRequestedEvent, EPOCH_LENGTH};
 pub use config::CoordinatorConfig;
 pub use error::CoordinatorError;
+pub use http_chain::HttpChainAdapter;
 pub use wallet::{tx_hash_of_signed, Eip1559Tx, Wallet, WalletError};
 
 use crate::dispatcher::{select_member, MemberId};
