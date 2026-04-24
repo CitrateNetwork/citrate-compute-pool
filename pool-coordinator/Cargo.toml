@@ -45,6 +45,10 @@ sha3 = { workspace = true }
 hex = "0.4"
 ethereum-types = "0.14"
 
+# CM-05 slice-2: wallet + tx signing for on-chain writes
+k256 = { version = "0.13", features = ["ecdsa"] }
+rlp = "0.5"
+
 # Observability
 tracing = { workspace = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
