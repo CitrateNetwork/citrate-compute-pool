@@ -35,7 +35,7 @@ use ethereum_types::{H160, H256, U256};
 use serde_json::{json, Value};
 use sha3::{Digest, Keccak256};
 
-use crate::chain::{ChainAdapter, PoolMemberInfo, RecordDispatchOutcome};
+use crate::chain::{ChainAdapter, ComputeRequestedEvent, PoolMemberInfo, RecordDispatchOutcome};
 use crate::error::CoordinatorError;
 use crate::wallet::{tx_hash_of_signed, Eip1559Tx, Wallet};
 
@@ -247,6 +247,107 @@ impl HttpChainAdapter {
         Ok((tx_hash, block_number))
     }
 
+    /// Poll ComputePool for `ComputeRequested` events mined in
+    /// `[from_block, to_block]`. Returns the decoded events in
+    /// log-order (oldest first). Used by the daemon's event loop
+    /// in main.rs.
+    ///
+    /// Event signature (indexed topics shown with ^):
+    /// ```text
+    /// ComputeRequested(
+    ///   ^uint256 poolId,
+    ///   ^uint256 jobId,
+    ///   ^address requester,
+    ///    uint256 payment
+    /// )
+    /// ```
+    ///
+    /// # Fields NOT decoded in this slice
+    ///
+    /// `prompt` and `max_tokens` require reading the job's stored
+    /// `PoolJobSpec` bytes from chain and decoding the struct. That
+    /// decode is non-trivial (mixed fixed + dynamic ABI) and lands
+    /// in a follow-up when a live deployment surfaces a concrete
+    /// test vector. For S0 the event carries empty prompt + the
+    /// default max_tokens (1000) so handle_event's PoolInferRequest
+    /// still composes; provider nodes must tolerate empty prompt
+    /// during S0 bring-up.
+    pub async fn poll_compute_requested(
+        &self,
+        from_block: u64,
+        to_block: u64,
+    ) -> Result<Vec<ComputeRequestedEvent>, CoordinatorError> {
+        let event_sig = selector_full("ComputeRequested(uint256,uint256,address,uint256)");
+        let event_sig_hex = format!("0x{}", hex::encode(event_sig));
+        let address_hex = format!("0x{}", hex::encode(self.pool_contract.as_bytes()));
+        let params = json!([{
+            "fromBlock": format!("0x{:x}", from_block),
+            "toBlock":   format!("0x{:x}", to_block),
+            "address":   address_hex,
+            "topics":    [event_sig_hex],
+        }]);
+        let result = self.rpc("eth_getLogs", params).await?;
+        let arr = result
+            .as_array()
+            .ok_or_else(|| CoordinatorError::Chain("eth_getLogs not array".into()))?;
+
+        let mut out = Vec::with_capacity(arr.len());
+        for entry in arr {
+            let topics = entry
+                .get("topics")
+                .and_then(|v| v.as_array())
+                .ok_or_else(|| CoordinatorError::Chain("log missing topics".into()))?;
+            if topics.len() < 4 {
+                return Err(CoordinatorError::Chain(format!(
+                    "log has {} topics, expected 4",
+                    topics.len()
+                )));
+            }
+            let pool_id = topic_as_u64(topics[1].as_str())?;
+            let job_id = topic_as_u64(topics[2].as_str())?;
+            let requester = topic_as_address(topics[3].as_str())?;
+
+            // Non-indexed data: a single uint256 payment.
+            let data_str = entry
+                .get("data")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| CoordinatorError::Chain("log missing data".into()))?;
+            let data_bytes = hex::decode(data_str.trim_start_matches("0x"))
+                .map_err(|e| CoordinatorError::Chain(format!("log data hex: {}", e)))?;
+            if data_bytes.len() < 32 {
+                return Err(CoordinatorError::Chain(format!(
+                    "log data too short: {}",
+                    data_bytes.len()
+                )));
+            }
+            let payment = U256::from_big_endian(&data_bytes[..32]);
+
+            out.push(ComputeRequestedEvent {
+                pool_id,
+                job_id,
+                requester,
+                payment_grains: payment,
+                // TODO(WP-05.3 follow-up): decode PoolJobSpec bytes
+                // from ComputePool.jobs(jobId) to populate these
+                // fields for real. See module docstring.
+                prompt: String::new(),
+                max_tokens: 1000,
+            });
+        }
+        Ok(out)
+    }
+
+    /// Fetch the latest block number from the node (for the event
+    /// loop's `to_block` bound on each poll).
+    pub async fn latest_block(&self) -> Result<u64, CoordinatorError> {
+        let result = self.rpc("eth_blockNumber", json!([])).await?;
+        let hex_str = result
+            .as_str()
+            .ok_or_else(|| CoordinatorError::Chain("eth_blockNumber not a string".into()))?;
+        parse_hex_u64(hex_str)
+            .map_err(|e| CoordinatorError::Chain(format!("blockNumber decode: {}", e)))
+    }
+
     /// Poll `eth_getTransactionReceipt` with exponential backoff
     /// until we see a non-null receipt, then extract its block
     /// number. Returns `Ok(None)` on timeout (the tx MAY still mine
@@ -395,6 +496,45 @@ fn selector(sig: &str) -> [u8; 4] {
     h.update(sig.as_bytes());
     let out = h.finalize();
     [out[0], out[1], out[2], out[3]]
+}
+
+/// Full 32-byte keccak — used for event topic hashes, where the
+/// whole digest (not just 4-byte selector) is the indexed topic.
+fn selector_full(sig: &str) -> [u8; 32] {
+    let mut h = Keccak256::new();
+    h.update(sig.as_bytes());
+    let out = h.finalize();
+    let mut buf = [0u8; 32];
+    buf.copy_from_slice(&out);
+    buf
+}
+
+fn topic_as_u64(topic: Option<&str>) -> Result<u64, CoordinatorError> {
+    let s = topic.ok_or_else(|| CoordinatorError::Chain("topic missing".into()))?;
+    let stripped = s.trim_start_matches("0x");
+    if stripped.len() != 64 {
+        return Err(CoordinatorError::Chain(format!(
+            "topic has {} hex chars, expected 64",
+            stripped.len()
+        )));
+    }
+    let bytes = hex::decode(stripped)
+        .map_err(|e| CoordinatorError::Chain(format!("topic hex: {}", e)))?;
+    Ok(U256::from_big_endian(&bytes).as_u64())
+}
+
+fn topic_as_address(topic: Option<&str>) -> Result<H160, CoordinatorError> {
+    let s = topic.ok_or_else(|| CoordinatorError::Chain("topic missing".into()))?;
+    let stripped = s.trim_start_matches("0x");
+    if stripped.len() != 64 {
+        return Err(CoordinatorError::Chain(format!(
+            "address topic has {} hex chars, expected 64",
+            stripped.len()
+        )));
+    }
+    let bytes = hex::decode(stripped)
+        .map_err(|e| CoordinatorError::Chain(format!("address topic hex: {}", e)))?;
+    Ok(H160::from_slice(&bytes[12..32]))
 }
 
 fn u256_word(v: U256) -> [u8; 32] {
@@ -901,5 +1041,100 @@ mod tests {
             wallet,
         );
         assert_eq!(adapter.self_address(), expected);
+    }
+
+    // ── Event polling (poll_compute_requested) ──────────────────
+
+    fn pad_u64_topic(value: u64) -> String {
+        let mut buf = [0u8; 32];
+        U256::from(value).to_big_endian(&mut buf);
+        format!("0x{}", hex::encode(buf))
+    }
+
+    fn pad_address_topic(addr: H160) -> String {
+        let mut buf = [0u8; 32];
+        buf[12..32].copy_from_slice(addr.as_bytes());
+        format!("0x{}", hex::encode(buf))
+    }
+
+    fn compute_requested_sig_hex() -> String {
+        let sig =
+            selector_full("ComputeRequested(uint256,uint256,address,uint256)");
+        format!("0x{}", hex::encode(sig))
+    }
+
+    #[tokio::test]
+    async fn poll_compute_requested_decodes_one_log() {
+        let state = StubState::new();
+        let requester = H160::repeat_byte(0xAB);
+        let payment = 123_000_000_000_000_000u64; // 0.123 ether
+
+        // Compose a ComputeRequested log: topics[0]=sig, topics[1..4]=
+        // indexed fields, data=payment.
+        let mut data_buf = [0u8; 32];
+        U256::from(payment).to_big_endian(&mut data_buf);
+        let log = json!({
+            "address": format!("0x{}", hex::encode(pool_contract().as_bytes())),
+            "topics": [
+                compute_requested_sig_hex(),
+                pad_u64_topic(7),    // poolId
+                pad_u64_topic(42),   // jobId
+                pad_address_topic(requester),
+            ],
+            "data": format!("0x{}", hex::encode(data_buf)),
+            "blockNumber": "0x10",
+        });
+        state.queue("eth_getLogs", json!([log]));
+
+        let addr = spawn_stub_rpc(state).await;
+        let adapter = make_adapter(format!("http://{}", addr));
+        let events = adapter
+            .poll_compute_requested(0, 100)
+            .await
+            .expect("poll events");
+
+        assert_eq!(events.len(), 1);
+        let ev = &events[0];
+        assert_eq!(ev.pool_id, 7);
+        assert_eq!(ev.job_id, 42);
+        assert_eq!(ev.requester, requester);
+        assert_eq!(ev.payment_grains, U256::from(payment));
+        // Stub fields until PoolJobSpec decode lands.
+        assert_eq!(ev.prompt, "");
+        assert_eq!(ev.max_tokens, 1000);
+    }
+
+    #[tokio::test]
+    async fn poll_compute_requested_rejects_short_topics() {
+        let state = StubState::new();
+        // Only 2 topics instead of 4 — must reject.
+        let log = json!({
+            "address": format!("0x{}", hex::encode(pool_contract().as_bytes())),
+            "topics": [
+                compute_requested_sig_hex(),
+                pad_u64_topic(1),
+            ],
+            "data": "0x",
+            "blockNumber": "0x1",
+        });
+        state.queue("eth_getLogs", json!([log]));
+
+        let addr = spawn_stub_rpc(state).await;
+        let adapter = make_adapter(format!("http://{}", addr));
+        let err = adapter
+            .poll_compute_requested(0, 10)
+            .await
+            .expect_err("must reject short topics");
+        assert!(matches!(err, CoordinatorError::Chain(_)));
+    }
+
+    #[tokio::test]
+    async fn latest_block_returns_u64() {
+        let state = StubState::new();
+        state.queue("eth_blockNumber", json!("0x2a")); // 42
+        let addr = spawn_stub_rpc(state).await;
+        let adapter = make_adapter(format!("http://{}", addr));
+        let latest = adapter.latest_block().await.expect("latest");
+        assert_eq!(latest, 42);
     }
 }
