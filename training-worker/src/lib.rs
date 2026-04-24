@@ -46,6 +46,7 @@
 //! | `Transport` | `InProcessTransport` | `LibP2pTransport` (S1) |
 //! | `ChainClient` | `MockChainClient` | `HttpChainClient` (S1) |
 
+pub mod attestation;
 pub mod backend;
 pub mod chain;
 pub mod events;
@@ -72,6 +73,11 @@ pub use types::{
 };
 pub use worker::{Worker, WorkerConfig, WorkerOutcome};
 
+pub use attestation::{
+    build_submit_strict_call, encode_submit_strict_calldata, parse_jwt, reattest_at,
+    validate_registry_address, AttestationBundle, AttestationError, FixtureAttestationSource,
+    ParsedJwt,
+};
 pub use events::{classify, EventKind, RawLog};
 pub use http_chain_pipeline::HttpPipelineChainClient;
 pub use http_chain_training::HttpChainClient;
