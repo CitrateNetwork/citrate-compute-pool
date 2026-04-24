@@ -20,8 +20,41 @@
 use ethereum_types::{H160, H256, U256};
 use k256::ecdsa::{signature::hazmat::PrehashSigner, RecoveryId, Signature, SigningKey};
 use rlp::RlpStream;
+use serde::Deserialize;
 use sha3::{Digest, Keccak256};
 use thiserror::Error;
+
+// ── Web3 SSv3 keystore JSON shape ───────────────────────────────
+
+#[derive(Debug, Deserialize)]
+struct KeystoreFile {
+    version: u32,
+    address: Option<String>,
+    crypto: KeystoreCrypto,
+}
+
+#[derive(Debug, Deserialize)]
+struct KeystoreCrypto {
+    cipher: String,
+    cipherparams: KeystoreCipherParams,
+    ciphertext: String,
+    kdf: String,
+    kdfparams: KeystoreKdfParams,
+    mac: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct KeystoreCipherParams {
+    iv: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct KeystoreKdfParams {
+    prf: String,
+    c: u32,
+    salt: String,
+    dklen: u32,
+}
 
 use crate::error::CoordinatorError;
 
@@ -35,8 +68,26 @@ pub enum WalletError {
     BadSecret,
     #[error("operator-declared address does not match derived key ({declared:?} vs {derived:?})")]
     AddressMismatch { declared: H160, derived: H160 },
-    #[error("CITRATE_POOL_PRIVATE_KEY_HEX not set")]
+    #[error("no key source configured (set CITRATE_POOL_PRIVATE_KEY_HEX or CITRATE_POOL_KEYSTORE_PATH+CITRATE_POOL_KEYSTORE_PASSPHRASE)")]
     NoKeySource,
+    #[error("CITRATE_POOL_KEYSTORE_PASSPHRASE required when CITRATE_POOL_KEYSTORE_PATH is set")]
+    MissingPassphrase,
+    #[error("keystore I/O: {0}")]
+    KeystoreIo(String),
+    #[error("keystore parse: {0}")]
+    KeystoreParse(String),
+    #[error("unsupported keystore version: {0} (only v3 is supported)")]
+    UnsupportedKeystoreVersion(u32),
+    #[error("unsupported cipher: {0} (only aes-128-ctr is supported)")]
+    UnsupportedCipher(String),
+    #[error("unsupported kdf: {0} (only pbkdf2 is supported)")]
+    UnsupportedKdf(String),
+    #[error("unsupported kdf prf: {0} (only hmac-sha256 is supported)")]
+    UnsupportedKdfPrf(String),
+    #[error("unsupported kdf dklen: {0} (only 32 is supported)")]
+    UnsupportedKdfDklen(u32),
+    #[error("invalid passphrase")]
+    InvalidPassphrase,
 }
 
 /// A loaded signing wallet. Cheap to clone (SigningKey is ~32 bytes).
@@ -57,13 +108,118 @@ impl std::fmt::Debug for Wallet {
 }
 
 impl Wallet {
-    /// Load from the `CITRATE_POOL_PRIVATE_KEY_HEX` env var. Returns
-    /// `Err(WalletError::NoKeySource)` if the env var is absent;
-    /// other errors describe malformed hex or crypto.
+    /// Load from env. Prefers the keystore path
+    /// (`CITRATE_POOL_KEYSTORE_PATH` +
+    /// `CITRATE_POOL_KEYSTORE_PASSPHRASE`); falls back to raw hex
+    /// (`CITRATE_POOL_PRIVATE_KEY_HEX`). The raw-hex path is
+    /// testnet-only per pilot playbook §5.3.
+    ///
+    /// Returns `Err(WalletError::NoKeySource)` if neither variable
+    /// set is present.
     pub fn from_env() -> Result<Self, WalletError> {
-        let hex_key = std::env::var("CITRATE_POOL_PRIVATE_KEY_HEX")
-            .map_err(|_| WalletError::NoKeySource)?;
-        Self::from_hex(&hex_key)
+        if let Ok(path) = std::env::var("CITRATE_POOL_KEYSTORE_PATH") {
+            let passphrase = std::env::var("CITRATE_POOL_KEYSTORE_PASSPHRASE")
+                .map_err(|_| WalletError::MissingPassphrase)?;
+            return Self::from_keystore(&path, &passphrase);
+        }
+        if let Ok(hex_key) = std::env::var("CITRATE_POOL_PRIVATE_KEY_HEX") {
+            return Self::from_hex(&hex_key);
+        }
+        Err(WalletError::NoKeySource)
+    }
+
+    /// Load from a Web3 Secret Storage v3 keystore file. Matches the
+    /// JS SDK's W-01 keystore format byte-for-byte:
+    ///   - PBKDF2-HMAC-SHA256 key derivation (32 bytes output)
+    ///   - AES-128-CTR decryption (key = dkey[0..16], iv per keystore)
+    ///   - Keccak-256 MAC over (dkey[16..32] || ciphertext)
+    ///
+    /// Keystores are portable: a key created in the JS CitrateWallet
+    /// can be unlocked here and vice versa (per ADR-009 / the W-01
+    /// "format over protocol" essay).
+    pub fn from_keystore(path: &str, passphrase: &str) -> Result<Self, WalletError> {
+        let raw = std::fs::read_to_string(path)
+            .map_err(|e| WalletError::KeystoreIo(format!("read {}: {}", path, e)))?;
+        let file: KeystoreFile = serde_json::from_str(&raw)
+            .map_err(|e| WalletError::KeystoreParse(e.to_string()))?;
+        if file.version != 3 {
+            return Err(WalletError::UnsupportedKeystoreVersion(file.version));
+        }
+
+        let crypto = &file.crypto;
+        if crypto.cipher != "aes-128-ctr" {
+            return Err(WalletError::UnsupportedCipher(crypto.cipher.clone()));
+        }
+        if crypto.kdf != "pbkdf2" {
+            return Err(WalletError::UnsupportedKdf(crypto.kdf.clone()));
+        }
+        if crypto.kdfparams.prf != "hmac-sha256" {
+            return Err(WalletError::UnsupportedKdfPrf(crypto.kdfparams.prf.clone()));
+        }
+        if crypto.kdfparams.dklen != 32 {
+            return Err(WalletError::UnsupportedKdfDklen(crypto.kdfparams.dklen));
+        }
+
+        let salt = hex::decode(&crypto.kdfparams.salt)
+            .map_err(|e| WalletError::KeystoreParse(format!("salt hex: {}", e)))?;
+        let iv = hex::decode(&crypto.cipherparams.iv)
+            .map_err(|e| WalletError::KeystoreParse(format!("iv hex: {}", e)))?;
+        let ciphertext = hex::decode(&crypto.ciphertext)
+            .map_err(|e| WalletError::KeystoreParse(format!("ciphertext hex: {}", e)))?;
+        let mac_expected = hex::decode(&crypto.mac)
+            .map_err(|e| WalletError::KeystoreParse(format!("mac hex: {}", e)))?;
+
+        if iv.len() != 16 {
+            return Err(WalletError::KeystoreParse(format!(
+                "iv must be 16 bytes, got {}",
+                iv.len()
+            )));
+        }
+
+        // 1. Derive 32-byte key via PBKDF2-HMAC-SHA256.
+        let mut derived = [0u8; 32];
+        pbkdf2::pbkdf2_hmac::<sha2::Sha256>(
+            passphrase.as_bytes(),
+            &salt,
+            crypto.kdfparams.c,
+            &mut derived,
+        );
+
+        // 2. MAC check (keccak256 of dkey[16..32] || ciphertext).
+        let mut hasher = Keccak256::new();
+        hasher.update(&derived[16..32]);
+        hasher.update(&ciphertext);
+        let mac_actual = hasher.finalize();
+        if mac_actual.as_slice() != mac_expected.as_slice() {
+            return Err(WalletError::InvalidPassphrase);
+        }
+
+        // 3. AES-128-CTR decrypt. Key = dkey[0..16].
+        use aes::cipher::{KeyIvInit, StreamCipher};
+        type Aes128Ctr = ctr::Ctr128BE<aes::Aes128>;
+        let mut plaintext = ciphertext.clone();
+        let mut cipher = Aes128Ctr::new((&derived[0..16]).into(), iv.as_slice().into());
+        cipher.apply_keystream(&mut plaintext);
+
+        if plaintext.len() != 32 {
+            return Err(WalletError::KeystoreParse(format!(
+                "decrypted key is {} bytes, expected 32",
+                plaintext.len()
+            )));
+        }
+
+        // 4. Construct wallet + verify keystore-declared address.
+        let hex_key = hex::encode(&plaintext);
+        let wallet = Self::from_hex(&hex_key)?;
+        if let Some(declared) = file.address.as_deref() {
+            let cleaned = declared.trim().trim_start_matches("0x");
+            let declared_addr = H160::from_slice(
+                &hex::decode(cleaned)
+                    .map_err(|e| WalletError::KeystoreParse(format!("addr hex: {}", e)))?,
+            );
+            wallet.verify_address(declared_addr)?;
+        }
+        Ok(wallet)
     }
 
     /// Build from a hex-encoded private key.
@@ -301,6 +457,133 @@ mod tests {
         let signed = w.sign_eip1559(&tx).expect("sign");
         assert_eq!(signed[0], 0x02, "EIP-1559 type prefix");
         assert!(signed.len() > 64);
+    }
+
+    // ── Keystore (Web3 SSv3) tests ──────────────────────────────
+
+    /// Build a keystore JSON payload encrypting TEST_HEX under the
+    /// given passphrase. Mirrors the SDK's W-01 encryption pipeline
+    /// so test fixtures are valid at both ends.
+    fn build_keystore_json(passphrase: &str) -> String {
+        use aes::cipher::{KeyIvInit, StreamCipher};
+        type Aes128Ctr = ctr::Ctr128BE<aes::Aes128>;
+
+        // Deterministic salt + iv (fixed values for test repeatability).
+        let salt = [0x11u8; 32];
+        let iv = [0x22u8; 16];
+        let c = 1024u32; // low for tests
+
+        // Derive key.
+        let mut derived = [0u8; 32];
+        pbkdf2::pbkdf2_hmac::<sha2::Sha256>(
+            passphrase.as_bytes(),
+            &salt,
+            c,
+            &mut derived,
+        );
+
+        // Encrypt plaintext private key.
+        let plaintext = hex::decode(TEST_HEX).expect("decode plaintext");
+        let mut ciphertext = plaintext.clone();
+        let mut cipher = Aes128Ctr::new((&derived[0..16]).into(), (&iv).into());
+        cipher.apply_keystream(&mut ciphertext);
+
+        // MAC = keccak256(dkey[16..32] || ciphertext)
+        let mut hasher = Keccak256::new();
+        hasher.update(&derived[16..32]);
+        hasher.update(&ciphertext);
+        let mac = hasher.finalize();
+
+        serde_json::json!({
+            "version": 3,
+            "address": "7e5f4552091a69125d5dfcb7b8c2659029395bdf",
+            "crypto": {
+                "cipher": "aes-128-ctr",
+                "cipherparams": { "iv": hex::encode(iv) },
+                "ciphertext": hex::encode(&ciphertext),
+                "kdf": "pbkdf2",
+                "kdfparams": {
+                    "prf": "hmac-sha256",
+                    "c": c,
+                    "salt": hex::encode(salt),
+                    "dklen": 32,
+                },
+                "mac": hex::encode(mac),
+            },
+        })
+        .to_string()
+    }
+
+    fn write_keystore(passphrase: &str) -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static COUNTER: AtomicU32 = AtomicU32::new(0);
+        let json = build_keystore_json(passphrase);
+        let mut path = std::env::temp_dir();
+        let pid = std::process::id();
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        path.push(format!("citrate-pool-keystore-{}-{}.json", pid, n));
+        std::fs::write(&path, json).expect("write keystore");
+        path
+    }
+
+    #[test]
+    fn loads_from_keystore_with_correct_passphrase() {
+        let path = write_keystore("hunter2");
+        let w = Wallet::from_keystore(path.to_str().unwrap(), "hunter2")
+            .expect("unlock");
+        assert_eq!(
+            w.address(),
+            "0x7e5f4552091a69125d5dfcb7b8c2659029395bdf"
+                .parse::<H160>()
+                .unwrap()
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn rejects_wrong_passphrase() {
+        let path = write_keystore("correct");
+        let err = Wallet::from_keystore(path.to_str().unwrap(), "wrong")
+            .expect_err("must reject wrong passphrase");
+        assert!(matches!(err, WalletError::InvalidPassphrase));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn rejects_missing_keystore_file() {
+        let err = Wallet::from_keystore("/nonexistent/path.json", "x")
+            .expect_err("must reject missing file");
+        assert!(matches!(err, WalletError::KeystoreIo(_)));
+    }
+
+    #[test]
+    fn rejects_unsupported_version() {
+        let tmp = std::env::temp_dir().join("bad-version.json");
+        std::fs::write(
+            &tmp,
+            serde_json::json!({
+                "version": 2,
+                "crypto": {
+                    "cipher": "aes-128-ctr",
+                    "cipherparams": { "iv": "00".repeat(16) },
+                    "ciphertext": "",
+                    "kdf": "pbkdf2",
+                    "kdfparams": {
+                        "prf": "hmac-sha256",
+                        "c": 1024,
+                        "salt": "00".repeat(32),
+                        "dklen": 32,
+                    },
+                    "mac": "00".repeat(32),
+                }
+            })
+            .to_string(),
+        )
+        .expect("write bad fixture");
+        let err = Wallet::from_keystore(tmp.to_str().unwrap(), "x")
+            .expect_err("must reject v2");
+        assert!(matches!(err, WalletError::UnsupportedKeystoreVersion(2)));
+        let _ = std::fs::remove_file(tmp);
     }
 
     #[test]

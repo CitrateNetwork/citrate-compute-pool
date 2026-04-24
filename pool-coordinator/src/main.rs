@@ -9,8 +9,15 @@
 //!
 //! # Required env vars
 //!
-//! - `CITRATE_POOL_PRIVATE_KEY_HEX` — signer key (64 hex chars;
-//!   testnet only, rotate before production per pilot playbook §5.3)
+//! One of the two wallet sources (keystore is preferred for
+//! production):
+//!
+//! - `CITRATE_POOL_KEYSTORE_PATH` + `CITRATE_POOL_KEYSTORE_PASSPHRASE`
+//!   — Web3 SSv3 keystore file + unlock passphrase (production)
+//! - `CITRATE_POOL_PRIVATE_KEY_HEX` — raw 64-char hex secp256k1 key
+//!   (testnet only; rotate before production per pilot playbook §5.3)
+//!
+//! Plus:
 //! - `CITRATE_POOL_WALLET_ADDRESS` — operator-declared address;
 //!   MUST match derived address from the key
 //! - `CITRATE_POOL_CONTRACT` — `ComputePool` deployment address
@@ -54,7 +61,10 @@ async fn main() -> ExitCode {
         Ok(w) => w,
         Err(e) => {
             eprintln!("wallet load failed: {}", e);
-            eprintln!("set CITRATE_POOL_PRIVATE_KEY_HEX (64 hex chars)");
+            eprintln!();
+            eprintln!("Set one of:");
+            eprintln!("  CITRATE_POOL_KEYSTORE_PATH + CITRATE_POOL_KEYSTORE_PASSPHRASE  (production)");
+            eprintln!("  CITRATE_POOL_PRIVATE_KEY_HEX                                   (testnet only)");
             return ExitCode::from(2);
         }
     };
@@ -215,7 +225,11 @@ fn print_config_help(err: &str) {
     eprintln!("config error: {}", err);
     eprintln!();
     eprintln!("Required env vars:");
-    eprintln!("  CITRATE_POOL_PRIVATE_KEY_HEX  64 hex chars (secp256k1 key)");
+    eprintln!("  Wallet (one of):");
+    eprintln!("    CITRATE_POOL_KEYSTORE_PATH        Web3 SSv3 keystore file");
+    eprintln!("    CITRATE_POOL_KEYSTORE_PASSPHRASE  passphrase for the keystore");
+    eprintln!("   OR");
+    eprintln!("    CITRATE_POOL_PRIVATE_KEY_HEX      64 hex chars (testnet only)");
     eprintln!("  CITRATE_POOL_WALLET_ADDRESS   0x + 40 hex (must match derived)");
     eprintln!("  CITRATE_POOL_CONTRACT         0x + 40 hex (ComputePool deploy)");
     eprintln!();
