@@ -76,6 +76,7 @@ struct Selectors {
     coordinator_for: [u8; 4],
     get_pool_members: [u8; 4],
     get_member: [u8; 4],
+    get_job: [u8; 4],
     record_dispatch: [u8; 4],
     complete_job: [u8; 4],
     fail_job: [u8; 4],
@@ -87,12 +88,17 @@ impl Selectors {
             coordinator_for: selector("coordinatorFor(uint256,uint256)"),
             get_pool_members: selector("getPoolMembers(uint256)"),
             get_member: selector("getMember(uint256,address)"),
+            get_job: selector("getJob(uint256)"),
             record_dispatch: selector("recordDispatch(uint256)"),
             complete_job: selector("completeJob(uint256)"),
             fail_job: selector("failJob(uint256)"),
         }
     }
 }
+
+/// Default `max_tokens` when PoolJobSpec decode fails or returns
+/// a zero value. Keeps provider calls from becoming no-ops.
+const DEFAULT_MAX_TOKENS: u32 = 1000;
 
 /// HTTP-backed [`ChainAdapter`] against a live Citrate JSON-RPC
 /// endpoint.
@@ -322,19 +328,110 @@ impl HttpChainAdapter {
             }
             let payment = U256::from_big_endian(&data_bytes[..32]);
 
+            // Fetch PoolJobSpec from chain to populate prompt +
+            // max_tokens. One extra eth_call per event; the happy
+            // path is under tens of events per poll window, so this
+            // is cheap. Failures fall back to empty prompt + default
+            // max_tokens — a log, not a fatal error.
+            let (prompt, max_tokens) = match self.fetch_job_spec(job_id).await {
+                Ok(pair) => pair,
+                Err(e) => {
+                    tracing::warn!(
+                        job_id = job_id,
+                        error = %e,
+                        "fetch_job_spec failed; dispatching with defaults"
+                    );
+                    (String::new(), DEFAULT_MAX_TOKENS)
+                }
+            };
+
             out.push(ComputeRequestedEvent {
                 pool_id,
                 job_id,
                 requester,
                 payment_grains: payment,
-                // TODO(WP-05.3 follow-up): decode PoolJobSpec bytes
-                // from ComputePool.jobs(jobId) to populate these
-                // fields for real. See module docstring.
-                prompt: String::new(),
-                max_tokens: 1000,
+                prompt,
+                max_tokens,
             });
         }
         Ok(out)
+    }
+
+    /// Fetch a job's `PoolJobSpec` from chain storage and return the
+    /// fields `handle_event` needs for the HTTPS dispatch body:
+    /// `(prompt, max_tokens)`.
+    ///
+    /// Data source (Rule 11):
+    ///   `ComputePool.getJob(uint256)` → PoolJob tuple; the 3rd
+    ///   field is `bytes jobSpec`. That bytes payload is itself an
+    ///   `abi.encode(PoolJobSpec)` — we parse both levels inline.
+    ///
+    /// Returns defaults (empty prompt, DEFAULT_MAX_TOKENS) if the
+    /// job has no jobSpec bytes stored (legacy callers using the
+    /// opaque `requestPoolCompute(bytes)` path may not populate it).
+    pub async fn fetch_job_spec(
+        &self,
+        job_id: u64,
+    ) -> Result<(String, u32), CoordinatorError> {
+        // Step 1: getJob(jobId) → PoolJob memory.
+        let mut data = Vec::with_capacity(4 + 32);
+        data.extend_from_slice(&self.selectors.get_job);
+        data.extend_from_slice(&u256_word(U256::from(job_id)));
+        let ret = self.eth_call(&data).await?;
+
+        // Step 2: PoolJob has 8 fields — head is 8 × 32 = 256 bytes.
+        // Layout:
+        //   [  0..  32] poolId (uint256)
+        //   [ 32..  64] requester (address, padded)
+        //   [ 64..  96] offset to jobSpec bytes (dynamic)
+        //   [ 96.. 128] payment (uint256)
+        //   [128.. 160] status (uint8, padded)
+        //   [160.. 192] createdAt (uint256)
+        //   [192.. 224] dispatchBlock (uint256)
+        //   [224.. 256] dispatchedBy (address, padded)
+        if ret.len() < 256 {
+            return Err(CoordinatorError::Chain(format!(
+                "PoolJob return too short: {} bytes",
+                ret.len()
+            )));
+        }
+        let jobspec_bytes = decode_dynamic_bytes_at_offset(&ret, 64)?;
+
+        // Legacy jobs may omit PoolJobSpec — return defaults rather
+        // than refuse to dispatch.
+        if jobspec_bytes.is_empty() {
+            return Ok((String::new(), DEFAULT_MAX_TOKENS));
+        }
+
+        // Step 3: PoolJobSpec has 7 fields — head is 7 × 32 = 224 bytes.
+        // Layout:
+        //   [  0..  32] version (uint8, padded)
+        //   [ 32..  64] mode (uint8, padded)
+        //   [ 64..  96] modelHash (bytes32)
+        //   [ 96.. 128] offset to inputData bytes (dynamic)
+        //   [128.. 160] maxTokens (uint32, padded)
+        //   [160.. 192] verificationTier (uint8, padded)
+        //   [192.. 224] batchSize (uint32, padded)
+        if jobspec_bytes.len() < 224 {
+            return Err(CoordinatorError::Chain(format!(
+                "PoolJobSpec too short: {} bytes",
+                jobspec_bytes.len()
+            )));
+        }
+        let max_tokens_u256 = U256::from_big_endian(&jobspec_bytes[128..160]);
+        let max_tokens = if max_tokens_u256 > U256::from(u32::MAX) {
+            u32::MAX
+        } else {
+            let v = max_tokens_u256.as_u32();
+            if v == 0 { DEFAULT_MAX_TOKENS } else { v }
+        };
+        let input_bytes = decode_dynamic_bytes_at_offset(&jobspec_bytes, 96)?;
+
+        // Convert to UTF-8 with lossy replacement — chains may store
+        // binary content (e.g. an IPFS CID encoded as bytes); lossy
+        // keeps handle_event from failing on otherwise-valid jobs.
+        let prompt = String::from_utf8_lossy(&input_bytes).to_string();
+        Ok((prompt, max_tokens))
     }
 
     /// Fetch the latest block number from the node (for the event
@@ -602,6 +699,43 @@ fn decode_member_struct(bytes: &[u8]) -> Result<(u32, bool), CoordinatorError> {
     // bool sits in the last byte of its 32-byte word.
     let active = bytes[159] != 0;
     Ok((gpu_count, active))
+}
+
+/// Decode an ABI-encoded `bytes` field at the given offset-word
+/// position. `buf` is the full return payload; `offset_word_pos` is
+/// the byte position of the 32-byte word containing the offset.
+/// Used for nested dynamic `bytes` fields inside struct-returning
+/// getters.
+fn decode_dynamic_bytes_at_offset(
+    buf: &[u8],
+    offset_word_pos: usize,
+) -> Result<Vec<u8>, CoordinatorError> {
+    if buf.len() < offset_word_pos + 32 {
+        return Err(CoordinatorError::Chain(format!(
+            "offset word at {} out of range (buf={})",
+            offset_word_pos,
+            buf.len()
+        )));
+    }
+    let offset =
+        U256::from_big_endian(&buf[offset_word_pos..offset_word_pos + 32]).as_usize();
+    if buf.len() < offset + 32 {
+        return Err(CoordinatorError::Chain(format!(
+            "dynamic bytes length word at {} out of range (buf={})",
+            offset,
+            buf.len()
+        )));
+    }
+    let len = U256::from_big_endian(&buf[offset..offset + 32]).as_usize();
+    let data_start = offset + 32;
+    if buf.len() < data_start + len {
+        return Err(CoordinatorError::Chain(format!(
+            "dynamic bytes data truncated: len={} buf={}",
+            len,
+            buf.len()
+        )));
+    }
+    Ok(buf[data_start..data_start + len].to_vec())
 }
 
 fn parse_hex_u64(s: &str) -> Result<u64, String> {
@@ -1125,6 +1259,133 @@ mod tests {
             .poll_compute_requested(0, 10)
             .await
             .expect_err("must reject short topics");
+        assert!(matches!(err, CoordinatorError::Chain(_)));
+    }
+
+    // ── fetch_job_spec (PoolJobSpec decoding) ───────────────────
+
+    /// Build an ABI-encoded PoolJobSpec bytes payload given
+    /// (version, mode, modelHash, inputData, maxTokens,
+    /// verificationTier, batchSize).
+    fn encode_poolJobSpec_bytes(
+        version: u8,
+        mode: u8,
+        model_hash: [u8; 32],
+        input_data: &[u8],
+        max_tokens: u32,
+        verification_tier: u8,
+        batch_size: u32,
+    ) -> Vec<u8> {
+        // Head: 7 × 32 bytes = 224.
+        let input_offset_word = 224u64; // head_size; dynamic tail starts here
+        let mut out = Vec::new();
+        // word 0: version
+        let mut w = [0u8; 32];
+        w[31] = version;
+        out.extend_from_slice(&w);
+        // word 1: mode
+        let mut w = [0u8; 32];
+        w[31] = mode;
+        out.extend_from_slice(&w);
+        // word 2: modelHash (already 32 bytes)
+        out.extend_from_slice(&model_hash);
+        // word 3: offset to inputData
+        let mut w = [0u8; 32];
+        U256::from(input_offset_word).to_big_endian(&mut w);
+        out.extend_from_slice(&w);
+        // word 4: maxTokens
+        let mut w = [0u8; 32];
+        U256::from(max_tokens).to_big_endian(&mut w);
+        out.extend_from_slice(&w);
+        // word 5: verificationTier
+        let mut w = [0u8; 32];
+        w[31] = verification_tier;
+        out.extend_from_slice(&w);
+        // word 6: batchSize
+        let mut w = [0u8; 32];
+        U256::from(batch_size).to_big_endian(&mut w);
+        out.extend_from_slice(&w);
+        // Tail: length-prefix + data + zero-pad to 32
+        let mut len_word = [0u8; 32];
+        U256::from(input_data.len() as u64).to_big_endian(&mut len_word);
+        out.extend_from_slice(&len_word);
+        out.extend_from_slice(input_data);
+        let pad = (32 - (input_data.len() % 32)) % 32;
+        out.extend_from_slice(&vec![0u8; pad]);
+        out
+    }
+
+    /// Build an ABI-encoded PoolJob return given the fields we
+    /// care about (jobspec_bytes payload; other fields are zeros).
+    fn encode_poolJob_return(jobspec_bytes: &[u8]) -> String {
+        // Head: 8 × 32 = 256 bytes. jobSpec offset points PAST the
+        // head.
+        let jobspec_offset_word = 256u64;
+        let mut out = Vec::new();
+        // words 0, 1: poolId, requester — zeros
+        out.extend_from_slice(&[0u8; 32]);
+        out.extend_from_slice(&[0u8; 32]);
+        // word 2: jobSpec offset
+        let mut w = [0u8; 32];
+        U256::from(jobspec_offset_word).to_big_endian(&mut w);
+        out.extend_from_slice(&w);
+        // words 3..=7: payment, status, createdAt, dispatchBlock, dispatchedBy — zeros
+        out.extend_from_slice(&[0u8; 32 * 5]);
+        // Tail: length prefix + data + pad
+        let mut len_word = [0u8; 32];
+        U256::from(jobspec_bytes.len() as u64).to_big_endian(&mut len_word);
+        out.extend_from_slice(&len_word);
+        out.extend_from_slice(jobspec_bytes);
+        let pad = (32 - (jobspec_bytes.len() % 32)) % 32;
+        out.extend_from_slice(&vec![0u8; pad]);
+        format!("0x{}", hex::encode(out))
+    }
+
+    #[tokio::test]
+    async fn fetch_job_spec_decodes_prompt_and_max_tokens() {
+        let state = StubState::new();
+        let prompt_bytes = b"Explain pipeline parallelism.";
+        let inner = encode_poolJobSpec_bytes(
+            1,                      // version
+            0,                      // mode = InferencePool
+            [0xAB; 32],             // modelHash
+            prompt_bytes,           // inputData
+            256,                    // maxTokens
+            0,                      // verificationTier
+            1,                      // batchSize
+        );
+        state.queue("eth_call", json!(encode_poolJob_return(&inner)));
+
+        let addr = spawn_stub_rpc(state).await;
+        let adapter = make_adapter(format!("http://{}", addr));
+        let (prompt, max_tokens) =
+            adapter.fetch_job_spec(42).await.expect("fetch");
+        assert_eq!(prompt, "Explain pipeline parallelism.");
+        assert_eq!(max_tokens, 256);
+    }
+
+    #[tokio::test]
+    async fn fetch_job_spec_returns_defaults_on_empty_jobspec() {
+        let state = StubState::new();
+        // PoolJob with zero-length jobSpec bytes — defaults expected.
+        state.queue("eth_call", json!(encode_poolJob_return(&[])));
+
+        let addr = spawn_stub_rpc(state).await;
+        let adapter = make_adapter(format!("http://{}", addr));
+        let (prompt, max_tokens) =
+            adapter.fetch_job_spec(1).await.expect("fetch");
+        assert_eq!(prompt, "");
+        assert_eq!(max_tokens, DEFAULT_MAX_TOKENS);
+    }
+
+    #[tokio::test]
+    async fn fetch_job_spec_rejects_short_return() {
+        let state = StubState::new();
+        // Return is too short to hold even the 8-word head.
+        state.queue("eth_call", json!("0x1234"));
+        let addr = spawn_stub_rpc(state).await;
+        let adapter = make_adapter(format!("http://{}", addr));
+        let err = adapter.fetch_job_spec(1).await.expect_err("reject");
         assert!(matches!(err, CoordinatorError::Chain(_)));
     }
 
