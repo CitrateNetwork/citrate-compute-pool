@@ -45,7 +45,8 @@ use tokio::sync::Mutex;
 use tracing_subscriber::{fmt, EnvFilter};
 
 use citrate_pool_coordinator::{
-    handle_event, log_identity, CoordinatorConfig, CoordinatorError, HttpChainAdapter, Wallet,
+    handle_event, log_identity, metrics, CoordinatorConfig, CoordinatorError, HttpChainAdapter,
+    Wallet,
 };
 
 /// Maximum number of (tx_hash, log_index) entries the dedup set
@@ -107,6 +108,13 @@ async fn main() -> ExitCode {
         "daemon configured"
     );
 
+    // Spawn the Prometheus metrics server if configured.
+    if let Ok(bind) = env::var("CITRATE_POOL_METRICS_ADDR") {
+        if let Err(e) = metrics::spawn_metrics_server(&bind).await {
+            tracing::warn!(bind = %bind, error = %e, "metrics server failed to start");
+        }
+    }
+
     // Determine starting block. Default: current tip (skip history).
     let mut last_block = match starting_block(&adapter).await {
         Ok(b) => b,
@@ -157,8 +165,15 @@ async fn main() -> ExitCode {
         match tick(&adapter, &cfg, last_block, confirmations_buffer, &seen).await {
             Ok(new_last) => last_block = new_last,
             Err(e) => {
+                ::metrics::counter!("pool_coord_poll_failures_total").increment(1);
                 tracing::warn!(error = %e, "poll tick failed; retrying after interval");
             }
+        }
+        // Update gauge after each tick.
+        {
+            let set = seen.lock().await;
+            ::metrics::gauge!("pool_coord_seen_events_cardinality")
+                .set(set.len() as f64);
         }
         tokio::time::sleep(poll_interval).await;
     }
@@ -198,6 +213,7 @@ async fn tick(
     }
 
     for event in events {
+        ::metrics::counter!("pool_coord_events_observed_total").increment(1);
         // Dedup: skip if we've already dispatched this (tx_hash, log_index).
         {
             let mut set = seen.lock().await;
@@ -210,26 +226,43 @@ async fn tick(
         let adapter_clone = adapter.clone();
         tokio::spawn(async move {
             match handle_event(&adapter_clone, &cfg_clone, &event).await {
-                Ok(_) => tracing::info!(
-                    pool = event.pool_id,
-                    job = event.job_id,
-                    "event handled"
-                ),
+                Ok(_) => {
+                    ::metrics::counter!(
+                        "pool_coord_events_dispatched_total",
+                        "outcome" => "success"
+                    )
+                    .increment(1);
+                    tracing::info!(
+                        pool = event.pool_id,
+                        job = event.job_id,
+                        "event handled"
+                    );
+                }
                 Err(CoordinatorError::NotCoordinator) => {
-                    // Expected for events where another peer is the
-                    // coordinator. Noise-suppressed at info level.
+                    ::metrics::counter!(
+                        "pool_coord_events_dispatched_total",
+                        "outcome" => "not_coord"
+                    )
+                    .increment(1);
                     tracing::debug!(
                         pool = event.pool_id,
                         job = event.job_id,
                         "skipped (not coordinator)"
                     );
                 }
-                Err(e) => tracing::warn!(
-                    pool = event.pool_id,
-                    job = event.job_id,
-                    error = %e,
-                    "handle_event failed"
-                ),
+                Err(e) => {
+                    ::metrics::counter!(
+                        "pool_coord_events_dispatched_total",
+                        "outcome" => "error"
+                    )
+                    .increment(1);
+                    tracing::warn!(
+                        pool = event.pool_id,
+                        job = event.job_id,
+                        error = %e,
+                        "handle_event failed"
+                    );
+                }
             }
         });
     }
