@@ -61,6 +61,7 @@ pub mod config;
 pub mod dispatcher;
 pub mod error;
 pub mod http_chain;
+pub mod metrics;
 pub mod provider;
 pub mod wallet;
 
