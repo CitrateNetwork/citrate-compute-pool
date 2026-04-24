@@ -50,6 +50,22 @@ pub enum ChainError {
     ReplacementNotJoined,
     #[error("coordinator still active within timeout")]
     CoordinatorStillActive,
+    #[error("self-challenge not allowed")]
+    SelfChallenge,
+    #[error("target not joined")]
+    TargetNotJoined,
+    #[error("epoch not committed yet")]
+    EpochNotCommitted,
+    #[error("merkle proof does not verify against epoch root")]
+    BadMerkleProof,
+    #[error("challenge already active for this (epoch, step, target)")]
+    ChallengeAlreadyActive,
+    #[error("challenge not in voting state")]
+    ChallengeNotVoting,
+    #[error("voter not on committee")]
+    VoterNotOnCommittee,
+    #[error("voter already cast a vote on this challenge")]
+    AlreadyVoted,
 }
 
 /// Summary of a training job's on-chain state as seen by a worker.
@@ -122,6 +138,45 @@ pub trait ChainClient: Send + Sync {
         caller: WorkerAddress,
         new_coordinator: WorkerAddress,
     ) -> Result<(), ChainError>;
+
+    /// Open a challenge against a worker's step commitment. The
+    /// caller proves the disputed leaf is actually in the on-chain
+    /// epoch root via `merkle_proof`. Bond is held until resolution.
+    async fn challenge_step(
+        &self,
+        job_id: JobId,
+        caller: WorkerAddress,
+        epoch: EpochIndex,
+        step: u32,
+        target: WorkerAddress,
+        leaf: B256,
+        merkle_proof: Vec<B256>,
+        bond: u128,
+    ) -> Result<(), ChainError>;
+
+    /// Committee member casts a vote on an active challenge. Quorum
+    /// of either side triggers automatic resolution.
+    async fn vote_challenge(
+        &self,
+        job_id: JobId,
+        voter: WorkerAddress,
+        epoch: EpochIndex,
+        step: u32,
+        target: WorkerAddress,
+        uphold: bool,
+    ) -> Result<(), ChainError>;
+
+    /// Governance helper: add or remove a committee member. Mock
+    /// only — production has a separate governance contract.
+    async fn set_committee_member(&self, member: WorkerAddress, active: bool);
+
+    /// Read aggregate slash amount on a (job, worker) tuple — sum
+    /// of liveness slash + challenge slash.
+    async fn worker_total_slashed(&self, job_id: JobId, worker: WorkerAddress) -> u128;
+
+    /// Read accumulated challenger reward (across all jobs in the
+    /// mock; production tracks per-job).
+    async fn challenger_reward(&self, challenger: WorkerAddress) -> u128;
 }
 
 /// In-memory implementation of the ComputePoolTraining state
@@ -137,6 +192,8 @@ struct MockState {
     jobs: HashMap<JobId, MockJob>,
     next_job_id: JobId,
     block_number: u64,
+    committee: HashSet<WorkerAddress>,
+    challenger_rewards: HashMap<WorkerAddress, u128>,
 }
 
 #[derive(Clone)]
@@ -151,7 +208,35 @@ struct MockJob {
     all_epochs_committed_block: u64,
     last_activity_block: u64,
     liveness_slashed: HashSet<WorkerAddress>,
+    // (epoch, step, target) → challenge record
+    challenges: HashMap<(EpochIndex, u32, WorkerAddress), MockChallenge>,
+    // Per-worker challenge-slash total.
+    challenge_slashed: HashMap<WorkerAddress, u128>,
 }
+
+#[derive(Clone)]
+struct MockChallenge {
+    challenger: WorkerAddress,
+    bond: u128,
+    state: MockChallengeState,
+    uphold_votes: u32,
+    reject_votes: u32,
+    voted: HashSet<WorkerAddress>,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+enum MockChallengeState {
+    Voting,
+    ResolvedUphold,
+    ResolvedReject,
+}
+
+/// Committee quorum mirroring the contract's COMMITTEE_QUORUM.
+const COMMITTEE_QUORUM: u32 = 2;
+/// Slash basis points mirroring the contract's SLASH_BPS (10%).
+const SLASH_BPS: u128 = 1000;
+/// Basis points denominator.
+const BPS: u128 = 10_000;
 
 impl MockChainClient {
     pub fn new() -> Arc<Self> {
@@ -160,6 +245,8 @@ impl MockChainClient {
                 jobs: HashMap::new(),
                 next_job_id: 0,
                 block_number: 0,
+                committee: HashSet::new(),
+                challenger_rewards: HashMap::new(),
             })),
         })
     }
@@ -184,6 +271,8 @@ impl MockChainClient {
                 all_epochs_committed_block: 0,
                 last_activity_block: 0,
                 liveness_slashed: HashSet::new(),
+                challenges: HashMap::new(),
+                challenge_slashed: HashMap::new(),
             },
         );
         id
@@ -214,6 +303,8 @@ impl Default for MockChainClient {
                 jobs: HashMap::new(),
                 next_job_id: 0,
                 block_number: 0,
+                committee: HashSet::new(),
+                challenger_rewards: HashMap::new(),
             })),
         }
     }
@@ -383,6 +474,190 @@ impl ChainClient for MockChainClient {
         job.last_activity_block = block;
         Ok(())
     }
+
+    async fn challenge_step(
+        &self,
+        job_id: JobId,
+        caller: WorkerAddress,
+        epoch: EpochIndex,
+        step: u32,
+        target: WorkerAddress,
+        leaf: B256,
+        merkle_proof: Vec<B256>,
+        bond: u128,
+    ) -> Result<(), ChainError> {
+        let mut state = self.inner.lock();
+        let job = state
+            .jobs
+            .get_mut(&job_id)
+            .ok_or(ChainError::UnknownJob(job_id))?;
+        if caller == target {
+            return Err(ChainError::SelfChallenge);
+        }
+        if !job.joined.contains(&target) {
+            return Err(ChainError::TargetNotJoined);
+        }
+        let root = job
+            .epoch_roots
+            .get(&epoch)
+            .copied()
+            .ok_or(ChainError::EpochNotCommitted)?;
+        // Mirror ComputePoolTraining._verifyMerkleProof — sorted-pair
+        // concat + keccak256. Must match the contract bit-for-bit so
+        // a proof that verifies here verifies on-chain.
+        if !verify_merkle_proof(&merkle_proof, root, leaf) {
+            return Err(ChainError::BadMerkleProof);
+        }
+        let key = (epoch, step, target);
+        // Only allow a new challenge if the slot is empty or the
+        // previous challenge resolved. Matches the contract's
+        // "must be None | Resolved*" gate.
+        if let Some(existing) = job.challenges.get(&key) {
+            if existing.state == MockChallengeState::Voting {
+                return Err(ChainError::ChallengeAlreadyActive);
+            }
+        }
+        job.challenges.insert(
+            key,
+            MockChallenge {
+                challenger: caller,
+                bond,
+                state: MockChallengeState::Voting,
+                uphold_votes: 0,
+                reject_votes: 0,
+                voted: HashSet::new(),
+            },
+        );
+        Ok(())
+    }
+
+    async fn vote_challenge(
+        &self,
+        job_id: JobId,
+        voter: WorkerAddress,
+        epoch: EpochIndex,
+        step: u32,
+        target: WorkerAddress,
+        uphold: bool,
+    ) -> Result<(), ChainError> {
+        let mut state = self.inner.lock();
+        if !state.committee.contains(&voter) {
+            return Err(ChainError::VoterNotOnCommittee);
+        }
+        let spec_stake = {
+            let job = state
+                .jobs
+                .get(&job_id)
+                .ok_or(ChainError::UnknownJob(job_id))?;
+            job.spec.per_worker_stake
+        };
+        let job = state.jobs.get_mut(&job_id).expect("checked above");
+        let key = (epoch, step, target);
+        let ch = job
+            .challenges
+            .get_mut(&key)
+            .ok_or(ChainError::ChallengeNotVoting)?;
+        if ch.state != MockChallengeState::Voting {
+            return Err(ChainError::ChallengeNotVoting);
+        }
+        if !ch.voted.insert(voter) {
+            return Err(ChainError::AlreadyVoted);
+        }
+        if uphold {
+            ch.uphold_votes += 1;
+        } else {
+            ch.reject_votes += 1;
+        }
+
+        // Quorum check (mirroring contract's auto-resolve).
+        let decide_uphold = ch.uphold_votes >= COMMITTEE_QUORUM;
+        let decide_reject = ch.reject_votes >= COMMITTEE_QUORUM;
+        if !decide_uphold && !decide_reject {
+            return Ok(());
+        }
+
+        let challenger = ch.challenger;
+        let bond = ch.bond;
+
+        if decide_uphold {
+            ch.state = MockChallengeState::ResolvedUphold;
+            ch.bond = 0;
+            // Slash target: SLASH_BPS of posted stake, bounded by
+            // what remains held. Track cumulative challenge slash.
+            let prior_slash = *job.challenge_slashed.get(&target).unwrap_or(&0);
+            let liveness_slash_count = if job.liveness_slashed.contains(&target) { 1 } else { 0 };
+            let nominal_slash = spec_stake * SLASH_BPS / BPS;
+            // Held = posted - (liveness-slash portion) - (prior challenge slashes).
+            // Liveness slash in the Solidity side is also SLASH_BPS? No —
+            // the mock models liveness as a boolean; to match contract
+            // accounting we treat each liveness-slash event as SLASH_BPS
+            // too. Kept conservative: don't over-slash.
+            let held_lower_bound = spec_stake.saturating_sub(prior_slash).saturating_sub(
+                (liveness_slash_count as u128) * (spec_stake * 10 / BPS),
+            );
+            let slash = nominal_slash.min(held_lower_bound);
+            *job.challenge_slashed.entry(target).or_insert(0) += slash;
+
+            // Challenger reward: bond refund + half-slash.
+            let reward = bond + slash / 2;
+            *state.challenger_rewards.entry(challenger).or_insert(0) += reward;
+        } else {
+            ch.state = MockChallengeState::ResolvedReject;
+            ch.bond = 0;
+            // Bond stays with the contract (forfeit).
+        }
+        Ok(())
+    }
+
+    async fn set_committee_member(&self, member: WorkerAddress, active: bool) {
+        let mut state = self.inner.lock();
+        if active {
+            state.committee.insert(member);
+        } else {
+            state.committee.remove(&member);
+        }
+    }
+
+    async fn worker_total_slashed(&self, job_id: JobId, worker: WorkerAddress) -> u128 {
+        let state = self.inner.lock();
+        let Some(job) = state.jobs.get(&job_id) else { return 0 };
+        let challenge_portion = *job.challenge_slashed.get(&worker).unwrap_or(&0);
+        let liveness_portion = if job.liveness_slashed.contains(&worker) {
+            // Match contract: LIVENESS_SLASH_BPS = 10 (0.1%)
+            job.spec.per_worker_stake * 10 / BPS
+        } else {
+            0
+        };
+        challenge_portion + liveness_portion
+    }
+
+    async fn challenger_reward(&self, challenger: WorkerAddress) -> u128 {
+        let state = self.inner.lock();
+        *state.challenger_rewards.get(&challenger).unwrap_or(&0)
+    }
+}
+
+/// Merkle proof verification matching ComputePoolTraining._verifyMerkleProof.
+/// Split out as a free function so tests can call it without holding the
+/// MockState lock.
+fn verify_merkle_proof(proof: &[B256], root: B256, leaf: B256) -> bool {
+    use sha3::{Digest, Keccak256};
+    let mut computed = leaf;
+    for sibling in proof {
+        let (left, right) = if computed.as_bytes() <= sibling.as_bytes() {
+            (computed, *sibling)
+        } else {
+            (*sibling, computed)
+        };
+        let mut hasher = Keccak256::new();
+        hasher.update(left.as_bytes());
+        hasher.update(right.as_bytes());
+        let out = hasher.finalize();
+        let mut h = [0u8; 32];
+        h.copy_from_slice(&out);
+        computed = B256::from(h);
+    }
+    computed == root
 }
 
 #[cfg(test)]

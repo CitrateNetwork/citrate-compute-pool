@@ -180,6 +180,67 @@ impl ModelBackend for DeterministicTinyModel {
     }
 }
 
+/// Malicious variant — wraps `DeterministicTinyModel` but, for a
+/// configured (target_epoch, target_step), returns a tampered
+/// gradient that differs from the honest computation. Used by the
+/// challenge-flow integration test (CM-07 WP-07.4) to deliberately
+/// produce a miscommit the challenger can catch.
+///
+/// Outside the targeted step, behaves exactly like the honest
+/// `DeterministicTinyModel` — only one commitment per job is
+/// wrong, mirroring a realistic "single flipped bit" attack.
+pub struct MaliciousTinyModel {
+    inner: DeterministicTinyModel,
+    target_epoch: u32,
+    target_step: u32,
+}
+
+impl MaliciousTinyModel {
+    pub fn new(target_epoch: u32, target_step: u32) -> Self {
+        Self {
+            inner: DeterministicTinyModel::new(),
+            target_epoch,
+            target_step,
+        }
+    }
+}
+
+#[async_trait]
+impl ModelBackend for MaliciousTinyModel {
+    async fn load_starting_weights(
+        &self,
+        model_start_hash: WeightsHash,
+    ) -> anyhow::Result<WeightsHash> {
+        self.inner.load_starting_weights(model_start_hash).await
+    }
+
+    async fn forward_backward(
+        &self,
+        prev_weights: PrevWeightsHash,
+        epoch: EpochIndex,
+        step: StepIndex,
+        worker_shard: u32,
+    ) -> anyhow::Result<StepResult> {
+        let mut honest = self
+            .inner
+            .forward_backward(prev_weights, epoch, step, worker_shard)
+            .await?;
+        if epoch == self.target_epoch && step == self.target_step {
+            // Tamper: flip a bit in the first gradient tensor's first
+            // element. Changes the quantized int8 value, which changes
+            // the tensor commitment hash, which changes the step
+            // commitment. Enough for the challenger to detect a
+            // mismatch via recomputation.
+            if let Some(first) = honest.gradients.first_mut() {
+                if let Some(v) = first.data.first_mut() {
+                    *v = -*v - 1.0; // guaranteed distinct f32 value
+                }
+            }
+        }
+        Ok(honest)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
