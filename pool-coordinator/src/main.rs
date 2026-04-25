@@ -108,6 +108,16 @@ async fn main() -> ExitCode {
         "daemon configured"
     );
 
+    // RM-B1 / WP-B2.4 (audit F-5): fail-fast if the RPC endpoint's
+    // advertised chain_id doesn't match the configured one. Pre-fix,
+    // a misconfigured daemon could sign transactions for the wrong
+    // chain and silently fail until an operator noticed.
+    if let Err(e) = adapter.verify_rpc_chain_id().await {
+        eprintln!("F-5 chain_id verification failed: {}", e);
+        return ExitCode::from(6);
+    }
+    tracing::info!(chain_id = cfg.chain_id, "F-5: RPC chain_id verified");
+
     // Spawn the Prometheus metrics server if configured.
     if let Ok(bind) = env::var("CITRATE_POOL_METRICS_ADDR") {
         if let Err(e) = metrics::spawn_metrics_server(&bind).await {

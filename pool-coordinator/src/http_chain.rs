@@ -138,6 +138,35 @@ impl HttpChainAdapter {
         }
     }
 
+    /// RM-B1 / WP-B2.4 (audit F-5): verify the RPC endpoint advertises
+    /// the chain_id this adapter was configured with. Pre-fix, a
+    /// pool-coordinator daemon could be launched against the wrong
+    /// RPC (e.g., devnet vs testnet) and silently sign + submit
+    /// transactions intended for the wrong chain — the network would
+    /// reject them with cryptic errors but the daemon would keep
+    /// trying.
+    ///
+    /// Issues `eth_chainId` once and compares the response to
+    /// `self.chain_id`. On mismatch returns `CoordinatorError::Chain`
+    /// with a descriptive message; the caller is expected to
+    /// fail-fast (exit non-zero before entering the decision loop).
+    pub async fn verify_rpc_chain_id(&self) -> Result<(), CoordinatorError> {
+        let result = self.rpc("eth_chainId", json!([])).await?;
+        let hex_str = result.as_str().ok_or_else(|| {
+            CoordinatorError::Chain("eth_chainId result not a string".into())
+        })?;
+        let observed = parse_hex_u64(hex_str).map_err(|e| {
+            CoordinatorError::Chain(format!("eth_chainId decode: {}", e))
+        })?;
+        if observed != self.chain_id {
+            return Err(CoordinatorError::Chain(format!(
+                "F-5: RPC chain_id mismatch — configured {} vs observed {} ({})",
+                self.chain_id, observed, self.rpc_url
+            )));
+        }
+        Ok(())
+    }
+
     /// POST a JSON-RPC request and return the `result` field as a
     /// `serde_json::Value`. Errors returned by the node (non-null
     /// `error` field) map to `CoordinatorError::Chain`.
@@ -1433,5 +1462,60 @@ mod tests {
         let adapter = make_adapter(format!("http://{}", addr));
         let latest = adapter.latest_block().await.expect("latest");
         assert_eq!(latest, 42);
+    }
+
+    // ────────────────────────────────────────────────────────────
+    // F-5 (RM-B1 / WP-B2.4): verify_rpc_chain_id regression tests.
+    // ────────────────────────────────────────────────────────────
+
+    /// F-5.1: matching chain_id passes verification.
+    #[tokio::test]
+    async fn f5_verify_chain_id_accepts_match() {
+        let state = StubState::new();
+        // 40204 == 0x9D0C
+        state.queue("eth_chainId", json!("0x9D0C"));
+        let addr = spawn_stub_rpc(state).await;
+        let adapter = make_adapter(format!("http://{}", addr));
+        adapter
+            .verify_rpc_chain_id()
+            .await
+            .expect("F-5: matching chain_id must verify");
+    }
+
+    /// F-5.2: mismatching chain_id is rejected with a descriptive
+    /// error. Pre-fix the daemon would silently start signing
+    /// against the wrong chain.
+    #[tokio::test]
+    async fn f5_verify_chain_id_rejects_mismatch() {
+        let state = StubState::new();
+        // Adapter is configured for 40204 (0x9D0C); RPC reports 1
+        // (0x1, mainnet).
+        state.queue("eth_chainId", json!("0x1"));
+        let addr = spawn_stub_rpc(state).await;
+        let adapter = make_adapter(format!("http://{}", addr));
+        let err = adapter
+            .verify_rpc_chain_id()
+            .await
+            .expect_err("F-5: mismatched chain_id must reject");
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("F-5") && msg.contains("40204") && msg.contains("1"),
+            "F-5: error must name configured + observed chain_ids; got {}",
+            msg
+        );
+    }
+
+    /// F-5.3: an RPC that returns garbage for `eth_chainId` (string
+    /// that doesn't decode as hex) is rejected.
+    #[tokio::test]
+    async fn f5_verify_chain_id_rejects_malformed_response() {
+        let state = StubState::new();
+        state.queue("eth_chainId", json!("not-a-hex-string"));
+        let addr = spawn_stub_rpc(state).await;
+        let adapter = make_adapter(format!("http://{}", addr));
+        adapter
+            .verify_rpc_chain_id()
+            .await
+            .expect_err("F-5: malformed chain_id response must reject");
     }
 }
