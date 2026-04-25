@@ -1,0 +1,832 @@
+//! `ChainClient` trait + `MockChainClient` for S0.
+//!
+//! Wraps the subset of ComputePoolTraining calls a worker daemon
+//! needs. For S0 the mock reproduces the on-chain state machine in
+//! memory — joins, epoch commits, finalize. It enforces the same
+//! invariants the Solidity contract does (epoch monotonicity,
+//! coordinator-only commitEpoch, challenge-window-gated finalize)
+//! so tests fail the same way a live chain would.
+//!
+//! S1+ real `HttpChainClient` implementation will speak JSON-RPC to
+//! a Citrate node and encode the same calldata the SDK does.
+
+use async_trait::async_trait;
+use parking_lot::Mutex;
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+use thiserror::Error;
+
+use crate::types::{B256, EpochIndex, JobId, TrainingJobSpec, WorkerAddress};
+
+#[derive(Error, Debug)]
+pub enum ChainError {
+    #[error("unknown job: {0}")]
+    UnknownJob(JobId),
+    #[error("wrong state for operation: {0}")]
+    WrongState(String),
+    #[error("worker already joined")]
+    AlreadyJoined,
+    #[error("pool full")]
+    PoolFull,
+    #[error("stake amount mismatch")]
+    StakeMismatch,
+    #[error("below min workers")]
+    BelowMin,
+    #[error("coordinator is not a joined worker")]
+    CoordinatorNotJoined,
+    #[error("wrong epoch; expected {expected}, got {got}")]
+    WrongEpoch { expected: EpochIndex, got: EpochIndex },
+    #[error("epoch already committed")]
+    EpochAlreadyCommitted,
+    #[error("challenge window still open")]
+    ChallengeWindowOpen,
+    #[error("caller is not coordinator")]
+    NotCoordinator,
+    #[error("job not ready to finalize")]
+    NotReadyToFinalize,
+    #[error("caller not joined; only joined workers can trigger reassignment")]
+    CallerNotJoined,
+    #[error("proposed replacement is not a joined worker")]
+    ReplacementNotJoined,
+    #[error("coordinator still active within timeout")]
+    CoordinatorStillActive,
+    #[error("self-challenge not allowed")]
+    SelfChallenge,
+    #[error("target not joined")]
+    TargetNotJoined,
+    #[error("epoch not committed yet")]
+    EpochNotCommitted,
+    #[error("merkle proof does not verify against epoch root")]
+    BadMerkleProof,
+    #[error("challenge already active for this (epoch, step, target)")]
+    ChallengeAlreadyActive,
+    #[error("challenge not in voting state")]
+    ChallengeNotVoting,
+    #[error("voter not on committee")]
+    VoterNotOnCommittee,
+    #[error("voter already cast a vote on this challenge")]
+    AlreadyVoted,
+}
+
+/// Summary of a training job's on-chain state as seen by a worker.
+#[derive(Clone, Debug)]
+pub struct JobChainSnapshot {
+    pub spec: TrainingJobSpec,
+    pub state: JobChainState,
+    pub current_epoch: EpochIndex,
+    pub coordinator: Option<WorkerAddress>,
+    pub workers: Vec<WorkerAddress>,
+    pub epoch_roots: HashMap<EpochIndex, B256>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum JobChainState {
+    Recruiting,
+    Training,
+    Awaiting,
+    Finalized,
+    Aborted,
+}
+
+#[async_trait]
+pub trait ChainClient: Send + Sync {
+    /// Read the current snapshot of a job's on-chain state.
+    async fn snapshot(&self, job_id: JobId) -> Result<JobChainSnapshot, ChainError>;
+
+    /// Worker posts stake + joins. No-op if the caller already
+    /// joined.
+    async fn join_training_job(
+        &self,
+        job_id: JobId,
+        sender: WorkerAddress,
+        stake: u128,
+    ) -> Result<(), ChainError>;
+
+    /// Close recruitment and elect the initial coordinator.
+    /// Callable by anyone once min_workers is met.
+    async fn close_recruitment(
+        &self,
+        job_id: JobId,
+        coordinator: WorkerAddress,
+    ) -> Result<(), ChainError>;
+
+    /// Coordinator posts the Merkle root for the current epoch.
+    async fn commit_epoch(
+        &self,
+        job_id: JobId,
+        sender: WorkerAddress,
+        epoch: EpochIndex,
+        root: B256,
+    ) -> Result<(), ChainError>;
+
+    /// Advance the chain's simulated block number. Tests use this
+    /// to roll past the challenge window.
+    async fn advance_blocks(&self, n: u64);
+
+    /// Finalize the job. Reverts with ChallengeWindowOpen if
+    /// called too early.
+    async fn finalize(&self, job_id: JobId) -> Result<(), ChainError>;
+
+    /// Reassign a stalled coordinator. Caller must be a joined
+    /// worker; reassignment is only accepted if the last coordinator
+    /// activity was more than `coordination_timeout` blocks ago.
+    /// Triggers a liveness slash on the old coordinator. Mirrors
+    /// `ComputePoolTraining.reassignCoordinator`.
+    async fn reassign_coordinator(
+        &self,
+        job_id: JobId,
+        caller: WorkerAddress,
+        new_coordinator: WorkerAddress,
+    ) -> Result<(), ChainError>;
+
+    /// Open a challenge against a worker's step commitment. The
+    /// caller proves the disputed leaf is actually in the on-chain
+    /// epoch root via `merkle_proof`. Bond is held until resolution.
+    async fn challenge_step(
+        &self,
+        job_id: JobId,
+        caller: WorkerAddress,
+        epoch: EpochIndex,
+        step: u32,
+        target: WorkerAddress,
+        leaf: B256,
+        merkle_proof: Vec<B256>,
+        bond: u128,
+    ) -> Result<(), ChainError>;
+
+    /// Committee member casts a vote on an active challenge. Quorum
+    /// of either side triggers automatic resolution.
+    async fn vote_challenge(
+        &self,
+        job_id: JobId,
+        voter: WorkerAddress,
+        epoch: EpochIndex,
+        step: u32,
+        target: WorkerAddress,
+        uphold: bool,
+    ) -> Result<(), ChainError>;
+
+    /// Governance helper: add or remove a committee member. Mock
+    /// only — production has a separate governance contract.
+    async fn set_committee_member(&self, member: WorkerAddress, active: bool);
+
+    /// Read aggregate slash amount on a (job, worker) tuple — sum
+    /// of liveness slash + challenge slash.
+    async fn worker_total_slashed(&self, job_id: JobId, worker: WorkerAddress) -> u128;
+
+    /// Read accumulated challenger reward (across all jobs in the
+    /// mock; production tracks per-job).
+    async fn challenger_reward(&self, challenger: WorkerAddress) -> u128;
+}
+
+/// In-memory implementation of the ComputePoolTraining state
+/// machine. Mirrors the Solidity contract's invariants byte-for-
+/// byte (join → close → commit × E → finalize) so tests
+/// exercising the worker state machine catch the same class of
+/// bugs they'd catch against a live deployment.
+pub struct MockChainClient {
+    inner: Arc<Mutex<MockState>>,
+}
+
+struct MockState {
+    jobs: HashMap<JobId, MockJob>,
+    next_job_id: JobId,
+    block_number: u64,
+    committee: HashSet<WorkerAddress>,
+    challenger_rewards: HashMap<WorkerAddress, u128>,
+}
+
+#[derive(Clone)]
+struct MockJob {
+    spec: TrainingJobSpec,
+    state: JobChainState,
+    current_epoch: EpochIndex,
+    coordinator: Option<WorkerAddress>,
+    workers: Vec<WorkerAddress>,
+    joined: HashSet<WorkerAddress>,
+    epoch_roots: HashMap<EpochIndex, B256>,
+    all_epochs_committed_block: u64,
+    last_activity_block: u64,
+    liveness_slashed: HashSet<WorkerAddress>,
+    // (epoch, step, target) → challenge record
+    challenges: HashMap<(EpochIndex, u32, WorkerAddress), MockChallenge>,
+    // Per-worker challenge-slash total.
+    challenge_slashed: HashMap<WorkerAddress, u128>,
+}
+
+#[derive(Clone)]
+struct MockChallenge {
+    challenger: WorkerAddress,
+    bond: u128,
+    state: MockChallengeState,
+    uphold_votes: u32,
+    reject_votes: u32,
+    voted: HashSet<WorkerAddress>,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+enum MockChallengeState {
+    Voting,
+    ResolvedUphold,
+    ResolvedReject,
+}
+
+/// Committee quorum mirroring the contract's COMMITTEE_QUORUM.
+const COMMITTEE_QUORUM: u32 = 2;
+/// Slash basis points mirroring the contract's SLASH_BPS (10%).
+const SLASH_BPS: u128 = 1000;
+/// Basis points denominator.
+const BPS: u128 = 10_000;
+
+impl MockChainClient {
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self {
+            inner: Arc::new(Mutex::new(MockState {
+                jobs: HashMap::new(),
+                next_job_id: 0,
+                block_number: 0,
+                committee: HashSet::new(),
+                challenger_rewards: HashMap::new(),
+            })),
+        })
+    }
+
+    /// Create a new training job (test-side helper — no actual
+    /// escrow accounting in the mock; the lifecycle invariants are
+    /// what we're validating).
+    pub fn create_job(&self, spec: TrainingJobSpec) -> JobId {
+        let mut state = self.inner.lock();
+        let id = state.next_job_id;
+        state.next_job_id += 1;
+        state.jobs.insert(
+            id,
+            MockJob {
+                spec,
+                state: JobChainState::Recruiting,
+                current_epoch: 0,
+                coordinator: None,
+                workers: Vec::new(),
+                joined: HashSet::new(),
+                epoch_roots: HashMap::new(),
+                all_epochs_committed_block: 0,
+                last_activity_block: 0,
+                liveness_slashed: HashSet::new(),
+                challenges: HashMap::new(),
+                challenge_slashed: HashMap::new(),
+            },
+        );
+        id
+    }
+
+    /// Test-side helper: has a worker been liveness-slashed for
+    /// coordinator-stall? Mirrors the on-chain WorkerInfo.stakeSlashed
+    /// being non-zero after a reassign call.
+    pub fn was_liveness_slashed(&self, job_id: JobId, worker: WorkerAddress) -> bool {
+        self.inner
+            .lock()
+            .jobs
+            .get(&job_id)
+            .map(|j| j.liveness_slashed.contains(&worker))
+            .unwrap_or(false)
+    }
+}
+
+/// Coordination-timeout constant mirroring the Solidity contract's
+/// COORDINATION_TIMEOUT. The mock reuses the on-chain value so tests
+/// don't drift from the deployed behavior.
+const COORDINATION_TIMEOUT: u64 = 100;
+
+impl Default for MockChainClient {
+    fn default() -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(MockState {
+                jobs: HashMap::new(),
+                next_job_id: 0,
+                block_number: 0,
+                committee: HashSet::new(),
+                challenger_rewards: HashMap::new(),
+            })),
+        }
+    }
+}
+
+#[async_trait]
+impl ChainClient for MockChainClient {
+    async fn snapshot(&self, job_id: JobId) -> Result<JobChainSnapshot, ChainError> {
+        let state = self.inner.lock();
+        let job = state
+            .jobs
+            .get(&job_id)
+            .ok_or(ChainError::UnknownJob(job_id))?;
+        Ok(JobChainSnapshot {
+            spec: job.spec.clone(),
+            state: job.state.clone(),
+            current_epoch: job.current_epoch,
+            coordinator: job.coordinator,
+            workers: job.workers.clone(),
+            epoch_roots: job.epoch_roots.clone(),
+        })
+    }
+
+    async fn join_training_job(
+        &self,
+        job_id: JobId,
+        sender: WorkerAddress,
+        stake: u128,
+    ) -> Result<(), ChainError> {
+        let mut state = self.inner.lock();
+        let job = state
+            .jobs
+            .get_mut(&job_id)
+            .ok_or(ChainError::UnknownJob(job_id))?;
+        if job.state != JobChainState::Recruiting {
+            return Err(ChainError::WrongState("not recruiting".into()));
+        }
+        if job.joined.contains(&sender) {
+            return Err(ChainError::AlreadyJoined);
+        }
+        if job.workers.len() as u32 >= job.spec.max_workers {
+            return Err(ChainError::PoolFull);
+        }
+        if stake != job.spec.per_worker_stake {
+            return Err(ChainError::StakeMismatch);
+        }
+        job.workers.push(sender);
+        job.joined.insert(sender);
+        Ok(())
+    }
+
+    async fn close_recruitment(
+        &self,
+        job_id: JobId,
+        coordinator: WorkerAddress,
+    ) -> Result<(), ChainError> {
+        let mut state = self.inner.lock();
+        let block = state.block_number;
+        let job = state
+            .jobs
+            .get_mut(&job_id)
+            .ok_or(ChainError::UnknownJob(job_id))?;
+        if job.state != JobChainState::Recruiting {
+            return Err(ChainError::WrongState("not recruiting".into()));
+        }
+        if (job.workers.len() as u32) < job.spec.min_workers {
+            return Err(ChainError::BelowMin);
+        }
+        if !job.joined.contains(&coordinator) {
+            return Err(ChainError::CoordinatorNotJoined);
+        }
+        job.state = JobChainState::Training;
+        job.coordinator = Some(coordinator);
+        job.last_activity_block = block;
+        Ok(())
+    }
+
+    async fn commit_epoch(
+        &self,
+        job_id: JobId,
+        sender: WorkerAddress,
+        epoch: EpochIndex,
+        root: B256,
+    ) -> Result<(), ChainError> {
+        let mut state = self.inner.lock();
+        let block = state.block_number;
+        let job = state
+            .jobs
+            .get_mut(&job_id)
+            .ok_or(ChainError::UnknownJob(job_id))?;
+        if job.state != JobChainState::Training {
+            return Err(ChainError::WrongState("not training".into()));
+        }
+        if job.coordinator != Some(sender) {
+            return Err(ChainError::NotCoordinator);
+        }
+        if epoch != job.current_epoch {
+            return Err(ChainError::WrongEpoch {
+                expected: job.current_epoch,
+                got: epoch,
+            });
+        }
+        if job.epoch_roots.contains_key(&epoch) {
+            return Err(ChainError::EpochAlreadyCommitted);
+        }
+        job.epoch_roots.insert(epoch, root);
+        job.current_epoch += 1;
+        job.last_activity_block = block;
+        if job.current_epoch == job.spec.epoch_count {
+            job.state = JobChainState::Awaiting;
+            job.all_epochs_committed_block = block;
+        }
+        Ok(())
+    }
+
+    async fn advance_blocks(&self, n: u64) {
+        let mut state = self.inner.lock();
+        state.block_number += n;
+    }
+
+    async fn finalize(&self, job_id: JobId) -> Result<(), ChainError> {
+        let mut state = self.inner.lock();
+        let block = state.block_number;
+        let job = state
+            .jobs
+            .get_mut(&job_id)
+            .ok_or(ChainError::UnknownJob(job_id))?;
+        if job.state != JobChainState::Awaiting {
+            return Err(ChainError::NotReadyToFinalize);
+        }
+        let window_end = job.all_epochs_committed_block + job.spec.challenge_window_blocks as u64;
+        if block < window_end {
+            return Err(ChainError::ChallengeWindowOpen);
+        }
+        job.state = JobChainState::Finalized;
+        Ok(())
+    }
+
+    async fn reassign_coordinator(
+        &self,
+        job_id: JobId,
+        caller: WorkerAddress,
+        new_coordinator: WorkerAddress,
+    ) -> Result<(), ChainError> {
+        let mut state = self.inner.lock();
+        let block = state.block_number;
+        let job = state
+            .jobs
+            .get_mut(&job_id)
+            .ok_or(ChainError::UnknownJob(job_id))?;
+        if job.state != JobChainState::Training {
+            return Err(ChainError::WrongState("not training".into()));
+        }
+        if !job.joined.contains(&caller) {
+            return Err(ChainError::CallerNotJoined);
+        }
+        if !job.joined.contains(&new_coordinator) {
+            return Err(ChainError::ReplacementNotJoined);
+        }
+        if block <= job.last_activity_block + COORDINATION_TIMEOUT {
+            return Err(ChainError::CoordinatorStillActive);
+        }
+        if let Some(old) = job.coordinator {
+            job.liveness_slashed.insert(old);
+        }
+        job.coordinator = Some(new_coordinator);
+        job.last_activity_block = block;
+        Ok(())
+    }
+
+    async fn challenge_step(
+        &self,
+        job_id: JobId,
+        caller: WorkerAddress,
+        epoch: EpochIndex,
+        step: u32,
+        target: WorkerAddress,
+        leaf: B256,
+        merkle_proof: Vec<B256>,
+        bond: u128,
+    ) -> Result<(), ChainError> {
+        let mut state = self.inner.lock();
+        let job = state
+            .jobs
+            .get_mut(&job_id)
+            .ok_or(ChainError::UnknownJob(job_id))?;
+        if caller == target {
+            return Err(ChainError::SelfChallenge);
+        }
+        if !job.joined.contains(&target) {
+            return Err(ChainError::TargetNotJoined);
+        }
+        let root = job
+            .epoch_roots
+            .get(&epoch)
+            .copied()
+            .ok_or(ChainError::EpochNotCommitted)?;
+        // Mirror ComputePoolTraining._verifyMerkleProof — sorted-pair
+        // concat + keccak256. Must match the contract bit-for-bit so
+        // a proof that verifies here verifies on-chain.
+        if !verify_merkle_proof(&merkle_proof, root, leaf) {
+            return Err(ChainError::BadMerkleProof);
+        }
+        let key = (epoch, step, target);
+        // Only allow a new challenge if the slot is empty or the
+        // previous challenge resolved. Matches the contract's
+        // "must be None | Resolved*" gate.
+        if let Some(existing) = job.challenges.get(&key) {
+            if existing.state == MockChallengeState::Voting {
+                return Err(ChainError::ChallengeAlreadyActive);
+            }
+        }
+        job.challenges.insert(
+            key,
+            MockChallenge {
+                challenger: caller,
+                bond,
+                state: MockChallengeState::Voting,
+                uphold_votes: 0,
+                reject_votes: 0,
+                voted: HashSet::new(),
+            },
+        );
+        Ok(())
+    }
+
+    async fn vote_challenge(
+        &self,
+        job_id: JobId,
+        voter: WorkerAddress,
+        epoch: EpochIndex,
+        step: u32,
+        target: WorkerAddress,
+        uphold: bool,
+    ) -> Result<(), ChainError> {
+        let mut state = self.inner.lock();
+        if !state.committee.contains(&voter) {
+            return Err(ChainError::VoterNotOnCommittee);
+        }
+        let spec_stake = {
+            let job = state
+                .jobs
+                .get(&job_id)
+                .ok_or(ChainError::UnknownJob(job_id))?;
+            job.spec.per_worker_stake
+        };
+        let job = state.jobs.get_mut(&job_id).expect("checked above");
+        let key = (epoch, step, target);
+        let ch = job
+            .challenges
+            .get_mut(&key)
+            .ok_or(ChainError::ChallengeNotVoting)?;
+        if ch.state != MockChallengeState::Voting {
+            return Err(ChainError::ChallengeNotVoting);
+        }
+        if !ch.voted.insert(voter) {
+            return Err(ChainError::AlreadyVoted);
+        }
+        if uphold {
+            ch.uphold_votes += 1;
+        } else {
+            ch.reject_votes += 1;
+        }
+
+        // Quorum check (mirroring contract's auto-resolve).
+        let decide_uphold = ch.uphold_votes >= COMMITTEE_QUORUM;
+        let decide_reject = ch.reject_votes >= COMMITTEE_QUORUM;
+        if !decide_uphold && !decide_reject {
+            return Ok(());
+        }
+
+        let challenger = ch.challenger;
+        let bond = ch.bond;
+
+        if decide_uphold {
+            ch.state = MockChallengeState::ResolvedUphold;
+            ch.bond = 0;
+            // Slash target: SLASH_BPS of posted stake, bounded by
+            // what remains held. Track cumulative challenge slash.
+            let prior_slash = *job.challenge_slashed.get(&target).unwrap_or(&0);
+            let liveness_slash_count = if job.liveness_slashed.contains(&target) { 1 } else { 0 };
+            let nominal_slash = spec_stake * SLASH_BPS / BPS;
+            // Held = posted - (liveness-slash portion) - (prior challenge slashes).
+            // Liveness slash in the Solidity side is also SLASH_BPS? No —
+            // the mock models liveness as a boolean; to match contract
+            // accounting we treat each liveness-slash event as SLASH_BPS
+            // too. Kept conservative: don't over-slash.
+            let held_lower_bound = spec_stake.saturating_sub(prior_slash).saturating_sub(
+                (liveness_slash_count as u128) * (spec_stake * 10 / BPS),
+            );
+            let slash = nominal_slash.min(held_lower_bound);
+            *job.challenge_slashed.entry(target).or_insert(0) += slash;
+
+            // Challenger reward: bond refund + half-slash.
+            let reward = bond + slash / 2;
+            *state.challenger_rewards.entry(challenger).or_insert(0) += reward;
+        } else {
+            ch.state = MockChallengeState::ResolvedReject;
+            ch.bond = 0;
+            // Bond stays with the contract (forfeit).
+        }
+        Ok(())
+    }
+
+    async fn set_committee_member(&self, member: WorkerAddress, active: bool) {
+        let mut state = self.inner.lock();
+        if active {
+            state.committee.insert(member);
+        } else {
+            state.committee.remove(&member);
+        }
+    }
+
+    async fn worker_total_slashed(&self, job_id: JobId, worker: WorkerAddress) -> u128 {
+        let state = self.inner.lock();
+        let Some(job) = state.jobs.get(&job_id) else { return 0 };
+        let challenge_portion = *job.challenge_slashed.get(&worker).unwrap_or(&0);
+        let liveness_portion = if job.liveness_slashed.contains(&worker) {
+            // Match contract: LIVENESS_SLASH_BPS = 10 (0.1%)
+            job.spec.per_worker_stake * 10 / BPS
+        } else {
+            0
+        };
+        challenge_portion + liveness_portion
+    }
+
+    async fn challenger_reward(&self, challenger: WorkerAddress) -> u128 {
+        let state = self.inner.lock();
+        *state.challenger_rewards.get(&challenger).unwrap_or(&0)
+    }
+}
+
+/// Merkle proof verification matching ComputePoolTraining._verifyMerkleProof.
+/// Split out as a free function so tests can call it without holding the
+/// MockState lock.
+fn verify_merkle_proof(proof: &[B256], root: B256, leaf: B256) -> bool {
+    use sha3::{Digest, Keccak256};
+    let mut computed = leaf;
+    for sibling in proof {
+        let (left, right) = if computed.as_bytes() <= sibling.as_bytes() {
+            (computed, *sibling)
+        } else {
+            (*sibling, computed)
+        };
+        let mut hasher = Keccak256::new();
+        hasher.update(left.as_bytes());
+        hasher.update(right.as_bytes());
+        let out = hasher.finalize();
+        let mut h = [0u8; 32];
+        h.copy_from_slice(&out);
+        computed = B256::from(h);
+    }
+    computed == root
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ethereum_types::Address;
+
+    fn spec() -> TrainingJobSpec {
+        TrainingJobSpec {
+            model_start_hash: B256::repeat_byte(0x11),
+            dataset_hash: B256::repeat_byte(0x22),
+            epoch_count: 2,
+            steps_per_epoch: 2,
+            min_workers: 3,
+            max_workers: 5,
+            challenge_window_blocks: 10,
+            per_epoch_budget: 30_000_000_000_000_000_000u128,
+            per_worker_stake: 10_000_000_000_000_000_000u128,
+        }
+    }
+
+    #[tokio::test]
+    async fn full_lifecycle_on_mock() {
+        let chain = MockChainClient::new();
+        let job_id = chain.create_job(spec());
+
+        let w1 = Address::repeat_byte(1);
+        let w2 = Address::repeat_byte(2);
+        let w3 = Address::repeat_byte(3);
+
+        chain
+            .join_training_job(job_id, w1, spec().per_worker_stake)
+            .await
+            .unwrap();
+        chain
+            .join_training_job(job_id, w2, spec().per_worker_stake)
+            .await
+            .unwrap();
+        chain
+            .join_training_job(job_id, w3, spec().per_worker_stake)
+            .await
+            .unwrap();
+
+        chain.close_recruitment(job_id, w1).await.unwrap();
+
+        let snap = chain.snapshot(job_id).await.unwrap();
+        assert_eq!(snap.state, JobChainState::Training);
+        assert_eq!(snap.coordinator, Some(w1));
+
+        chain
+            .commit_epoch(job_id, w1, 0, B256::repeat_byte(0xEE))
+            .await
+            .unwrap();
+        chain
+            .commit_epoch(job_id, w1, 1, B256::repeat_byte(0xFF))
+            .await
+            .unwrap();
+
+        let snap = chain.snapshot(job_id).await.unwrap();
+        assert_eq!(snap.state, JobChainState::Awaiting);
+
+        // Too-early finalize is rejected.
+        let err = chain.finalize(job_id).await.unwrap_err();
+        assert!(matches!(err, ChainError::ChallengeWindowOpen));
+
+        chain.advance_blocks(11).await;
+        chain.finalize(job_id).await.unwrap();
+
+        let snap = chain.snapshot(job_id).await.unwrap();
+        assert_eq!(snap.state, JobChainState::Finalized);
+    }
+
+    #[tokio::test]
+    async fn non_coordinator_cannot_commit_epoch() {
+        let chain = MockChainClient::new();
+        let job_id = chain.create_job(spec());
+
+        let w1 = Address::repeat_byte(1);
+        let w2 = Address::repeat_byte(2);
+        let w3 = Address::repeat_byte(3);
+
+        for w in [w1, w2, w3] {
+            chain
+                .join_training_job(job_id, w, spec().per_worker_stake)
+                .await
+                .unwrap();
+        }
+        chain.close_recruitment(job_id, w1).await.unwrap();
+
+        let err = chain
+            .commit_epoch(job_id, w2, 0, B256::repeat_byte(0xEE))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ChainError::NotCoordinator));
+    }
+
+    #[tokio::test]
+    async fn reassign_after_timeout_swaps_coordinator() {
+        let chain = MockChainClient::new();
+        let job_id = chain.create_job(spec());
+        let w1 = Address::repeat_byte(1);
+        let w2 = Address::repeat_byte(2);
+        let w3 = Address::repeat_byte(3);
+        for w in [w1, w2, w3] {
+            chain
+                .join_training_job(job_id, w, spec().per_worker_stake)
+                .await
+                .unwrap();
+        }
+        chain.close_recruitment(job_id, w1).await.unwrap();
+
+        // Too early.
+        chain.advance_blocks(50).await;
+        let err = chain.reassign_coordinator(job_id, w2, w3).await.unwrap_err();
+        assert!(matches!(err, ChainError::CoordinatorStillActive));
+
+        // Past timeout.
+        chain.advance_blocks(60).await;
+        chain.reassign_coordinator(job_id, w2, w3).await.unwrap();
+
+        let snap = chain.snapshot(job_id).await.unwrap();
+        assert_eq!(snap.coordinator, Some(w3), "coordinator swapped");
+        assert!(chain.was_liveness_slashed(job_id, w1));
+    }
+
+    #[tokio::test]
+    async fn reassign_rejects_non_member_caller() {
+        let chain = MockChainClient::new();
+        let job_id = chain.create_job(spec());
+        let w1 = Address::repeat_byte(1);
+        let w2 = Address::repeat_byte(2);
+        let w3 = Address::repeat_byte(3);
+        for w in [w1, w2, w3] {
+            chain
+                .join_training_job(job_id, w, spec().per_worker_stake)
+                .await
+                .unwrap();
+        }
+        chain.close_recruitment(job_id, w1).await.unwrap();
+        chain.advance_blocks(200).await;
+
+        let outsider = Address::repeat_byte(0xEE);
+        let err = chain
+            .reassign_coordinator(job_id, outsider, w3)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ChainError::CallerNotJoined));
+    }
+
+    #[tokio::test]
+    async fn epoch_monotonicity_enforced() {
+        let chain = MockChainClient::new();
+        let job_id = chain.create_job(spec());
+        let w1 = Address::repeat_byte(1);
+        let w2 = Address::repeat_byte(2);
+        let w3 = Address::repeat_byte(3);
+        for w in [w1, w2, w3] {
+            chain
+                .join_training_job(job_id, w, spec().per_worker_stake)
+                .await
+                .unwrap();
+        }
+        chain.close_recruitment(job_id, w1).await.unwrap();
+
+        // Skipping to epoch 1 before 0 reverts.
+        let err = chain
+            .commit_epoch(job_id, w1, 1, B256::repeat_byte(0xEE))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ChainError::WrongEpoch { .. }));
+    }
+}
