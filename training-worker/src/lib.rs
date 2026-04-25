@@ -48,6 +48,8 @@
 
 pub mod attestation;
 pub mod backend;
+#[cfg(feature = "candle-gpu")]
+pub mod candle_backend;
 pub mod chain;
 pub mod events;
 pub mod http_chain_pipeline;
