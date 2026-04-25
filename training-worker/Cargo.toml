@@ -1,0 +1,96 @@
+[package]
+name = "citrate-training-worker"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "DataParallel training-worker binary for CM-07. Joins training pools, runs forward+backward passes via a pluggable ModelBackend, participates in ring all-reduce, posts per-step commitments and receives per-epoch payouts via ComputePoolTraining."
+
+# See:
+# - .agentile/planset/compute-marketplace-buildout/CM-07-dataparallel-scoped.md
+# - .agentile/formal/specs/compute/DataParallelTrainingJob.tla
+# - citrate_v0.01.1/docs/adr/ADR-008-gradient-commitment.md
+# - citrate_v0.01.1/contracts/src/ComputePoolTraining.sol
+
+[lib]
+name = "citrate_training_worker"
+path = "src/lib.rs"
+
+[[bin]]
+name = "citrate-training-worker"
+path = "src/bin/main.rs"
+
+[dependencies]
+tokio = { workspace = true }
+async-trait = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha3 = { workspace = true }
+hex = "0.4"
+parking_lot = { workspace = true }
+ethereum-types = "0.14"
+
+# S1 HTTP chain clients: JSON-RPC + EIP-1559 signing. Mirrors the
+# deps in pool-coordinator's http_chain path so the two wallet
+# surfaces roundtrip on the same Web3 SSv3 keystore format
+# (see FIXME at top of wallet.rs — unify post-pilot).
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+k256 = { version = "0.13", features = ["ecdsa"] }
+rlp = "0.5"
+pbkdf2 = "0.12"
+sha2 = "0.10"
+aes = "0.8"
+ctr = "0.9"
+
+# Daemon binary needs tracing-subscriber at runtime (was dev-only
+# when the binary was a stub). Kept a single dep line — the dev
+# section below no longer re-declares it.
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# S1 libp2p transport (see src/libp2p_transport.rs + ADR-009).
+# Feature set is deliberately minimal — we use tcp + noise + yamux
+# for real peer-to-peer, memory for in-process tests, gossipsub
+# for the message layer, and identify+ping for liveness.
+# macros enables `#[derive(NetworkBehaviour)]`.
+libp2p = { workspace = true, features = [
+    "tokio",
+    "tcp",
+    "noise",
+    "yamux",
+    "gossipsub",
+    "identify",
+    "ping",
+    "macros",
+    "ed25519",
+    "secp256k1",
+] }
+bincode = { workspace = true }
+futures = "0.3"
+
+# S2 candle backend (feature-gated). When the `candle-gpu` feature
+# is OFF (default), these are not pulled in and the crate compiles
+# CPU-only with no candle deps in the dependency tree. When ON,
+# the crate gains a CPU-runnable Candle ModelBackend; turning on
+# the candle-core/cuda sub-feature at install time enables H100.
+# See `candle_backend.rs` module doc for the full feature matrix.
+candle-core = { version = "0.8", optional = true }
+candle-nn = { version = "0.8", optional = true }
+safetensors = { version = "0.4", optional = true }
+
+[features]
+default = []
+# Enables the structural Candle ModelBackend. CPU-runnable.
+candle-gpu = ["dep:candle-core", "dep:candle-nn", "dep:safetensors"]
+# Enables H100/CUDA acceleration on top of candle-gpu. Requires
+# the CUDA runtime to be present at build + runtime.
+candle-cuda = ["candle-gpu", "candle-core/cuda"]
+
+[dev-dependencies]
+tokio = { workspace = true }
+# Stub JSON-RPC server for http_chain_* tests, mirroring the
+# pool-coordinator pattern (axum is dev-only for training-worker).
+axum = "0.7"

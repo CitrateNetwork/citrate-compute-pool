@@ -1,0 +1,80 @@
+[package]
+name = "citrate-pool-coordinator"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Off-chain coordinator daemon for ComputePool InferencePool dispatch. Subscribes to ComputeRequested, checks coordinator role per epoch, dispatches via /pool-infer to a stateless-round-robin-selected pool member, records dispatch + completion on-chain."
+
+# See:
+# - .agentile/sprints/completed/sprint-cm-04-buyer-webapp/REPORT.md (CM-04 close-out)
+# - .agentile/planset/compute-marketplace-buildout/CM-05-compute-pool-inference.md (this sprint)
+# - .agentile/formal/specs/compute/InferencePoolLifecycle.tla (state machine)
+# - citrate_v0.01.1/specs/gherkin/inference_pool.feature (behavior contract)
+#
+# WP-05.1 already added the on-chain primitives (coordinatorFor,
+# recordDispatch, reassignCoordinator). This crate is the off-chain
+# half — every pool member runs one of these binaries pointed at the
+# pool(s) they're a member of.
+
+# Dual lib + bin so integration tests can drive the daemon's loop
+# logic without spawning a separate process.
+
+[lib]
+name = "citrate_pool_coordinator"
+path = "src/lib.rs"
+
+[[bin]]
+name = "citrate-pool-coordinator"
+path = "src/main.rs"
+
+[dependencies]
+# Async runtime
+tokio = { workspace = true }
+
+# HTTP client for /pool-infer dispatch + JSON-RPC
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Hashing for the stateless round-robin: hash(jobId) % memberCount
+sha3 = { workspace = true }
+hex = "0.4"
+ethereum-types = "0.14"
+
+# CM-05 slice-2: wallet + tx signing for on-chain writes
+k256 = { version = "0.13", features = ["ecdsa"] }
+rlp = "0.5"
+
+# Web3 SSv3 keystore unlock (matches the JS SDK's W-01 format so
+# keystores roundtrip between JS and Rust wallets byte-for-byte)
+pbkdf2 = "0.12"
+sha2 = "0.10"
+aes = "0.8"
+ctr = "0.9"
+
+# Prometheus metrics
+metrics = "0.22"
+metrics-exporter-prometheus = { version = "0.13", default-features = false }
+once_cell = "1"
+axum = "0.7"
+
+# Websocket event subscription (optional path, opt-in via
+# CITRATE_POOL_WS_URL; polling via reqwest remains the default).
+tokio-tungstenite = { version = "0.21", features = ["rustls-tls-webpki-roots"] }
+futures-util = "0.3"
+
+# Observability
+tracing = { workspace = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+thiserror = { workspace = true }
+
+async-trait = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+# Stub providers in integration tests
+axum = "0.7"
