@@ -1332,6 +1332,7 @@ mod tests {
     /// Build an ABI-encoded PoolJobSpec bytes payload given
     /// (version, mode, modelHash, inputData, maxTokens,
     /// verificationTier, batchSize).
+    #[allow(non_snake_case)] // matches Solidity function name verbatim for grep-ability
     fn encode_poolJobSpec_bytes(
         version: u8,
         mode: u8,
@@ -1382,6 +1383,7 @@ mod tests {
 
     /// Build an ABI-encoded PoolJob return given the fields we
     /// care about (jobspec_bytes payload; other fields are zeros).
+    #[allow(non_snake_case)] // matches Solidity function name verbatim for grep-ability
     fn encode_poolJob_return(jobspec_bytes: &[u8]) -> String {
         // Head: 8 × 32 = 256 bytes. jobSpec offset points PAST the
         // head.
