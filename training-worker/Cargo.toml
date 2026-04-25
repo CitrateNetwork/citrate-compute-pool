@@ -71,6 +71,24 @@ libp2p = { workspace = true, features = [
 bincode = { workspace = true }
 futures = "0.3"
 
+# S2 candle backend (feature-gated). When the `candle-gpu` feature
+# is OFF (default), these are not pulled in and the crate compiles
+# CPU-only with no candle deps in the dependency tree. When ON,
+# the crate gains a CPU-runnable Candle ModelBackend; turning on
+# the candle-core/cuda sub-feature at install time enables H100.
+# See `candle_backend.rs` module doc for the full feature matrix.
+candle-core = { version = "0.8", optional = true }
+candle-nn = { version = "0.8", optional = true }
+safetensors = { version = "0.4", optional = true }
+
+[features]
+default = []
+# Enables the structural Candle ModelBackend. CPU-runnable.
+candle-gpu = ["dep:candle-core", "dep:candle-nn", "dep:safetensors"]
+# Enables H100/CUDA acceleration on top of candle-gpu. Requires
+# the CUDA runtime to be present at build + runtime.
+candle-cuda = ["candle-gpu", "candle-core/cuda"]
+
 [dev-dependencies]
 tokio = { workspace = true }
 # Stub JSON-RPC server for http_chain_* tests, mirroring the
