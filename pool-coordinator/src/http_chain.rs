@@ -1518,4 +1518,18 @@ mod tests {
             .await
             .expect_err("F-5: malformed chain_id response must reject");
     }
+
+    /// F-5.4: an RPC that returns null for chain_id is rejected.
+    /// (The decoder treats null as "missing result" → CoordinatorError::Chain.)
+    #[tokio::test]
+    async fn f5_verify_chain_id_rejects_null_response() {
+        let state = StubState::new();
+        state.queue("eth_chainId", json!(null));
+        let addr = spawn_stub_rpc(state).await;
+        let adapter = make_adapter(format!("http://{}", addr));
+        adapter
+            .verify_rpc_chain_id()
+            .await
+            .expect_err("F-5: null chain_id response must reject");
+    }
 }
