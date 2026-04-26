@@ -60,6 +60,20 @@ pub fn compute_leaf(commit: &StepCommit) -> B256 {
 /// Hash two sibling nodes with the sorted-pair convention used by
 /// the contract's Merkle verifier: the smaller-valued child goes
 /// left.
+///
+/// RM-J3 (post-RM-I-3): mirrors the SOL-20 domain-separator scheme
+/// the contract's `_verifyMerkleProof` uses. Internal nodes are
+/// prefixed with `MERKLE_INTERNAL_PREFIX = 0x01` to prevent the
+/// second-preimage attack where an internal hash from a larger tree
+/// could be presented as a leaf in a smaller tree. WP-I1.8 added the
+/// prefix to the mock's verifier (`training-worker/src/chain.rs::
+/// verify_merkle_proof`); without it here too, the worker builds
+/// proofs against an unprefixed root and they fail verification both
+/// in the mock and on-chain. The prefix matches
+/// `contracts/src/ComputePoolTraining.sol:761-762` exactly.
+const MERKLE_LEAF_PREFIX: u8 = 0x00;
+const MERKLE_INTERNAL_PREFIX: u8 = 0x01;
+
 fn hash_pair(a: B256, b: B256) -> B256 {
     let (left, right) = if a.as_bytes() <= b.as_bytes() {
         (a, b)
@@ -67,8 +81,23 @@ fn hash_pair(a: B256, b: B256) -> B256 {
         (b, a)
     };
     let mut hasher = Keccak256::new();
+    hasher.update([MERKLE_INTERNAL_PREFIX]);
     hasher.update(left.as_bytes());
     hasher.update(right.as_bytes());
+    let out = hasher.finalize();
+    let mut h = [0u8; 32];
+    h.copy_from_slice(&out);
+    B256::from(h)
+}
+
+/// Promote a raw leaf into the leaf domain via `keccak(0x00 || leaf)`.
+/// Mirrors the first line of `_verifyMerkleProof` on-chain. Used at the
+/// bottom of `compute_epoch_root` so the root we build matches the
+/// root the contract reconstructs during verification.
+fn promote_leaf(leaf: B256) -> B256 {
+    let mut hasher = Keccak256::new();
+    hasher.update([MERKLE_LEAF_PREFIX]);
+    hasher.update(leaf.as_bytes());
     let out = hasher.finalize();
     let mut h = [0u8; 32];
     h.copy_from_slice(&out);
@@ -85,17 +114,26 @@ pub fn compute_epoch_root(commits: &[StepCommit]) -> (B256, Vec<B256>) {
     let mut sorted: Vec<&StepCommit> = commits.iter().collect();
     sorted.sort_by(|a, b| a.step.cmp(&b.step).then_with(|| a.worker.cmp(&b.worker)));
 
+    // RM-J3: returned `leaves` are the UNPREFIXED leaves — the values
+    // the contract's `_verifyMerkleProof(proof, root, leaf)` expects as
+    // the `leaf` argument. They are what `challenge_step` and
+    // `compute_proof` consume. The PROMOTED form (with `0x00` prefix)
+    // is used only internally during root reduction.
     let leaves: Vec<B256> = sorted.iter().map(|c| compute_leaf(c)).collect();
 
     if leaves.is_empty() {
         return (B256::zero(), leaves);
     }
     if leaves.len() == 1 {
-        return (leaves[0], leaves);
+        // Single-leaf root: contract's verifier with empty proof
+        // produces `keccak(0x00 || leaf)`. Match that.
+        return (promote_leaf(leaves[0]), leaves);
     }
 
-    // Bottom-up Merkle reduction with zero-padding to next power of two.
-    let mut level = leaves.clone();
+    // Bottom-up Merkle reduction. Promote leaves into the leaf domain
+    // first (`keccak(0x00 || leaf)`), then reduce with `hash_pair`
+    // which adds `0x01` prefix on each internal node.
+    let mut level: Vec<B256> = leaves.iter().map(|l| promote_leaf(*l)).collect();
     while level.len() > 1 {
         let mut next = Vec::with_capacity((level.len() + 1) / 2);
         let mut i = 0;
@@ -123,9 +161,22 @@ pub fn compute_proof(leaves: &[B256], target: usize) -> Vec<B256> {
         return proof;
     }
     if leaves.len() == 1 {
-        return proof; // Single-leaf tree: the leaf IS the root.
+        // Single-leaf tree: the contract's verifier with empty proof
+        // produces `keccak(0x00 || leaf)`, which equals the root we
+        // returned from `compute_epoch_root`. Empty proof verifies
+        // correctly. RM-J3 (post-RM-I-3 prefix discipline).
+        return proof;
     }
-    let mut level = leaves.to_vec();
+
+    // RM-J3: walk the tree at the SAME level shape `compute_epoch_root`
+    // uses — start at the promoted-leaf level (`keccak(0x00 || leaf)`),
+    // then reduce with `hash_pair` (adds `0x01` per level). The proof's
+    // first sibling is therefore a promoted leaf; the contract's
+    // verifier — given the unprefixed `leaf` — will compute
+    // `keccak(0x00 || leaf)` for the starting `computed`, then combine
+    // with our first proof element using `keccak(0x01 || ...)`. That
+    // matches the level shape exactly.
+    let mut level: Vec<B256> = leaves.iter().map(|l| promote_leaf(*l)).collect();
     let mut idx = target;
     while level.len() > 1 {
         let sibling_idx = if idx % 2 == 0 { idx + 1 } else { idx - 1 };
@@ -155,11 +206,16 @@ pub fn compute_proof(leaves: &[B256], target: usize) -> Vec<B256> {
 }
 
 /// Verify a Merkle proof — the mirror of the on-chain verifier in
-/// ComputePoolTraining._verifyMerkleProof. Used by worker-side
+/// `ComputePoolTraining._verifyMerkleProof`. Used by worker-side
 /// unit tests to assert round-trip correctness before shipping
 /// proofs on-chain.
+///
+/// RM-J3 (post-RM-I-3): promotes the raw `leaf` into the leaf domain
+/// (`keccak(0x00 || leaf)`) before walking the proof, mirroring the
+/// contract's behaviour. Internal-node hashing (`hash_pair`) adds the
+/// `0x01` prefix automatically.
 pub fn verify_proof(proof: &[B256], root: B256, leaf: B256) -> bool {
-    let mut computed = leaf;
+    let mut computed = promote_leaf(leaf);
     for sibling in proof {
         computed = hash_pair(computed, *sibling);
     }
@@ -194,11 +250,18 @@ mod tests {
     }
 
     #[test]
-    fn single_commit_is_single_leaf_root() {
+    fn single_commit_is_promoted_leaf_root() {
+        // RM-J3: with the SOL-20 prefix scheme, a single-leaf root is
+        // `keccak(0x00 || leaf)`, NOT the bare leaf. The contract's
+        // verifier with empty proof produces this same value, so an
+        // empty proof against this root and the unprefixed leaf
+        // verifies correctly.
         let c = mk_commit(0, addr(1), 0x11);
         let (root, leaves) = compute_epoch_root(&[c.clone()]);
         assert_eq!(leaves.len(), 1);
-        assert_eq!(root, compute_leaf(&c));
+        assert_eq!(root, promote_leaf(compute_leaf(&c)));
+        // Round-trip check: empty proof + unprefixed leaf verifies.
+        assert!(verify_proof(&[], root, compute_leaf(&c)));
     }
 
     #[test]

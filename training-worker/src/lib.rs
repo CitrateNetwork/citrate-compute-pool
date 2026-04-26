@@ -76,7 +76,7 @@ pub use types::{
 pub use worker::{Worker, WorkerConfig, WorkerOutcome};
 
 pub use attestation::{
-    build_submit_strict_call, encode_submit_strict_calldata, parse_jwt, reattest_at,
+    build_submit_strict_bound_call, encode_submit_strict_bound_calldata, parse_jwt, reattest_at,
     validate_registry_address, AttestationBundle, AttestationError, FixtureAttestationSource,
     ParsedJwt,
 };
