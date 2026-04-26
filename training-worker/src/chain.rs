@@ -682,19 +682,48 @@ impl ChainClient for MockChainClient {
     }
 }
 
-/// Merkle proof verification matching ComputePoolTraining._verifyMerkleProof.
+/// Merkle proof verification matching `ComputePoolTraining._verifyMerkleProof`.
+///
 /// Split out as a free function so tests can call it without holding the
 /// MockState lock.
+///
+/// RM-I / WP-I1.8 (re-audit Stream 3 finding F-4):
+///   The contract (`contracts/src/ComputePoolTraining.sol::_verifyMerkleProof`,
+///   ~line 764, post-SOL-20) prefixes leaf hashes with `0x00` and internal-
+///   node hashes with `0x01` to prevent second-preimage attacks where an
+///   internal hash from a larger tree could be presented as a leaf in a
+///   smaller tree. The mock's prior implementation did plain sorted-pair
+///   concat without prefixes; workers generated proofs that passed the mock
+///   tests and would have failed on-chain at admission. RM-I closes the
+///   parity gap so the mock and contract produce byte-identical roots.
+///
+/// Domain separators (must match `contracts/src/ComputePoolTraining.sol:761-762`):
+const MERKLE_LEAF_PREFIX: u8 = 0x00;
+const MERKLE_INTERNAL_PREFIX: u8 = 0x01;
+
 fn verify_merkle_proof(proof: &[B256], root: B256, leaf: B256) -> bool {
     use sha3::{Digest, Keccak256};
-    let mut computed = leaf;
+    // Promote the raw leaf hash into the leaf domain (0x00 || leaf).
+    let mut computed = {
+        let mut h = Keccak256::new();
+        h.update([MERKLE_LEAF_PREFIX]);
+        h.update(leaf.as_bytes());
+        let out = h.finalize();
+        let mut bytes = [0u8; 32];
+        bytes.copy_from_slice(&out);
+        B256::from(bytes)
+    };
     for sibling in proof {
         let (left, right) = if computed.as_bytes() <= sibling.as_bytes() {
             (computed, *sibling)
         } else {
             (*sibling, computed)
         };
+        // Internal node: keccak(0x01 || left || right) — matches the
+        // contract's `keccak256(abi.encodePacked(MERKLE_INTERNAL_PREFIX,
+        // computed, sibling))` ordering.
         let mut hasher = Keccak256::new();
+        hasher.update([MERKLE_INTERNAL_PREFIX]);
         hasher.update(left.as_bytes());
         hasher.update(right.as_bytes());
         let out = hasher.finalize();
@@ -989,5 +1018,101 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, ChainError::ChallengeEpochOutOfRange));
+    }
+
+    // ────────────────────────────────────────────────────────────────
+    // RM-I / WP-I1.8 — Merkle leaf/internal domain separators (F-4 mock parity).
+    //
+    // Verifies the mock's `verify_merkle_proof` matches the contract's
+    // `_verifyMerkleProof` byte-for-byte: leaves are `keccak(0x00 || leaf)`
+    // and internal nodes are `keccak(0x01 || L || R)` (with sorted L<=R).
+    // Pre-fix the mock did plain sorted-pair concat without prefixes; a
+    // proof that verified in the mock would have been rejected on-chain.
+    // ────────────────────────────────────────────────────────────────
+
+    fn keccak(input: &[u8]) -> B256 {
+        use sha3::{Digest, Keccak256};
+        let out = Keccak256::digest(input);
+        let mut bytes = [0u8; 32];
+        bytes.copy_from_slice(&out);
+        B256::from(bytes)
+    }
+
+    /// Build a 2-leaf Merkle root using the contract's prefix scheme so a
+    /// caller can construct a proof that verifies in BOTH the mock and the
+    /// live contract. Returns `(root, leaf_a_proof_for_b)`.
+    fn build_two_leaf_root(leaf_a: B256, leaf_b: B256) -> (B256, Vec<B256>) {
+        // Domain-promote each leaf.
+        let promoted_a = keccak(&[&[0x00u8] as &[u8], leaf_a.as_bytes()].concat());
+        let promoted_b = keccak(&[&[0x00u8] as &[u8], leaf_b.as_bytes()].concat());
+        // Sorted internal hash with prefix.
+        let (l, r) = if promoted_a.as_bytes() <= promoted_b.as_bytes() {
+            (promoted_a, promoted_b)
+        } else {
+            (promoted_b, promoted_a)
+        };
+        let mut buf = vec![0x01u8];
+        buf.extend_from_slice(l.as_bytes());
+        buf.extend_from_slice(r.as_bytes());
+        let root = keccak(&buf);
+        // Proof for leaf_a is just leaf_b (its sibling).
+        (root, vec![promoted_b])
+    }
+
+    #[test]
+    fn test_wp_i1_8_two_leaf_proof_verifies_with_prefixes() {
+        let leaf_a = B256::repeat_byte(0xAA);
+        let leaf_b = B256::repeat_byte(0xBB);
+        let (root, proof) = build_two_leaf_root(leaf_a, leaf_b);
+        assert!(
+            super::verify_merkle_proof(&proof, root, leaf_a),
+            "WP-I1.8: a proof built with the contract's prefix scheme \
+             must verify in the mock's verify_merkle_proof."
+        );
+    }
+
+    #[test]
+    fn test_wp_i1_8_unprefixed_proof_does_not_verify() {
+        // Pre-fix path: build root WITHOUT prefixes, expect verification to fail
+        // because `verify_merkle_proof` now uses prefixes.
+        let leaf_a = B256::repeat_byte(0xAA);
+        let leaf_b = B256::repeat_byte(0xBB);
+        // Plain sorted-pair (no prefixes).
+        let (l, r) = if leaf_a.as_bytes() <= leaf_b.as_bytes() {
+            (leaf_a, leaf_b)
+        } else {
+            (leaf_b, leaf_a)
+        };
+        let mut buf = Vec::with_capacity(64);
+        buf.extend_from_slice(l.as_bytes());
+        buf.extend_from_slice(r.as_bytes());
+        let unprefixed_root = keccak(&buf);
+        let proof = vec![leaf_b];
+        assert!(
+            !super::verify_merkle_proof(&proof, unprefixed_root, leaf_a),
+            "WP-I1.8: a proof built WITHOUT the contract's prefix scheme \
+             must NOT verify (the mock now mirrors the contract's prefixed \
+             verification)."
+        );
+    }
+
+    #[test]
+    fn test_wp_i1_8_leaf_internal_collision_rejected() {
+        // Second-preimage protection: an internal hash from a larger tree
+        // must not be verifiable as a leaf in a smaller tree.
+        let bytes = [0x42u8; 32];
+        // Treat `bytes` as if it were a "leaf" — but the prefix means
+        // `verify_merkle_proof` would compute keccak(0x00 || bytes), not
+        // keccak(bytes). Construct a "root" that's just bytes (as if we
+        // accepted it as a 1-element proof). The verifier with prefix
+        // scheme produces a different hash and rejects.
+        let leaf = B256::from(bytes);
+        let attempted_root = leaf; // attacker hopes the leaf hash equals the root
+        let proof = vec![]; // 0-element proof
+        assert!(
+            !super::verify_merkle_proof(&proof, attempted_root, leaf),
+            "WP-I1.8: leaf-as-root attack must fail (prefix changes the \
+             hash domain)."
+        );
     }
 }
