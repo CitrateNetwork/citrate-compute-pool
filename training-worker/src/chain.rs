@@ -66,7 +66,28 @@ pub enum ChainError {
     VoterNotOnCommittee,
     #[error("voter already cast a vote on this challenge")]
     AlreadyVoted,
+    /// RM-G2.4 / audit F-4 — mirror of `commitEpoch`'s
+    /// `require(root != bytes32(0), "ComputePoolTraining: zero root")`.
+    #[error("zero epoch root rejected (parity with on-chain commitEpoch)")]
+    ZeroEpochRoot,
+    /// RM-G2.4 / audit F-4 — mirror of `challengeStep`'s
+    /// `require(step < job.stepsPerEpoch, ...)`.
+    #[error("challenge step out of range")]
+    StepOutOfRange,
+    /// RM-G2.4 / audit F-4 — mirror of `challengeStep`'s
+    /// `require(epoch < job.epochCount, ...)`.
+    #[error("challenge epoch out of range")]
+    ChallengeEpochOutOfRange,
+    /// RM-G2.4 / audit F-4 — mirror of `challengeStep`'s
+    /// `require(msg.value == CHALLENGE_BOND, ...)`.
+    #[error("challenge bond must equal CHALLENGE_BOND constant")]
+    WrongChallengeBond,
 }
+
+/// RM-G2.4 / audit F-4: must match `ComputePoolTraining.CHALLENGE_BOND`.
+/// The on-chain constant is `1 ether`; in workspace fixed-point that's
+/// 1e18 wei, which fits in `u128`.
+pub const CHALLENGE_BOND: u128 = 1_000_000_000_000_000_000;
 
 /// Summary of a training job's on-chain state as seen by a worker.
 #[derive(Clone, Debug)]
@@ -389,6 +410,16 @@ impl ChainClient for MockChainClient {
         epoch: EpochIndex,
         root: B256,
     ) -> Result<(), ChainError> {
+        // RM-G2.4 / audit F-4: parity with the on-chain
+        // `require(root != bytes32(0), ...)` in
+        // ComputePoolTraining.sol::commitEpoch. Pre-fix the mock
+        // accepted a zero root and the worker tests passed; the
+        // contract would have reverted, so a worker that was OK
+        // against the mock could fail in production.
+        if root == B256::default() {
+            return Err(ChainError::ZeroEpochRoot);
+        }
+
         let mut state = self.inner.lock();
         let block = state.block_number;
         let job = state
@@ -496,6 +527,20 @@ impl ChainClient for MockChainClient {
         }
         if !job.joined.contains(&target) {
             return Err(ChainError::TargetNotJoined);
+        }
+        // RM-G2.4 / audit F-4: mirror the on-chain bond + range
+        // checks in ComputePoolTraining.sol::challengeStep. Pre-fix
+        // the mock accepted any bond and any step/epoch — a worker
+        // that filed a malformed challenge in tests would discover
+        // the mismatch only when it hit the live contract.
+        if bond != CHALLENGE_BOND {
+            return Err(ChainError::WrongChallengeBond);
+        }
+        if step >= job.spec.steps_per_epoch {
+            return Err(ChainError::StepOutOfRange);
+        }
+        if epoch >= job.spec.epoch_count {
+            return Err(ChainError::ChallengeEpochOutOfRange);
         }
         let root = job
             .epoch_roots
@@ -828,5 +873,121 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, ChainError::WrongEpoch { .. }));
+    }
+
+    // ── RM-G2.4 / audit F-4 — invariant parity with the on-chain
+    // ComputePoolTraining contract. Each test mirrors one
+    // `require(...)` in `ComputePoolTraining.sol` so a worker that
+    // passes against the mock won't surprise-fail against the
+    // contract.
+
+    /// Mirrors `ComputePoolTraining.sol` line 367:
+    /// `require(root != bytes32(0), "ComputePoolTraining: zero root")`.
+    #[tokio::test]
+    async fn f4_commit_epoch_rejects_zero_root() {
+        let chain = MockChainClient::new();
+        let job_id = chain.create_job(spec());
+        let w1 = Address::repeat_byte(1);
+        let w2 = Address::repeat_byte(2);
+        let w3 = Address::repeat_byte(3);
+        for w in [w1, w2, w3] {
+            chain
+                .join_training_job(job_id, w, spec().per_worker_stake)
+                .await
+                .unwrap();
+        }
+        chain.close_recruitment(job_id, w1).await.unwrap();
+
+        let err = chain
+            .commit_epoch(job_id, w1, 0, B256::default())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ChainError::ZeroEpochRoot));
+    }
+
+    async fn _f4_setup() -> (Arc<MockChainClient>, JobId, Address, Address) {
+        let chain = MockChainClient::new();
+        let job_id = chain.create_job(spec());
+        let w1 = Address::repeat_byte(1);
+        let w2 = Address::repeat_byte(2);
+        let w3 = Address::repeat_byte(3);
+        for w in [w1, w2, w3] {
+            chain
+                .join_training_job(job_id, w, spec().per_worker_stake)
+                .await
+                .unwrap();
+        }
+        chain.close_recruitment(job_id, w1).await.unwrap();
+        chain
+            .commit_epoch(job_id, w1, 0, B256::repeat_byte(0xEE))
+            .await
+            .unwrap();
+        (chain, job_id, w1, w2)
+    }
+
+    /// Mirrors `ComputePoolTraining.sol` line 537:
+    /// `require(msg.value == CHALLENGE_BOND, ...)`.
+    #[tokio::test]
+    async fn f4_challenge_step_rejects_wrong_bond() {
+        let (chain, job_id, w1, w2) = _f4_setup().await;
+        // Wrong bond.
+        let err = chain
+            .challenge_step(
+                job_id,
+                w2,
+                0,
+                0,
+                w1,
+                B256::repeat_byte(0xAA),
+                vec![],
+                CHALLENGE_BOND - 1,
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ChainError::WrongChallengeBond));
+    }
+
+    /// Mirrors `ComputePoolTraining.sol` line 538:
+    /// `require(step < job.stepsPerEpoch, ...)`.
+    #[tokio::test]
+    async fn f4_challenge_step_rejects_step_out_of_range() {
+        let (chain, job_id, w1, w2) = _f4_setup().await;
+        // spec().steps_per_epoch is 2, so step 2 is out of range.
+        let err = chain
+            .challenge_step(
+                job_id,
+                w2,
+                0,
+                spec().steps_per_epoch,
+                w1,
+                B256::repeat_byte(0xAA),
+                vec![],
+                CHALLENGE_BOND,
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ChainError::StepOutOfRange));
+    }
+
+    /// Mirrors `ComputePoolTraining.sol` line 539:
+    /// `require(epoch < job.epochCount, ...)`.
+    #[tokio::test]
+    async fn f4_challenge_step_rejects_epoch_out_of_range() {
+        let (chain, job_id, w1, w2) = _f4_setup().await;
+        // spec().epoch_count is 2, so epoch 2 is out of range.
+        let err = chain
+            .challenge_step(
+                job_id,
+                w2,
+                spec().epoch_count,
+                0,
+                w1,
+                B256::repeat_byte(0xAA),
+                vec![],
+                CHALLENGE_BOND,
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ChainError::ChallengeEpochOutOfRange));
     }
 }
