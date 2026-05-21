@@ -52,7 +52,14 @@ x25519-dalek = "2.0"
 rand = "0.8"
 
 # Networking
-libp2p = "0.54"
+# REM-13a (2026-05-20): bumped 0.54 → 0.56 to pull in patched
+# rustls-webpki ≥0.103.13 (closes RUSTSEC-2026-0098/0099 name-constraint
+# bypasses fp-checked at per-repo/citrate-compute-pool/F-05_FP_CHECK.md)
+# AND patched hickory-proto ≥0.26.1 (closes RUSTSEC-2026-0119 O(n²) DoS
+# fp-checked at per-repo/citrate-compute-pool/F-07_FP_CHECK.md = REM-15a).
+# 0.54 → 0.56 is a two-minor bump; libp2p public API for tcp+noise+yamux+
+# gossipsub+identify+ping has been stable across these minors.
+libp2p = "0.56"
 quinn = "0.11"
 
 # Storage
