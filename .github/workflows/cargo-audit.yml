@@ -1,0 +1,68 @@
+name: cargo audit (tripwire)
+
+# REM-13a / REM-15a tripwire (2026-05-20 federation-split audit):
+# Catches regression of the closed F-05 (rustls-webpki) advisory
+# cluster and surfaces new advisories early. Runs per-PR + weekly
+# per the cadence in:
+#   citrate-agentile-archive/sops/vulnerability-scanning.md
+#
+# Failure policy:
+#   * `cargo audit` fail on any UNALLOWED advisory.
+#   * Known-deferred advisories are listed in `audit.toml` with a
+#     reason + the linked REM tracker, so adding a new finding to
+#     `audit.toml` requires a deliberate PR (which the reviewer must
+#     reject if the new finding isn't matched by an open REM).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # Weekly Monday 08:00 UTC.
+    - cron: '0 8 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cargo-audit-${{ github.event.pull_request.head.ref || github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+
+      - name: Run cargo audit
+        # `cargo audit` reads ~/.cargo/audit.toml not project-local,
+        # so the ignores below are inline. Each ignore MUST cite the
+        # owning REM tracker. Documentation copy of these ignores
+        # lives in the project-root `audit.toml` for assessor
+        # convenience; it is not consumed by the tool.
+        #
+        # REM-15a (open — upstream-blocked):
+        #   - RUSTSEC-2026-0119 hickory-proto O(n²) DoS — needs
+        #     libp2p-mdns upstream bump to hickory >=0.26.1
+        #   - RUSTSEC-2026-0118 hickory-proto NSEC3 — no fix available
+        # NOTE: compute-pool does not use mdns (libp2p features
+        # exclude it); the hickory path is in-lockfile but not
+        # in-binary. See audit.toml for full reasoning.
+        #
+        # When either advisory closes upstream, REMOVE its --ignore
+        # flag here + the entry in audit.toml. Failure is the
+        # tripwire.
+        run: |
+          cargo audit \
+            --color always \
+            --ignore RUSTSEC-2026-0118 \
+            --ignore RUSTSEC-2026-0119

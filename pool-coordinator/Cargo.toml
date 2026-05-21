@@ -64,7 +64,15 @@ axum = "0.7"
 
 # Websocket event subscription (optional path, opt-in via
 # CITRATE_POOL_WS_URL; polling via reqwest remains the default).
-tokio-tungstenite = { version = "0.21", features = ["rustls-tls-webpki-roots"] }
+#
+# REM-13a (2026-05-20): bumped 0.21 → 0.27 to pull patched rustls
+# (0.23.x) + rustls-webpki (0.103.x). The 0.21 line pulled rustls
+# 0.22 + rustls-webpki 0.102.8 which was still vulnerable to the
+# F-05 name-constraint cluster (RUSTSEC-2026-0098/0099/0104/0049)
+# even after the libp2p bump fixed the libp2p side of the dep
+# graph. 0.21 → 0.27 is a fixed-feature-set bump; the
+# `rustls-tls-webpki-roots` feature name is unchanged.
+tokio-tungstenite = { version = "0.27", features = ["rustls-tls-webpki-roots"] }
 futures-util = "0.3"
 
 # Observability

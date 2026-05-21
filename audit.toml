@@ -1,0 +1,50 @@
+# cargo-audit configuration
+# REM-13a / REM-15a tripwire — 2026-05-20 federation-split audit
+#
+# Per the SOP at citrate-agentile-archive/sops/vulnerability-scanning.md
+# every dep advisory must either be (a) closed by a dep bump, or
+# (b) ignored here with a documented REM tracker + reason.
+
+[advisories]
+# Advisories explicitly accepted with reason. Each entry MUST cite the
+# REM tracker that owns the deferral. New entries are reviewed at PR
+# time by the audit reviewer; they MUST match an open REM with explicit
+# scope.
+ignore = [
+    # ─────────────────────────────────────────────────────────────────
+    # REM-15a (open — upstream-blocked)
+    # ─────────────────────────────────────────────────────────────────
+    # RUSTSEC-2026-0119 — hickory-proto O(n²) name compression DoS.
+    # Fixed in hickory-proto >=0.26.1. libp2p-mdns ^0.48.0 (which the
+    # libp2p umbrella 0.56 pulls transitively) pins hickory ^0.25, so
+    # cargo's resolver cannot move us to 0.26.1 until libp2p-mdns
+    # upstream bumps. compute-pool does not actually use mdns (the
+    # libp2p feature list excludes it: see training-worker/Cargo.toml
+    # libp2p features [tokio, tcp, noise, yamux, gossipsub, identify,
+    # ping, macros, ed25519, secp256k1]). The hickory-proto path is
+    # therefore present-in-lockfile but not present-in-binary.
+    # Watch: https://github.com/libp2p/rust-libp2p/issues
+    # Verdict per fp-check F-07: TRUE POSITIVE for the libp2p mesh
+    # reachability *if* mdns were enabled; ignorable today because
+    # mdns is off.
+    "RUSTSEC-2026-0119",
+
+    # RUSTSEC-2026-0118 — hickory-proto NSEC3 unbounded loop.
+    # "No fixed upgrade is available" per the advisory itself. Same
+    # path as 0119 (libp2p-mdns transitive). Re-evaluate when
+    # hickory-proto ships a fix; remove this ignore entry then.
+    "RUSTSEC-2026-0118",
+]
+
+# ─── Unmaintained-warning ignores (REM-21) ─────────────────────────
+# These are NOT in the `ignore` array above because `cargo audit`'s
+# default policy is to surface them as warnings, not errors. They
+# don't fail the build. They're tracked under REM-21 for rolling
+# replacement.
+#
+# Current unmaintained:
+#   - RUSTSEC-2025-0141 (bincode 1.x; migrate to v2 or postcard)
+#   - RUSTSEC-2024-0436 (paste; migrate to pastey)
+#
+# If/when a hard advisory lands on either crate, add to the `ignore`
+# array above with a REM-21-NN sub-tracker.
