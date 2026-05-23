@@ -41,10 +41,6 @@ jobs:
           - target: x86_64-unknown-linux-gnu
             runner: ubuntu-latest
             archive: tar.gz
-          - target: aarch64-unknown-linux-gnu
-            runner: ubuntu-latest
-            archive: tar.gz
-            cross: true
           - target: x86_64-apple-darwin
             runner: macos-latest
             archive: tar.gz
@@ -88,10 +84,10 @@ jobs:
           set -e
           if [[ "${{ matrix.cross }}" == "true" ]]; then
             cross build --release --locked --target ${{ matrix.target }} \
-              -p pool-coordinator -p training-worker
+              -p citrate-pool-coordinator -p citrate-training-worker
           else
             cargo build --release --locked --target ${{ matrix.target }} \
-              -p pool-coordinator -p training-worker
+              -p citrate-pool-coordinator -p citrate-training-worker
           fi
           ls -la "target/${{ matrix.target }}/release" | head -20
 
@@ -102,7 +98,7 @@ jobs:
           STAGE="citrate-compute-pool-${{ matrix.target }}"
           mkdir -p "dist/$STAGE"
           TARGET_DIR="target/${{ matrix.target }}/release"
-          for bin in pool-coordinator training-worker; do
+          for bin in citrate-pool-coordinator citrate-training-worker; do
             if [[ "${{ runner.os }}" == "Windows" ]]; then
               cp "$TARGET_DIR/$bin.exe" "dist/$STAGE/" 2>/dev/null || true
             else
