@@ -92,8 +92,10 @@ impl WsChainSubscriber {
                 "topics": [event_sig],
             }],
         });
+        // tokio-tungstenite 0.27: Message::Text now wraps Utf8Bytes (not String).
+        // .into() handles String → Utf8Bytes conversion.
         write
-            .send(Message::Text(subscribe_req.to_string()))
+            .send(Message::Text(subscribe_req.to_string().into()))
             .await
             .map_err(|e| {
                 CoordinatorError::Chain(format!("ws subscribe send: {}", e))
@@ -132,8 +134,11 @@ impl WsChainSubscriber {
             while let Some(msg) = read.next().await {
                 let frame = match msg {
                     Ok(Message::Text(s)) => s,
-                    Ok(Message::Binary(b)) => match String::from_utf8(b) {
-                        Ok(s) => s,
+                    // tungstenite 0.27: Binary payload is Bytes (not Vec<u8>);
+                    // Text wraps Utf8Bytes. Convert via .to_vec() then UTF-8
+                    // decode then .into() to get back to Utf8Bytes.
+                    Ok(Message::Binary(b)) => match String::from_utf8(b.to_vec()) {
+                        Ok(s) => s.into(),
                         Err(_) => continue,
                     },
                     Ok(Message::Ping(_)) | Ok(Message::Pong(_)) => continue,
