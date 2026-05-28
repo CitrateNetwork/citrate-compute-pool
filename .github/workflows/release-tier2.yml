@@ -201,7 +201,7 @@ jobs:
         run: |
           set -e
           cargo build --release --locked --target ${{ matrix.target }} \
-            -p pool-coordinator -p training-worker
+            -p citrate-pool-coordinator -p citrate-training-worker
 
       - name: Package installers
         shell: bash
