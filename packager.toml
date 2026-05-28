@@ -26,7 +26,7 @@ Two-binary distribution for the Citrate Compute Pool: pool-coordinator runs the 
 """
 authors  = ["Citrate Labs <support@citrate.ai>"]
 homepage = "https://citrate.ai"
-category = "Network"
+category = "DeveloperTool"
 copyright = "© 2026 Citrate Labs. BUSL-1.1."
 # Output formats. cargo-packager skips formats whose toolchain isn't
 # present on the build host: Linux runners produce deb + appimage,
@@ -117,7 +117,7 @@ languages = ["English"]
 # ─────────────────────────── Linux (.deb) ───────────────────────────
 [deb]
 priority = "optional"
-section = "net"
+section = "utils"
 # Runtime deps. Vendored OpenSSL means no libssl3. libc6 is implicit.
 depends = []
 # desktop-template = "branding/templates/desktop-template.desktop"
