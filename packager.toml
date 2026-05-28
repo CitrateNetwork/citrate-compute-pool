@@ -26,7 +26,6 @@ Two-binary distribution for the Citrate Compute Pool: pool-coordinator runs the 
 """
 authors  = ["Citrate Labs <support@citrate.ai>"]
 homepage = "https://citrate.ai"
-license-file = "LICENSE"
 category = "Network"
 copyright = "© 2026 Citrate Labs. BUSL-1.1."
 # Output formats. cargo-packager skips formats whose toolchain isn't
@@ -56,11 +55,11 @@ resources = [
 # Explicit binary inventory. `main = true` marks the entrypoint for
 # launcher menus (Start Menu group, Dock icon, .desktop Exec=).
 [[binaries]]
-path = "pool-coordinator"
+path = "citrate-pool-coordinator"
 main = true
 
 [[binaries]]
-path = "training-worker"
+path = "citrate-training-worker"
 
 # ─────────────────────────── macOS ───────────────────────────
 [macos]
