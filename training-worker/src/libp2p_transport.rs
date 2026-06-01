@@ -347,6 +347,28 @@ impl LibP2pTransport {
                                 match verify_envelope(&message.data) {
                                     Ok((sender_addr, worker_msg)) => {
                                         trace!(?sender_addr, %propagation_source, "gossipsub message accepted");
+
+                                        // RM-E.3 / COMPUTE_POOL-001: bind the inner
+                                        // StepCommit.worker to the cryptographically
+                                        // verified envelope sender. `verify_envelope`
+                                        // proves the signer == sender_addr, but the
+                                        // inner `worker` field is independent — a peer
+                                        // could sign with its own key and claim a
+                                        // victim's address. Drop any StepCommitted
+                                        // whose `worker` does not match the signer so
+                                        // the coordinator can never attribute a forged
+                                        // leaf to another worker.
+                                        if let WorkerMessage::StepCommitted(ref commit) = worker_msg {
+                                            if commit.worker != sender_addr {
+                                                warn!(
+                                                    ?sender_addr,
+                                                    claimed = ?commit.worker,
+                                                    "dropping StepCommitted: worker field does not match verified sender"
+                                                );
+                                                continue;
+                                            }
+                                        }
+
                                         let mut state = recv_state_task.lock().await;
                                         // Deliver to every registered peer
                                         // EXCEPT the claimed sender — we preserve
