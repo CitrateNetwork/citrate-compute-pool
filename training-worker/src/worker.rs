@@ -12,17 +12,81 @@
 //! path (collect step commits from peers, compute Merkle root,
 //! post commitEpoch tx).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use tokio::task::JoinHandle;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use crate::backend::ModelBackend;
 use crate::chain::{ChainClient, JobChainState};
 use crate::merkle::compute_epoch_root;
 use crate::transport::{Transport, WorkerMessage};
-use crate::types::{B256, JobId, StepCommit, WorkerAddress};
+use crate::types::{B256, EpochIndex, JobId, StepCommit, StepIndex, WorkerAddress};
+
+/// RM-E.3 / COMPUTE_POOL-001 — authenticated epoch-commit aggregation.
+///
+/// The coordinator's Merkle root drives reward/slash distribution, so the
+/// leaf set must be trustworthy. Pre-fix the aggregation counted any
+/// `StepCommit` whose `epoch` matched, with no membership check and no
+/// dedup — a single peer could flood `expected_total` forged commits
+/// (arbitrary `worker`/`step`/`commitment`) and finalize a root over an
+/// attacker-chosen leaf set before honest commits arrived.
+///
+/// This aggregator enforces, transport-agnostically:
+///   - **membership**: `commit.worker` must be in the on-chain worker set,
+///   - **dedup**: at most one accepted commit per `(worker, step)` pair.
+///
+/// (Sender authenticity — `verified_sender == commit.worker` — is enforced
+/// at the libp2p transport boundary where `verify_envelope` yields the
+/// signer; the InProcess test transport is trusted.)
+pub(crate) struct EpochAggregator {
+    epoch: EpochIndex,
+    members: HashSet<WorkerAddress>,
+    seen: HashSet<(WorkerAddress, StepIndex)>,
+    accepted: Vec<StepCommit>,
+}
+
+impl EpochAggregator {
+    pub(crate) fn new(
+        epoch: EpochIndex,
+        members: impl IntoIterator<Item = WorkerAddress>,
+    ) -> Self {
+        Self {
+            epoch,
+            members: members.into_iter().collect(),
+            seen: HashSet::new(),
+            accepted: Vec::new(),
+        }
+    }
+
+    /// Try to accept a commit into the aggregation. Returns `true` only if
+    /// it is for this epoch, from a registered worker, and the first commit
+    /// seen for its `(worker, step)` pair. Forged (non-member) and duplicate
+    /// commits are rejected so they cannot reach `expected_total` or alter
+    /// the root.
+    pub(crate) fn try_accept(&mut self, commit: StepCommit) -> bool {
+        if commit.epoch != self.epoch {
+            return false;
+        }
+        if !self.members.contains(&commit.worker) {
+            return false;
+        }
+        if !self.seen.insert((commit.worker, commit.step)) {
+            return false;
+        }
+        self.accepted.push(commit);
+        true
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.accepted.len()
+    }
+
+    pub(crate) fn into_commits(self) -> Vec<StepCommit> {
+        self.accepted
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct WorkerConfig {
@@ -151,17 +215,35 @@ where
             if self.config.is_coordinator {
                 let expected_total =
                     (worker_count as usize) * (spec.steps_per_epoch as usize);
-                let mut all_commits: Vec<StepCommit> = my_commits_this_epoch.clone();
 
-                while all_commits.len() < expected_total {
+                // RM-E.3 / COMPUTE_POOL-001: aggregate through a
+                // membership + (worker, step) dedup gate so a flooder
+                // cannot stuff forged or duplicate leaves into the root,
+                // nor prematurely satisfy `expected_total`. The verified
+                // gossip sender is bound to `commit.worker` at the libp2p
+                // transport boundary (see libp2p_transport::verify path);
+                // here we additionally require on-chain worker-set
+                // membership and uniqueness.
+                let mut agg = EpochAggregator::new(epoch, snap.workers.iter().copied());
+                for c in &my_commits_this_epoch {
+                    agg.try_accept(c.clone());
+                }
+
+                while agg.len() < expected_total {
                     if let Some(msg) = self.transport.recv(me).await {
                         if let WorkerMessage::StepCommitted(commit) = msg {
-                            if commit.epoch == epoch {
+                            if agg.try_accept(commit.clone()) {
                                 all_peer_commits
                                     .entry(commit.step)
                                     .or_default()
-                                    .push(commit.clone());
-                                all_commits.push(commit);
+                                    .push(commit);
+                            } else {
+                                warn!(
+                                    worker = %me,
+                                    epoch = epoch,
+                                    peer = %commit.worker,
+                                    "rejected non-member / duplicate / wrong-epoch step commit"
+                                );
                             }
                         }
                     } else {
@@ -169,7 +251,7 @@ where
                     }
                 }
 
-                let (root, _leaves) = compute_epoch_root(&all_commits);
+                let (root, _leaves) = compute_epoch_root(&agg.into_commits());
                 debug!(
                     worker = %me,
                     epoch = epoch,
@@ -250,4 +332,79 @@ fn _type_check() {
     // fail to compile.
     fn assert_send<T: Send>() {}
     assert_send::<B256>();
+}
+
+#[cfg(test)]
+mod compute_pool_001_tests {
+    use super::*;
+    use crate::merkle::compute_epoch_root;
+    use ethereum_types::{Address, H256};
+
+    fn addr(b: u8) -> WorkerAddress {
+        Address::from([b; 20])
+    }
+    fn commit(worker: WorkerAddress, epoch: u32, step: u32, c: u8) -> StepCommit {
+        StepCommit {
+            epoch,
+            step,
+            worker,
+            commitment: H256::from([c; 32]),
+            prev_weights: H256::zero(),
+        }
+    }
+
+    /// RM-E.3 / COMPUTE_POOL-001 tripwire: forged (non-member) and
+    /// duplicate `(worker, step)` commits must NOT be counted into the
+    /// aggregation or alter the epoch Merkle root. Pre-fix the loop pushed
+    /// every epoch-matching commit unconditionally, so this stream would
+    /// have polluted the root and could have short-circuited `expected_total`.
+    #[test]
+    fn tripwire_001_aggregator_rejects_forged_and_duplicate_commits() {
+        let w1 = addr(1);
+        let w2 = addr(2);
+        let evil = addr(0xEE); // NOT in the registered worker set
+        let members = [w1, w2];
+        let epoch = 0u32;
+
+        // Honest baseline: w1 and w2 each commit step 0.
+        let honest = vec![commit(w1, epoch, 0, 0x11), commit(w2, epoch, 0, 0x22)];
+        let (honest_root, _) = compute_epoch_root(&honest);
+
+        // Hostile stream interleaved with the honest commits.
+        let mut agg = EpochAggregator::new(epoch, members);
+        assert!(agg.try_accept(commit(w1, epoch, 0, 0x11)), "honest w1 accepted");
+        assert!(
+            !agg.try_accept(commit(evil, epoch, 0, 0xEE)),
+            "forged non-member commit must be rejected"
+        );
+        assert!(
+            !agg.try_accept(commit(w1, epoch, 0, 0x99)),
+            "duplicate (w1, step0) with divergent commitment must be rejected"
+        );
+        assert!(
+            !agg.try_accept(commit(w2, epoch + 1, 0, 0x22)),
+            "wrong-epoch commit must be rejected"
+        );
+        assert!(agg.try_accept(commit(w2, epoch, 0, 0x22)), "honest w2 accepted");
+
+        assert_eq!(agg.len(), 2, "only the two honest commits are counted");
+        let (got_root, _) = compute_epoch_root(&agg.into_commits());
+        assert_eq!(
+            got_root, honest_root,
+            "forged/duplicate leaves must not change the epoch root"
+        );
+    }
+
+    /// A flooder emitting only forged/non-member commits can never reach
+    /// `expected_total` — the guard removes the premature-finalize vector.
+    #[test]
+    fn tripwire_001_flood_of_forged_commits_never_counts() {
+        let w1 = addr(1);
+        let evil = addr(0xEE);
+        let mut agg = EpochAggregator::new(0, [w1]);
+        for step in 0..100u32 {
+            assert!(!agg.try_accept(commit(evil, 0, step, 0xEE)));
+        }
+        assert_eq!(agg.len(), 0, "no forged commit may be counted");
+    }
 }
