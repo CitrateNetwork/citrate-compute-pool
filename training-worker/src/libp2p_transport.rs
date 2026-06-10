@@ -499,9 +499,33 @@ impl Transport for LibP2pTransport {
 /// `(sender_addr, WorkerMessage)`. Any tamper (bad signature,
 /// mismatched public key, bad serialization) returns an error
 /// string that's logged at the call site.
+/// FUA-COMPUTE-POOL-01: hard limit on a decoded mesh message. bincode honors
+/// this limit while reading length prefixes, so a hostile envelope cannot make
+/// the decoder pre-allocate gigabytes before any signature/auth check runs.
+const MAX_ENVELOPE_BYTES: u64 = 4 * 1024 * 1024;
+
+/// bincode options matching the free-function wire format (fixint, little-endian,
+/// reject-trailing) but with a byte limit added (FUA-COMPUTE-POOL-01).
+fn bincode_limited() -> impl bincode::Options {
+    use bincode::Options;
+    bincode::DefaultOptions::new()
+        .with_fixint_encoding()
+        .with_limit(MAX_ENVELOPE_BYTES)
+}
+
 fn verify_envelope(bytes: &[u8]) -> Result<(WorkerAddress, WorkerMessage), String> {
-    let env: WireEnvelope =
-        bincode::deserialize(bytes).map_err(|e| format!("envelope decode: {e}"))?;
+    use bincode::Options;
+    // Reject an oversized frame up front, then decode under a byte limit (bincode
+    // checks length prefixes against the remaining limit → no pre-alloc OOM).
+    if bytes.len() as u64 > MAX_ENVELOPE_BYTES {
+        return Err(format!(
+            "envelope too large: {} > {MAX_ENVELOPE_BYTES} cap",
+            bytes.len()
+        ));
+    }
+    let env: WireEnvelope = bincode_limited()
+        .deserialize(bytes)
+        .map_err(|e| format!("envelope decode: {e}"))?;
 
     // Parse the claimed pubkey.
     let vk = VerifyingKey::from_sec1_bytes(&env.pubkey_sec1)
@@ -525,9 +549,11 @@ fn verify_envelope(bytes: &[u8]) -> Result<(WorkerAddress, WorkerMessage), Strin
     vk.verify(&env.payload, &sig)
         .map_err(|e| format!("sig verify: {e}"))?;
 
-    // Decode the inner WorkerMessage.
-    let msg: WorkerMessage =
-        bincode::deserialize(&env.payload).map_err(|e| format!("payload decode: {e}"))?;
+    // Decode the inner WorkerMessage under the same byte limit (the payload was
+    // bounded by the envelope cap above, but decode it limited too for safety).
+    let msg: WorkerMessage = bincode_limited()
+        .deserialize(&env.payload)
+        .map_err(|e| format!("payload decode: {e}"))?;
 
     Ok((derived_addr, msg))
 }
@@ -743,6 +769,11 @@ mod tests {
         };
         let good_bytes = bincode::serialize(&good_envelope).expect("ser good");
         verify_envelope(&good_bytes).expect("good envelope verifies");
+
+        // FUA-COMPUTE-POOL-01: an over-cap frame is refused before any decode/alloc.
+        let oversized = vec![0u8; (MAX_ENVELOPE_BYTES as usize) + 1];
+        let too_big = verify_envelope(&oversized).expect_err("oversized frame must be refused");
+        assert!(too_big.contains("too large"), "err was: {too_big}");
 
         // Forged: zeroed-out signature.
         let mut bad_envelope = good_envelope.clone();
