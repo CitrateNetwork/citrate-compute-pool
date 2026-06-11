@@ -101,10 +101,32 @@ async fn metrics_handler() -> Response {
 ///
 /// Idempotent w.r.t. recorder installation — safe to call even if
 /// another component installed first.
+///
+/// SECREM-01 SVC-6 (pre-audit 2026-06-09): this `/metrics` surface is
+/// READ-ONLY (no state mutation) and UNAUTHENTICATED — its access-control
+/// assumption is the loopback bind in the canonical config
+/// (`CITRATE_POOL_METRICS_ADDR=127.0.0.1:9091`). The operator supplies the
+/// bind, so we don't hard-fail a non-loopback address (a remote Prometheus
+/// scraper is a legitimate deployment), but we warn loudly when bound off
+/// loopback so an accidental `0.0.0.0` that exposes operational metrics
+/// (job throughput, RPC latency, error rates) to the network is visible in
+/// the logs rather than silent.
 pub async fn spawn_metrics_server(bind: &str) -> std::io::Result<()> {
     install_recorder();
     let app = Router::new().route("/metrics", get(metrics_handler));
     let listener = tokio::net::TcpListener::bind(bind).await?;
+    // SECREM-01 SVC-6: warn on non-loopback bind of the unauthenticated surface.
+    if let Ok(addr) = listener.local_addr() {
+        if !addr.ip().is_loopback() {
+            tracing::warn!(
+                bind = %addr,
+                "metrics server bound to a NON-LOOPBACK address: /metrics is \
+                 unauthenticated and will expose operational metrics to the \
+                 network. Bind 127.0.0.1 and scrape via a tunnel/sidecar unless \
+                 a remote scrape target is intended."
+            );
+        }
+    }
     tracing::info!(bind = bind, "metrics server listening on /metrics");
     tokio::spawn(async move {
         if let Err(e) = axum::serve(listener, app).await {
