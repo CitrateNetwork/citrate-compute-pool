@@ -56,12 +56,63 @@ pub async fn dispatch_to_member(
             endpoint
         )));
     }
-    resp.json::<PoolInferResponse>()
+    let decoded = resp
+        .json::<PoolInferResponse>()
         .await
-        .map_err(|e| CoordinatorError::ProviderFailed(format!("decode: {}", e)))
+        .map_err(|e| CoordinatorError::ProviderFailed(format!("decode: {}", e)))?;
+    validate_pool_infer_response(&decoded)?;
+    Ok(decoded)
+}
+
+/// SECREM-02 6.3 (CITRATE_COMPUTE_POOL-2026-05-31-003): minimum
+/// output validation before the coordinator will `completeJob` (and
+/// thereby pay the pool). A 2xx with an empty/whitespace `output`
+/// is work NOT done — surfacing it as `ProviderFailed` routes
+/// `handle_event` down the `failJob` path so the buyer is refunded.
+///
+/// Semantic validation (output commitments / challenge hooks) is
+/// on-chain INFER-S2 scope; this gate only closes the
+/// pay-for-empty-work vector.
+pub fn validate_pool_infer_response(
+    resp: &PoolInferResponse,
+) -> Result<(), CoordinatorError> {
+    if resp.output.trim().is_empty() {
+        return Err(CoordinatorError::ProviderFailed(
+            "provider returned empty output (refusing to complete unperformed work)".into(),
+        ));
+    }
+    Ok(())
 }
 
 // `_` so dead-code lint doesn't fire on U256 in this slice (it ships
 // for the operator's side of the wire that prices the dispatch).
 #[allow(dead_code)]
 fn _silence_u256(_: U256) {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn resp(output: &str) -> PoolInferResponse {
+        PoolInferResponse {
+            output: output.to_string(),
+            input_tokens: Some(1),
+            output_tokens: Some(1),
+        }
+    }
+
+    /// SECREM-02 6.3 (-003): empty / whitespace output must fail
+    /// validation; real output must pass.
+    #[test]
+    fn validate_rejects_empty_and_whitespace_output() {
+        assert!(matches!(
+            validate_pool_infer_response(&resp("")),
+            Err(CoordinatorError::ProviderFailed(_))
+        ));
+        assert!(matches!(
+            validate_pool_infer_response(&resp("   \n\t")),
+            Err(CoordinatorError::ProviderFailed(_))
+        ));
+        assert!(validate_pool_infer_response(&resp("a real completion")).is_ok());
+    }
+}

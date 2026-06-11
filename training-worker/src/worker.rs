@@ -14,6 +14,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::time::Duration;
 
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
@@ -23,6 +24,18 @@ use crate::chain::{ChainClient, JobChainState};
 use crate::merkle::compute_epoch_root;
 use crate::transport::{Transport, WorkerMessage};
 use crate::types::{B256, EpochIndex, JobId, StepCommit, StepIndex, WorkerAddress};
+
+/// SECREM-02 6.3 (CITRATE_COMPUTE_POOL-2026-05-31-005): per-message
+/// timeout on the epoch drain loops. A peer that stops sending (or a
+/// flooder that never sends a counted commit) can no longer wedge the
+/// worker on `recv` forever — the epoch fails loudly instead.
+const DRAIN_RECV_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// SECREM-02 6.3 (-005): overall deadline for the NON-coordinator
+/// archive drain. The archive is best-effort (challenge-time lookup
+/// cache); a stalled mesh must not block epoch progression, so on
+/// deadline we log + move on to waiting for the on-chain root.
+const ARCHIVE_DRAIN_DEADLINE: Duration = Duration::from_secs(120);
 
 /// RM-E.3 / COMPUTE_POOL-001 — authenticated epoch-commit aggregation.
 ///
@@ -169,6 +182,11 @@ where
         for epoch in 0..spec.epoch_count {
             debug!(worker = %me, epoch = epoch, "entering epoch");
 
+            // SECREM-02 6.3 (-002): tell the transport the current
+            // epoch so outgoing envelopes are bound to it and
+            // inbound envelopes outside the window are rejected.
+            self.transport.set_epoch(epoch).await;
+
             // Coordinator collects step commits on a side-channel
             // as workers broadcast them. Non-coordinator workers
             // also archive peer commits (for challenge-time
@@ -230,7 +248,17 @@ where
                 }
 
                 while agg.len() < expected_total {
-                    if let Some(msg) = self.transport.recv(me).await {
+                    // SECREM-02 6.3 (-005): per-message timeout so a
+                    // silent mesh can't wedge the coordinator forever.
+                    let recv = tokio::time::timeout(DRAIN_RECV_TIMEOUT, self.transport.recv(me))
+                        .await
+                        .map_err(|_| {
+                            anyhow::anyhow!(
+                                "timed out waiting for step commits (epoch {epoch}: {}/{expected_total} collected)",
+                                agg.len()
+                            )
+                        })?;
+                    if let Some(msg) = recv {
                         if let WorkerMessage::StepCommitted(commit) = msg {
                             if agg.try_accept(commit.clone()) {
                                 all_peer_commits
@@ -263,18 +291,49 @@ where
             } else {
                 // Non-coordinator: drain own inbox for peer commits
                 // so the archive is populated. We expect
-                // (worker_count - 1) × steps_per_epoch messages.
+                // (worker_count - 1) × steps_per_epoch UNIQUE commits.
+                //
+                // SECREM-02 6.3 (-005): the drain is gated through the
+                // same membership + (worker, step) dedup as the
+                // coordinator aggregation (reusing EpochAggregator),
+                // counts only unique accepted commits, and is bounded
+                // by a per-message timeout + an overall deadline so a
+                // flooder or silent mesh can't wedge the worker.
                 let expected =
                     ((worker_count as usize) - 1) * (spec.steps_per_epoch as usize);
-                for _ in 0..expected {
-                    if let Some(msg) = self.transport.recv(me).await {
-                        if let WorkerMessage::StepCommitted(commit) = msg {
-                            if commit.epoch == epoch {
-                                all_peer_commits
-                                    .entry(commit.step)
-                                    .or_default()
-                                    .push(commit);
-                            }
+                let mut archive_gate =
+                    EpochAggregator::new(epoch, snap.workers.iter().copied());
+                let deadline = tokio::time::Instant::now() + ARCHIVE_DRAIN_DEADLINE;
+                while archive_gate.len() < expected {
+                    let per_msg_deadline = std::cmp::min(
+                        deadline,
+                        tokio::time::Instant::now() + DRAIN_RECV_TIMEOUT,
+                    );
+                    let recv =
+                        tokio::time::timeout_at(per_msg_deadline, self.transport.recv(me)).await;
+                    let msg = match recv {
+                        Ok(Some(msg)) => msg,
+                        Ok(None) => {
+                            warn!(worker = %me, epoch = epoch, "transport closed during archive drain");
+                            break;
+                        }
+                        Err(_) => {
+                            warn!(
+                                worker = %me,
+                                epoch = epoch,
+                                archived = archive_gate.len(),
+                                expected = expected,
+                                "archive drain deadline reached; proceeding with partial archive"
+                            );
+                            break;
+                        }
+                    };
+                    if let WorkerMessage::StepCommitted(commit) = msg {
+                        if commit.worker != me && archive_gate.try_accept(commit.clone()) {
+                            all_peer_commits
+                                .entry(commit.step)
+                                .or_default()
+                                .push(commit);
                         }
                     }
                 }

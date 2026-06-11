@@ -338,6 +338,33 @@ impl HttpChainAdapter {
                     topics.len()
                 )));
             }
+
+            // SECREM-02 6.3 (CITRATE_COMPUTE_POOL-2026-05-31-006):
+            // never trust the node's filter — re-verify the event
+            // signature and the emitting contract address.
+            let topic0 = topics[0]
+                .as_str()
+                .ok_or_else(|| CoordinatorError::Chain("topic0 not a string".into()))?;
+            if !topic0.eq_ignore_ascii_case(&event_sig_hex) {
+                return Err(CoordinatorError::Chain(format!(
+                    "log topic0 {topic0} is not ComputeRequested ({event_sig_hex})"
+                )));
+            }
+            let log_address = entry
+                .get("address")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| CoordinatorError::Chain("log missing address".into()))?;
+            let log_address_bytes = hex::decode(log_address.trim_start_matches("0x"))
+                .map_err(|e| CoordinatorError::Chain(format!("log address hex: {}", e)))?;
+            if log_address_bytes.len() != 20
+                || H160::from_slice(&log_address_bytes) != self.pool_contract
+            {
+                return Err(CoordinatorError::Chain(format!(
+                    "log emitted by {log_address}, expected pool contract {:?}",
+                    self.pool_contract
+                )));
+            }
+
             let pool_id = topic_as_u64(topics[1].as_str())?;
             let job_id = topic_as_u64(topics[2].as_str())?;
             let requester = topic_as_address(topics[3].as_str())?;
@@ -358,8 +385,9 @@ impl HttpChainAdapter {
             let payment = U256::from_big_endian(&data_bytes[..32]);
 
             // Extract envelope fields for dedup across overlapping
-            // polling windows. Missing fields are extremely unlikely
-            // from a real node but we tolerate them defensively.
+            // polling windows. SECREM-02 6.3 (-006): these are the
+            // dedup key + the epoch-election input (-008), so a log
+            // missing them is a hard decode error, not a default.
             let tx_hash = entry
                 .get("transactionHash")
                 .and_then(|v| v.as_str())
@@ -371,17 +399,23 @@ impl HttpChainAdapter {
                         None
                     }
                 })
-                .unwrap_or_default();
+                .ok_or_else(|| {
+                    CoordinatorError::Chain("log missing/malformed transactionHash".into())
+                })?;
             let log_index = entry
                 .get("logIndex")
                 .and_then(|v| v.as_str())
                 .and_then(|s| parse_hex_u64(s).ok())
-                .unwrap_or(0) as u32;
+                .ok_or_else(|| {
+                    CoordinatorError::Chain("log missing/malformed logIndex".into())
+                })? as u32;
             let block_number = entry
                 .get("blockNumber")
                 .and_then(|v| v.as_str())
                 .and_then(|s| parse_hex_u64(s).ok())
-                .unwrap_or(0);
+                .ok_or_else(|| {
+                    CoordinatorError::Chain("log missing/malformed blockNumber".into())
+                })?;
 
             // Fetch PoolJobSpec from chain to populate prompt +
             // max_tokens. One extra eth_call per event; the happy
@@ -1324,6 +1358,72 @@ mod tests {
             .poll_compute_requested(0, 10)
             .await
             .expect_err("must reject short topics");
+        assert!(matches!(err, CoordinatorError::Chain(_)));
+    }
+
+    /// SECREM-02 6.3 RED (CITRATE_COMPUTE_POOL-2026-05-31-006): a
+    /// log emitted by a DIFFERENT contract than the configured pool
+    /// contract must be rejected — pre-fix the decoder trusts the
+    /// RPC filter and never re-verifies `log.address`.
+    #[tokio::test]
+    async fn poll_rejects_log_from_wrong_contract() {
+        let state = StubState::new();
+        let mut data_buf = [0u8; 32];
+        U256::from(1u64).to_big_endian(&mut data_buf);
+        let log = json!({
+            // NOT the configured pool contract.
+            "address": format!("0x{}", hex::encode(H160::repeat_byte(0x66).as_bytes())),
+            "topics": [
+                compute_requested_sig_hex(),
+                pad_u64_topic(7),
+                pad_u64_topic(42),
+                pad_address_topic(H160::repeat_byte(0xAB)),
+            ],
+            "data": format!("0x{}", hex::encode(data_buf)),
+            "blockNumber": "0x10",
+            "transactionHash": format!("0x{}", "11".repeat(32)),
+            "logIndex": "0x1",
+        });
+        state.queue("eth_getLogs", json!([log]));
+
+        let addr = spawn_stub_rpc(state).await;
+        let adapter = make_adapter(format!("http://{}", addr));
+        let err = adapter
+            .poll_compute_requested(0, 100)
+            .await
+            .expect_err("foreign emitting address must be rejected");
+        assert!(matches!(err, CoordinatorError::Chain(_)));
+    }
+
+    /// SECREM-02 6.3 RED (CITRATE_COMPUTE_POOL-2026-05-31-006): a
+    /// log whose `topics[0]` is not the ComputeRequested signature
+    /// must be rejected.
+    #[tokio::test]
+    async fn poll_rejects_log_with_foreign_topic0() {
+        let state = StubState::new();
+        let mut data_buf = [0u8; 32];
+        U256::from(1u64).to_big_endian(&mut data_buf);
+        let log = json!({
+            "address": format!("0x{}", hex::encode(pool_contract().as_bytes())),
+            "topics": [
+                format!("0x{}", "ab".repeat(32)), // NOT ComputeRequested
+                pad_u64_topic(7),
+                pad_u64_topic(42),
+                pad_address_topic(H160::repeat_byte(0xAB)),
+            ],
+            "data": format!("0x{}", hex::encode(data_buf)),
+            "blockNumber": "0x10",
+            "transactionHash": format!("0x{}", "11".repeat(32)),
+            "logIndex": "0x1",
+        });
+        state.queue("eth_getLogs", json!([log]));
+
+        let addr = spawn_stub_rpc(state).await;
+        let adapter = make_adapter(format!("http://{}", addr));
+        let err = adapter
+            .poll_compute_requested(0, 100)
+            .await
+            .expect_err("foreign topic0 must be rejected");
         assert!(matches!(err, CoordinatorError::Chain(_)));
     }
 

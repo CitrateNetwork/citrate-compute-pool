@@ -100,11 +100,12 @@ pub async fn handle_event<C: ChainAdapter + ?Sized>(
     event: &ComputeRequestedEvent,
 ) -> Result<(), CoordinatorError> {
     // 1. Are we the elected coordinator for the current epoch?
-    //    Slice 1 derives the epoch from the event's job_id-adjacent
-    //    block; slice 2 reads `block.number` from the chain. For
-    //    this slice we use a fixed epoch = 0 since the mock chain
-    //    answers the same regardless.
-    let epoch = 0; // slice 2 reads from the chain
+    //    SECREM-02 6.3 (CITRATE_COMPUTE_POOL-2026-05-31-008): the
+    //    epoch is derived from the event's block number, mirroring
+    //    `block.number / EPOCH_LENGTH` in ComputePool.sol — the
+    //    hardcoded epoch-0 election made every daemon query a stale
+    //    election and race as duplicate coordinators after epoch 0.
+    let epoch = crate::chain::epoch_of(event.block_number);
     let elected = chain.coordinator_for(event.pool_id, epoch).await?;
     if elected != chain.self_address() {
         tracing::debug!(
