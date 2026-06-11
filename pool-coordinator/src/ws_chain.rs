@@ -320,7 +320,8 @@ mod tests {
                         "id": 1,
                         "result": "0xsub1",
                     })
-                    .to_string(),
+                    .to_string()
+                    .into(),
                 ))
                 .await
                 .expect("ack send");
@@ -337,7 +338,7 @@ mod tests {
                     },
                 });
                 write
-                    .send(Message::Text(notify.to_string()))
+                    .send(Message::Text(notify.to_string().into()))
                     .await
                     .expect("notify");
             }
