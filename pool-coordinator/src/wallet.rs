@@ -186,11 +186,16 @@ impl Wallet {
         );
 
         // 2. MAC check (keccak256 of dkey[16..32] || ciphertext).
+        // SECREM-02 6.3 (CITRATE_COMPUTE_POOL-2026-05-31-007): the
+        // comparison is constant-time (`subtle::ConstantTimeEq`) so
+        // a byte-position timing oracle cannot speed up offline
+        // passphrase guessing against a captured keystore.
         let mut hasher = Keccak256::new();
         hasher.update(&derived[16..32]);
         hasher.update(&ciphertext);
         let mac_actual = hasher.finalize();
-        if mac_actual.as_slice() != mac_expected.as_slice() {
+        use subtle::ConstantTimeEq;
+        if mac_actual.as_slice().ct_eq(mac_expected.as_slice()).unwrap_u8() == 0 {
             return Err(WalletError::InvalidPassphrase);
         }
 

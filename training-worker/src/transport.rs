@@ -40,10 +40,19 @@ pub enum WorkerMessage {
     /// Activation payload is opaque at this layer — concrete tensor
     /// shapes are decided by the ModelBackend impl. For S0 the
     /// deterministic backend uses a keccak-chained byte vector.
+    ///
+    /// SECREM-02 6.3 (FUA-COMPUTE-POOL-02): `from_worker` is the
+    /// sender's claimed worker address. The libp2p transport drops
+    /// any activation whose `from_worker` does not match the
+    /// envelope's cryptographically verified signer (same binding
+    /// rule as `StepCommitted.worker`), and the pipeline worker
+    /// additionally requires `from_worker` to be the on-chain owner
+    /// of `from_stage` before accepting the activation.
     PipelineActivation {
         request_id: u64,
         from_stage: u32,
         to_stage: u32,
+        from_worker: WorkerAddress,
         payload: Vec<u8>,
     },
 }
@@ -61,6 +70,13 @@ pub trait Transport: Send + Sync {
 
     /// Register a peer so it starts receiving broadcasts.
     async fn register(&self, peer: WorkerAddress);
+
+    /// SECREM-02 6.3 (CITRATE_COMPUTE_POOL-2026-05-31-002): inform
+    /// the transport of the worker's current training epoch so it
+    /// can bind outgoing envelopes to it and reject inbound
+    /// envelopes outside the accepted epoch window. Default no-op
+    /// for transports without envelope scoping (in-process tests).
+    async fn set_epoch(&self, _epoch: u32) {}
 }
 
 /// In-process implementation backed by a single shared queue per
