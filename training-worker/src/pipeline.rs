@@ -431,6 +431,7 @@ where
                 anyhow::anyhow!("stage 0 requires first_stage_input")
             })?
         } else {
+            let upstream_stage = self.role.stage_index - 1;
             loop {
                 let msg = self
                     .transport
@@ -439,22 +440,58 @@ where
                     .ok_or_else(|| anyhow::anyhow!("transport closed"))?;
                 if let WorkerMessage::PipelineActivation {
                     request_id: rid,
+                    from_stage,
                     to_stage,
+                    from_worker,
                     payload,
-                    ..
                 } = msg
                 {
-                    if rid == request_id && to_stage == self.role.stage_index {
-                        break payload;
+                    if rid != request_id || to_stage != self.role.stage_index {
+                        // Discard mismatched messages (wrong request or wrong stage).
+                        debug!(
+                            got_request = rid,
+                            got_stage = to_stage,
+                            expected_request = request_id,
+                            expected_stage = self.role.stage_index,
+                            "skipping mismatched pipeline message"
+                        );
+                        continue;
                     }
-                    // Discard mismatched messages (wrong request or wrong stage).
-                    debug!(
-                        got_request = rid,
-                        got_stage = to_stage,
-                        expected_request = request_id,
-                        expected_stage = self.role.stage_index,
-                        "skipping mismatched pipeline message"
-                    );
+
+                    // SECREM-02 6.3 (FUA-COMPUTE-POOL-02): only accept an
+                    // activation from the legitimate UPSTREAM stage owner.
+                    // `from_worker` is bound to the verified envelope signer
+                    // at the libp2p transport boundary, so checking it
+                    // against the on-chain `stage_owner(from_stage)` here
+                    // means a forged activation (any peer racing the honest
+                    // upstream) is skipped instead of corrupting this
+                    // stage's input. Skipping (not erroring) keeps an
+                    // attacker from griefing the request — we keep waiting
+                    // for the honest activation.
+                    if from_stage != upstream_stage {
+                        debug!(
+                            got_from_stage = from_stage,
+                            expected_from_stage = upstream_stage,
+                            "skipping activation from non-upstream stage"
+                        );
+                        continue;
+                    }
+                    let owner = self
+                        .chain
+                        .stage_owner(self.role.job_id, from_stage)
+                        .await
+                        .map_err(|e| anyhow::anyhow!("stage_owner query: {}", e))?;
+                    if owner != Some(from_worker) {
+                        tracing::warn!(
+                            claimed = %from_worker,
+                            ?owner,
+                            from_stage = from_stage,
+                            request = request_id,
+                            "dropping PipelineActivation: sender is not the upstream stage owner"
+                        );
+                        continue;
+                    }
+                    break payload;
                 }
             }
         };
@@ -475,6 +512,7 @@ where
                     request_id,
                     from_stage: self.role.stage_index,
                     to_stage: next,
+                    from_worker: self.role.self_address,
                     payload: output.clone(),
                 })
                 .await?;
@@ -708,6 +746,94 @@ mod tests {
         for w in [w1, w2, w3, w4] {
             assert_eq!(chain.payment_earned(req_id, w), 1_000_000_000_000_000_000u128);
         }
+    }
+
+    /// SECREM-02 6.3 RED (FUA-COMPUTE-POOL-02): a forged
+    /// `PipelineActivation` from a peer that does NOT own the
+    /// upstream stage must be ignored — the victim stage must
+    /// compute over the honest upstream activation. Pre-fix the
+    /// recv loop breaks on the FIRST matching `(request_id,
+    /// to_stage)` message, so the attacker wins the race.
+    #[tokio::test]
+    async fn forged_activation_from_non_owner_is_ignored() {
+        use crate::transport::InProcessTransport;
+        use std::time::Duration;
+
+        let chain = MockPipelineChainClient::new();
+        let transport = InProcessTransport::new();
+        let w1 = Address::repeat_byte(0x11); // owns stage 0
+        let w2 = Address::repeat_byte(0x22); // owns stage 1 (victim, terminal)
+        let requester = Address::repeat_byte(0xAA);
+
+        transport.register(w1).await;
+        transport.register(w2).await;
+
+        let spec = PipelineJobSpec {
+            stage_count: 2,
+            payment_per_request: 2_000_000_000_000_000_000u128,
+            per_stake_per_stage: 1_000_000_000_000_000_000u128,
+            model_hash: B256::repeat_byte(0x11),
+        };
+        let job_id = chain.create_active_job(spec, vec![w1, w2]);
+        let req_id = chain.submit_request(job_id, requester).expect("submit");
+
+        let victim = PipelineWorker::new(
+            StageRole {
+                job_id,
+                stage_index: 1,
+                self_address: w2,
+                total_stages: 2,
+            },
+            transport.scoped(w2),
+            Arc::clone(&chain),
+        );
+        let h = tokio::spawn(async move { victim.serve_request(req_id, None).await });
+
+        // Attacker (not the stage-0 owner) races the honest upstream.
+        // `from_worker` is the attacker's own address — at the libp2p
+        // boundary it is bound to the verified envelope signer, so
+        // the attacker cannot claim w1 (see
+        // `libp2p_transport::sender_binding_covers_step_commits_and_activations`).
+        let attacker = Address::repeat_byte(0xEE);
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        transport
+            .broadcast(WorkerMessage::PipelineActivation {
+                request_id: req_id,
+                from_stage: 0,
+                to_stage: 1,
+                from_worker: attacker,
+                payload: b"ATTACKER-CORRUPTION".to_vec(),
+            })
+            .await
+            .expect("attacker broadcast");
+
+        // Honest stage 0 advances on-chain, then forwards the real
+        // activation.
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        chain.advance_request(req_id, w1).await.expect("w1 advance");
+        let honest_act = pipeline_stage_forward(0, 2, b"prompt");
+        transport
+            .scoped(w1)
+            .broadcast(WorkerMessage::PipelineActivation {
+                request_id: req_id,
+                from_stage: 0,
+                to_stage: 1,
+                from_worker: w1,
+                payload: honest_act.clone(),
+            })
+            .await
+            .expect("honest broadcast");
+
+        let out = h
+            .await
+            .expect("join")
+            .expect("victim serves")
+            .expect("terminal stage output");
+        assert_eq!(
+            out,
+            pipeline_stage_forward(1, 2, &honest_act),
+            "victim must compute over the honest activation, not the attacker's"
+        );
     }
 
     #[tokio::test]
