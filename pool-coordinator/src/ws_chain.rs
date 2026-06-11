@@ -129,6 +129,7 @@ impl WsChainSubscriber {
         tracing::info!(sub_id = %sub_id, "ws subscription active");
 
         // Spawn decoder task.
+        let pool_contract = self.pool_contract;
         let (tx, rx) = mpsc::channel::<Result<ComputeRequestedEvent, CoordinatorError>>(64);
         tokio::spawn(async move {
             while let Some(msg) = read.next().await {
@@ -163,7 +164,7 @@ impl WsChainSubscriber {
                     Some(l) => l.clone(),
                     None => continue,
                 };
-                match decode_compute_requested(&log) {
+                match decode_compute_requested(&log, pool_contract) {
                     Ok(ev) => {
                         if tx.send(Ok(ev)).await.is_err() {
                             break;
@@ -192,7 +193,10 @@ fn compute_requested_sig_hex() -> String {
     format!("0x{}", hex::encode(out))
 }
 
-fn decode_compute_requested(log: &Value) -> Result<ComputeRequestedEvent, CoordinatorError> {
+fn decode_compute_requested(
+    log: &Value,
+    expected_contract: H160,
+) -> Result<ComputeRequestedEvent, CoordinatorError> {
     let topics = log
         .get("topics")
         .and_then(|v| v.as_array())
@@ -203,6 +207,32 @@ fn decode_compute_requested(log: &Value) -> Result<ComputeRequestedEvent, Coordi
             topics.len()
         )));
     }
+
+    // SECREM-02 6.3 (CITRATE_COMPUTE_POOL-2026-05-31-006): never
+    // trust the node's filter — re-verify the event signature and
+    // the emitting contract address before decoding.
+    let topic0 = topics[0]
+        .as_str()
+        .ok_or_else(|| CoordinatorError::Chain("topic0 not a string".into()))?;
+    let expected_sig = compute_requested_sig_hex();
+    if !topic0.eq_ignore_ascii_case(&expected_sig) {
+        return Err(CoordinatorError::Chain(format!(
+            "log topic0 {topic0} is not ComputeRequested ({expected_sig})"
+        )));
+    }
+    let log_address = log
+        .get("address")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| CoordinatorError::Chain("log missing address".into()))?;
+    let log_address_bytes = hex::decode(log_address.trim_start_matches("0x"))
+        .map_err(|e| CoordinatorError::Chain(format!("log address hex: {}", e)))?;
+    if log_address_bytes.len() != 20 || H160::from_slice(&log_address_bytes) != expected_contract
+    {
+        return Err(CoordinatorError::Chain(format!(
+            "log emitted by {log_address}, expected pool contract {expected_contract:?}"
+        )));
+    }
+
     let pool_id = topic_u64(topics[1].as_str())?;
     let job_id = topic_u64(topics[2].as_str())?;
     let requester = topic_address(topics[3].as_str())?;
@@ -221,6 +251,11 @@ fn decode_compute_requested(log: &Value) -> Result<ComputeRequestedEvent, Coordi
     }
     let payment = U256::from_big_endian(&data_bytes[..32]);
 
+    // SECREM-02 6.3 (-006): the (tx_hash, log_index) pair is the
+    // reorg/poll dedup key and block_number now drives the epoch
+    // election (-008) — defaulting them on a malformed log would
+    // let two distinct events collide on the dedup key or elect
+    // with epoch 0, so they are hard decode errors now.
     let tx_hash = log
         .get("transactionHash")
         .and_then(|v| v.as_str())
@@ -232,17 +267,18 @@ fn decode_compute_requested(log: &Value) -> Result<ComputeRequestedEvent, Coordi
                 None
             }
         })
-        .unwrap_or_default();
+        .ok_or_else(|| CoordinatorError::Chain("log missing/malformed transactionHash".into()))?;
     let log_index = log
         .get("logIndex")
         .and_then(|v| v.as_str())
         .and_then(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16).ok())
-        .unwrap_or(0) as u32;
+        .ok_or_else(|| CoordinatorError::Chain("log missing/malformed logIndex".into()))?
+        as u32;
     let block_number = log
         .get("blockNumber")
         .and_then(|v| v.as_str())
         .and_then(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16).ok())
-        .unwrap_or(0);
+        .ok_or_else(|| CoordinatorError::Chain("log missing/malformed blockNumber".into()))?;
 
     // WS path doesn't do the PoolJobSpec chain-storage read; daemon
     // can enrich via HttpChainAdapter.fetch_job_spec if prompt /
@@ -404,14 +440,58 @@ mod tests {
             "topics": ["0x1", "0x2"],
             "data": "0x",
         });
-        let err = decode_compute_requested(&bad).unwrap_err();
+        let err = decode_compute_requested(&bad, H160::repeat_byte(0xDD)).unwrap_err();
         assert!(matches!(err, CoordinatorError::Chain(_)));
+    }
+
+    /// SECREM-02 6.3 RED (CITRATE_COMPUTE_POOL-2026-05-31-006): a
+    /// log whose `topics[0]` is NOT the ComputeRequested signature
+    /// must be rejected — pre-fix the decoder never re-verifies the
+    /// event signature it subscribed for.
+    #[tokio::test]
+    async fn decode_rejects_wrong_event_signature() {
+        let mut log = make_log(5, 42);
+        log["topics"][0] = json!(format!("0x{}", "ab".repeat(32)));
+        assert!(
+            decode_compute_requested(&log, H160::repeat_byte(0xDD)).is_err(),
+            "foreign topic0 must be rejected"
+        );
+    }
+
+    /// SECREM-02 6.3 (CITRATE_COMPUTE_POOL-2026-05-31-006): a log
+    /// emitted by a different contract must be rejected.
+    #[tokio::test]
+    async fn decode_rejects_wrong_emitting_address() {
+        let log = make_log(5, 42); // address = 0xdd…dd
+        assert!(
+            decode_compute_requested(&log, H160::repeat_byte(0x99)).is_err(),
+            "foreign emitting address must be rejected"
+        );
+    }
+
+    /// SECREM-02 6.3 (-006): missing dedup-key fields are now hard
+    /// decode errors, not silent defaults.
+    #[tokio::test]
+    async fn decode_rejects_missing_dedup_fields() {
+        let mut log = make_log(5, 42);
+        log.as_object_mut().unwrap().remove("transactionHash");
+        assert!(
+            decode_compute_requested(&log, H160::repeat_byte(0xDD)).is_err(),
+            "missing transactionHash must be rejected"
+        );
+
+        let mut log = make_log(5, 42);
+        log.as_object_mut().unwrap().remove("logIndex");
+        assert!(
+            decode_compute_requested(&log, H160::repeat_byte(0xDD)).is_err(),
+            "missing logIndex must be rejected"
+        );
     }
 
     #[tokio::test]
     async fn decode_populates_envelope_fields() {
         let log = make_log(5, 42);
-        let ev = decode_compute_requested(&log).expect("decode");
+        let ev = decode_compute_requested(&log, H160::repeat_byte(0xDD)).expect("decode");
         assert_eq!(ev.pool_id, 5);
         assert_eq!(ev.job_id, 42);
         assert_eq!(ev.block_number, 0x10);

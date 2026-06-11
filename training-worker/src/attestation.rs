@@ -295,9 +295,38 @@ fn base64_standard_decode(s: &str) -> Result<Vec<u8>, AttestationError> {
             TABLE[bytes[i + 2] as usize],
             TABLE[bytes[i + 3] as usize],
         ];
-        if v[0] < 0 || v[1] < 0 {
+        // SECREM-02 6.3 (CITRATE_COMPUTE_POOL-2026-05-31-004): the
+        // table marks invalid chars as -1 and '=' padding as -2.
+        // Pre-fix, positions 2/3 were only tested `>= 0`, so an
+        // INVALID char was conflated with padding and the quartet
+        // silently truncated — a tampered JWT segment could decode
+        // to a shorter byte string instead of erroring. All four
+        // sextets now reject -1 explicitly, padding is only legal
+        // in the final quartet, and data after padding is an error.
+        for (j, &val) in v.iter().enumerate() {
+            if val == -1 {
+                return Err(AttestationError::Base64Decode(format!(
+                    "invalid b64 char at offset {}",
+                    i + j
+                )));
+            }
+        }
+        if v[0] == -2 || v[1] == -2 {
             return Err(AttestationError::Base64Decode(format!(
-                "invalid b64 char at offset {}",
+                "padding in sextet position 1/2 at offset {}",
+                i
+            )));
+        }
+        let is_final_quartet = i + 4 == bytes.len();
+        if !is_final_quartet && (v[2] == -2 || v[3] == -2) {
+            return Err(AttestationError::Base64Decode(format!(
+                "padding before final quartet at offset {}",
+                i
+            )));
+        }
+        if v[2] == -2 && v[3] != -2 {
+            return Err(AttestationError::Base64Decode(format!(
+                "data after padding at offset {}",
                 i
             )));
         }
@@ -827,5 +856,34 @@ mod tests {
         // "Hello??" = "SGVsbG8/Pw==" -> URL-safe no padding = "SGVsbG8_Pw"
         let decoded = base64url_decode("SGVsbG8_Pw").expect("decode");
         assert_eq!(decoded, b"Hello??");
+    }
+
+    /// SECREM-02 6.3 RED (CITRATE_COMPUTE_POOL-2026-05-31-004): an
+    /// invalid character in sextet position 3 or 4 must be a hard
+    /// decode error, not a silent truncation. Pre-fix positions 2/3
+    /// are only tested `>= 0`, so `-1` (invalid) is conflated with
+    /// `-2` (padding) and the quartet is silently shortened.
+    #[test]
+    fn b64_decode_rejects_invalid_char_in_sextet_3_and_4() {
+        // '!' is not in the base64 alphabet. Position 3:
+        assert!(
+            base64url_decode("QQ!A").is_err(),
+            "invalid char at sextet 3 must error, not truncate"
+        );
+        // Position 4:
+        assert!(
+            base64url_decode("QQQ!").is_err(),
+            "invalid char at sextet 4 must error, not truncate"
+        );
+        // Padding anywhere but the final quartet must error too.
+        assert!(
+            base64_standard_decode("QQ==QQQQ").is_err(),
+            "padding before the final quartet must error"
+        );
+        // Data after padding within a quartet must error.
+        assert!(
+            base64_standard_decode("QQ=A").is_err(),
+            "data after padding must error"
+        );
     }
 }

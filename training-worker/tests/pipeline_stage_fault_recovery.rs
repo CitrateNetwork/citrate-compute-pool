@@ -117,6 +117,7 @@ async fn stage_fault_then_reassign_resumes_pipeline() {
             request_id: req_id,
             from_stage: 2,
             to_stage: 3,
+            from_worker: w5,
             payload: activation.clone(),
         })
         .await
@@ -177,6 +178,7 @@ async fn resilient_path_happy_path_behaves_like_serve_request() {
             request_id: req_id,
             from_stage: 1,
             to_stage: 2,
+            from_worker: w2,
             payload: b"from-w2-to-w3".to_vec(),
         })
         .await

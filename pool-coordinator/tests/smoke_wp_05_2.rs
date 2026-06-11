@@ -82,6 +82,7 @@ async fn spawn_failing_provider() -> SocketAddr {
 
 #[derive(Default, Clone)]
 struct ChainCalls {
+    coordinator_for: Vec<(u64, u64)>,
     record_dispatch: Vec<(u64, H160)>,
     complete_job: Vec<u64>,
     fail_job: Vec<u64>,
@@ -119,9 +120,14 @@ impl ChainAdapter for MockChain {
 
     async fn coordinator_for(
         &self,
-        _pool_id: u64,
-        _epoch: u64,
+        pool_id: u64,
+        epoch: u64,
     ) -> Result<H160, CoordinatorError> {
+        self.calls
+            .lock()
+            .expect("mutex")
+            .coordinator_for
+            .push((pool_id, epoch));
         self.coordinator
             .ok_or_else(|| CoordinatorError::Chain("no coordinator".into()))
     }
@@ -283,6 +289,107 @@ async fn provider_failure_marks_job_failed() {
     assert_eq!(calls.record_dispatch, vec![(7, member_addr)]);
     assert!(calls.complete_job.is_empty(), "no complete on provider fail");
     assert_eq!(calls.fail_job, vec![7]);
+}
+
+/// SECREM-02 6.3 RED (CITRATE_COMPUTE_POOL-2026-05-31-008): the
+/// coordinator-election check must use the epoch derived from the
+/// event's block number (`block_number / EPOCH_LENGTH`), not a
+/// hardcoded epoch 0. Pre-fix `handle_event` always queries epoch 0.
+#[tokio::test]
+async fn coordinator_check_uses_event_block_epoch() {
+    let provider = spawn_stub_provider().await;
+    let member_addr = H160::from([0xb1; 20]);
+
+    let mut chain = MockChain::new(H160::from([0xaa; 20]));
+    chain.coordinator = Some(H160::from([0xaa; 20]));
+    chain.members = vec![PoolMemberInfo {
+        address: member_addr,
+        gpu_count: 1,
+        active: true,
+    }];
+    let calls = chain.calls.clone();
+
+    let cfg = config(&[(member_addr, provider)]);
+    let event = ComputeRequestedEvent {
+        pool_id: 1,
+        job_id: 9,
+        requester: H160::from([0xc1; 20]),
+        payment_grains: U256::from(1u64),
+        prompt: "ping".to_string(),
+        max_tokens: 4,
+        tx_hash: H256::zero(),
+        log_index: 0,
+        block_number: 250, // EPOCH_LENGTH = 100 → epoch 2
+    };
+
+    let _ = handle_event(&chain, &cfg, &event).await;
+    let calls = calls.lock().expect("mutex").clone();
+    assert_eq!(
+        calls.coordinator_for,
+        vec![(1, 2)],
+        "election must use epoch_of(block_number)=2, not hardcoded 0"
+    );
+}
+
+/// SECREM-02 6.3 RED (CITRATE_COMPUTE_POOL-2026-05-31-003): a
+/// provider that answers HTTP 200 with an EMPTY `output` must NOT
+/// result in `completeJob` (which pays the pool) — the job must be
+/// failed so the buyer is refunded. Pre-fix any decodable 2xx
+/// completes the job with zero output validation.
+#[tokio::test]
+async fn empty_provider_output_fails_job_instead_of_completing() {
+    // Stub that returns 200 + empty output.
+    let app = axum::Router::new().route(
+        "/pool-infer",
+        post(|| async {
+            JsonResp(serde_json::json!({
+                "output": "",
+                "input_tokens": 1,
+                "output_tokens": 0,
+            }))
+        }),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind stub");
+    let provider = listener.local_addr().expect("local_addr");
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("stub serve");
+    });
+
+    let member_addr = H160::from([0xb1; 20]);
+    let mut chain = MockChain::new(H160::from([0xaa; 20]));
+    chain.coordinator = Some(H160::from([0xaa; 20]));
+    chain.members = vec![PoolMemberInfo {
+        address: member_addr,
+        gpu_count: 1,
+        active: true,
+    }];
+    let calls = chain.calls.clone();
+
+    let cfg = config(&[(member_addr, provider)]);
+    let event = ComputeRequestedEvent {
+        pool_id: 1,
+        job_id: 11,
+        requester: H160::from([0xc1; 20]),
+        payment_grains: U256::from(1u64),
+        prompt: "ping".to_string(),
+        max_tokens: 4,
+        tx_hash: H256::zero(),
+        log_index: 0,
+        block_number: 1,
+    };
+
+    let outcome = handle_event(&chain, &cfg, &event).await;
+    assert!(
+        matches!(outcome, Err(CoordinatorError::ProviderFailed(_))),
+        "empty output must surface as ProviderFailed, got {:?}",
+        outcome
+    );
+    let calls = calls.lock().expect("mutex").clone();
+    assert!(
+        calls.complete_job.is_empty(),
+        "must NOT complete (pay) a job with empty output"
+    );
+    assert_eq!(calls.fail_job, vec![11], "job must be failed → buyer refunded");
 }
 
 // ── Stateless round-robin ───────────────────────────────────────
