@@ -93,12 +93,22 @@ async fn main() -> ExitCode {
         }
     };
 
-    let adapter = HttpChainAdapter::new(
+    // FWA-C8-01: try_new re-validates rpc_url through the outbound TLS
+    // gate at the adapter boundary (defense-in-depth behind the
+    // CoordinatorConfig::from_env check). Plaintext-remote RPC dies
+    // fail-closed here rather than silently MITM-able mid-run.
+    let adapter = match HttpChainAdapter::try_new(
         cfg.rpc_url.clone(),
         cfg.chain_id,
         pool_contract,
         wallet.clone(),
-    );
+    ) {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("RPC endpoint rejected: {}", e);
+            return ExitCode::from(7);
+        }
+    };
 
     log_identity(cfg.wallet_address, cfg.member_endpoints.len());
     tracing::info!(
