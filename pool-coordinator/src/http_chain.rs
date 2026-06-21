@@ -138,6 +138,24 @@ impl HttpChainAdapter {
         }
     }
 
+    /// FWA-C8-01: TLS-gated constructor. Validates `rpc_url` through the
+    /// outbound gate (https any-host / http loopback-only) before
+    /// building the client, so a misconfigured plaintext-remote RPC dies
+    /// fail-closed at the adapter boundary — defense-in-depth behind the
+    /// config-load check. The production entry point (`main.rs`) uses
+    /// this; the infallible [`new`](Self::new) stays for loopback test
+    /// fixtures.
+    pub fn try_new(
+        rpc_url: String,
+        chain_id: u64,
+        pool_contract: H160,
+        wallet: Wallet,
+    ) -> Result<Self, CoordinatorError> {
+        crate::outbound::validate_outbound_url(&rpc_url)
+            .map_err(|e| CoordinatorError::Chain(format!("CITRATE_POOL_RPC_URL: {}", e)))?;
+        Ok(Self::new(rpc_url, chain_id, pool_contract, wallet))
+    }
+
     /// RM-B1 / WP-B2.4 (audit F-5): verify the RPC endpoint advertises
     /// the chain_id this adapter was configured with. Pre-fix, a
     /// pool-coordinator daemon could be launched against the wrong
@@ -1254,6 +1272,46 @@ mod tests {
         let adapter = make_adapter(format!("http://{}", addr));
         let err = adapter.coordinator_for(1, 0).await.expect_err("fail");
         assert!(matches!(err, CoordinatorError::Chain(_)));
+    }
+
+    // FWA-C8-01 tripwire: the TLS-gated adapter constructor refuses a
+    // plaintext-remote RPC, accepts loopback http + any-host https.
+    #[test]
+    fn try_new_refuses_plaintext_remote_rpc() {
+        let _g = crate::outbound::ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let wallet = Wallet::from_hex(TEST_HEX).expect("wallet");
+        assert!(
+            HttpChainAdapter::try_new(
+                "http://203.0.113.7:8545".into(),
+                40204,
+                pool_contract(),
+                wallet.clone(),
+            )
+            .is_err(),
+            "remote plaintext RPC must be refused (MITM-able)"
+        );
+        assert!(
+            HttpChainAdapter::try_new(
+                "http://127.0.0.1:18545".into(),
+                40204,
+                pool_contract(),
+                wallet.clone(),
+            )
+            .is_ok(),
+            "loopback http RPC must be accepted"
+        );
+        assert!(
+            HttpChainAdapter::try_new(
+                "https://rpc.citrate.network".into(),
+                40204,
+                pool_contract(),
+                wallet,
+            )
+            .is_ok(),
+            "https RPC must be accepted"
+        );
     }
 
     #[test]
