@@ -124,8 +124,16 @@ impl HttpChainAdapter {
         pool_contract: H160,
         wallet: Wallet,
     ) -> Self {
+        // FWA-BV-CP-01: disable redirect-follow. reqwest's default policy
+        // follows up to 10 redirects and re-POSTs the (signed) JSON-RPC
+        // body on a 307/308 — a 3xx with `Location: http://<off-gate>`
+        // would downgrade past the construction-time outbound gate and
+        // re-send the body in cleartext to an attacker-controlled host.
+        // With `Policy::none()` a 3xx is returned as a response instead of
+        // silently followed, so the body never leaves for a downgraded sink.
         let http = reqwest::Client::builder()
             .timeout(HTTP_TIMEOUT)
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .unwrap_or_default();
         Self {
@@ -1311,6 +1319,74 @@ mod tests {
             )
             .is_ok(),
             "https RPC must be accepted"
+        );
+    }
+
+    // FWA-BV-CP-01 / BV-CP-02 (RPC leg tripwire): the JSON-RPC write
+    // client built in `HttpChainAdapter::new` must NOT follow a 3xx.
+    // A node (or MITM) answering `eth_call`/`eth_sendRawTransaction`
+    // with `307 Location: http://<off-gate>` would otherwise make
+    // reqwest re-POST the signed body to a host that bypassed the
+    // construction-time outbound gate. With `redirect(Policy::none())`
+    // the 307 surfaces as a transport/decode error (the redirect body
+    // is not JSON-RPC) instead of being silently followed — the body
+    // never reaches the off-gate sink. Mirrors the dispatch-leg
+    // integration test in tests/redirect_no_follow.rs, covering the
+    // second outbound leg called out in BV-CP-02.
+    #[tokio::test]
+    async fn rpc_client_does_not_follow_redirect_to_off_gate_sink() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        // Sink server: any body delivered here is a signed-write leak.
+        let sink_hits = Arc::new(AtomicUsize::new(0));
+        let sink_app = axum::Router::new()
+            .route(
+                "/sink",
+                post(|State(h): State<Arc<AtomicUsize>>, _b: String| async move {
+                    h.fetch_add(1, Ordering::SeqCst);
+                    Json(json!({ "jsonrpc": "2.0", "id": 1, "result": "0x" }))
+                }),
+            )
+            .with_state(sink_hits.clone());
+        let sink_listener = TcpListener::bind("127.0.0.1:0").await.expect("bind sink");
+        let sink_addr = sink_listener.local_addr().expect("sink addr");
+        tokio::spawn(async move {
+            axum::serve(sink_listener, sink_app).await.expect("sink serve");
+        });
+
+        // Redirector: every RPC POST gets a 307 → http://<sink>/sink.
+        let location = format!("http://{}/sink", sink_addr);
+        let redir_app = axum::Router::new().route(
+            "/",
+            post(move |_b: String| {
+                let location = location.clone();
+                async move {
+                    (
+                        axum::http::StatusCode::TEMPORARY_REDIRECT,
+                        [(axum::http::header::LOCATION, location)],
+                    )
+                }
+            }),
+        );
+        let redir_listener = TcpListener::bind("127.0.0.1:0").await.expect("bind redir");
+        let redir_addr = redir_listener.local_addr().expect("redir addr");
+        tokio::spawn(async move {
+            axum::serve(redir_listener, redir_app).await.expect("redir serve");
+        });
+
+        let adapter = make_adapter(format!("http://{}", redir_addr));
+        // Any RPC call drives the write/read client; coordinator_for is
+        // an eth_call POST.
+        let outcome = adapter.coordinator_for(1, 0).await;
+        assert!(
+            outcome.is_err(),
+            "a 3xx RPC redirect must NOT be followed; expected an error, got {:?}",
+            outcome
+        );
+        assert_eq!(
+            sink_hits.load(Ordering::SeqCst),
+            0,
+            "signed RPC body was re-POSTed to the off-gate redirect sink (BV-CP-01/02 still vulnerable on RPC leg)"
         );
     }
 
