@@ -150,7 +150,16 @@ pub async fn handle_event<C: ChainAdapter + ?Sized>(
     chain.record_dispatch(event.job_id, chosen.0).await?;
 
     // 5. Dispatch the prompt to the chosen member.
-    let http = reqwest::Client::new();
+    //    FWA-BV-CP-01: disable redirect-follow. The default policy
+    //    follows up to 10 redirects and would re-POST the buyer prompt
+    //    on a 307/308 to a `Location:` host that bypasses the
+    //    construction-time outbound gate (e.g. https->http downgrade to
+    //    a cleartext off-gate sink). `Policy::none()` returns the 3xx as
+    //    a response instead, so the prompt is never delivered to it.
+    let http = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap_or_default();
     let body = PoolInferRequest {
         model: DEFAULT_MODEL.to_string(),
         prompt: event.prompt.clone(),
