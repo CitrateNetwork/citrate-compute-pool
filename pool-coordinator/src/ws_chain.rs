@@ -70,6 +70,12 @@ impl WsChainSubscriber {
     /// mpsc; when the connection closes, the task sends a final
     /// error + drops the sender (stream closes).
     pub async fn connect(self) -> Result<EventStream, CoordinatorError> {
+        // FWA-C8-01: the ws event-subscription leg feeds ComputeRequested
+        // events into the dispatch loop — a plaintext remote ws:// is the
+        // same MITM-able chain-truth vector as the RPC leg. Refuse
+        // fail-closed before dialing. wss any-host / ws loopback-only.
+        crate::outbound::validate_outbound_ws_url(&self.rpc_ws_url)
+            .map_err(|e| CoordinatorError::Chain(format!("CITRATE_POOL_WS_URL: {}", e)))?;
         let (ws_stream, _response) =
             tokio_tungstenite::connect_async(&self.rpc_ws_url)
                 .await

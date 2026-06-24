@@ -124,8 +124,16 @@ impl HttpChainAdapter {
         pool_contract: H160,
         wallet: Wallet,
     ) -> Self {
+        // FWA-BV-CP-01: disable redirect-follow. reqwest's default policy
+        // follows up to 10 redirects and re-POSTs the (signed) JSON-RPC
+        // body on a 307/308 — a 3xx with `Location: http://<off-gate>`
+        // would downgrade past the construction-time outbound gate and
+        // re-send the body in cleartext to an attacker-controlled host.
+        // With `Policy::none()` a 3xx is returned as a response instead of
+        // silently followed, so the body never leaves for a downgraded sink.
         let http = reqwest::Client::builder()
             .timeout(HTTP_TIMEOUT)
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .unwrap_or_default();
         Self {
@@ -136,6 +144,24 @@ impl HttpChainAdapter {
             http,
             selectors: Selectors::compute(),
         }
+    }
+
+    /// FWA-C8-01: TLS-gated constructor. Validates `rpc_url` through the
+    /// outbound gate (https any-host / http loopback-only) before
+    /// building the client, so a misconfigured plaintext-remote RPC dies
+    /// fail-closed at the adapter boundary — defense-in-depth behind the
+    /// config-load check. The production entry point (`main.rs`) uses
+    /// this; the infallible [`new`](Self::new) stays for loopback test
+    /// fixtures.
+    pub fn try_new(
+        rpc_url: String,
+        chain_id: u64,
+        pool_contract: H160,
+        wallet: Wallet,
+    ) -> Result<Self, CoordinatorError> {
+        crate::outbound::validate_outbound_url(&rpc_url)
+            .map_err(|e| CoordinatorError::Chain(format!("CITRATE_POOL_RPC_URL: {}", e)))?;
+        Ok(Self::new(rpc_url, chain_id, pool_contract, wallet))
     }
 
     /// RM-B1 / WP-B2.4 (audit F-5): verify the RPC endpoint advertises
@@ -1254,6 +1280,114 @@ mod tests {
         let adapter = make_adapter(format!("http://{}", addr));
         let err = adapter.coordinator_for(1, 0).await.expect_err("fail");
         assert!(matches!(err, CoordinatorError::Chain(_)));
+    }
+
+    // FWA-C8-01 tripwire: the TLS-gated adapter constructor refuses a
+    // plaintext-remote RPC, accepts loopback http + any-host https.
+    #[test]
+    fn try_new_refuses_plaintext_remote_rpc() {
+        let _g = crate::outbound::ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let wallet = Wallet::from_hex(TEST_HEX).expect("wallet");
+        assert!(
+            HttpChainAdapter::try_new(
+                "http://203.0.113.7:8545".into(),
+                40204,
+                pool_contract(),
+                wallet.clone(),
+            )
+            .is_err(),
+            "remote plaintext RPC must be refused (MITM-able)"
+        );
+        assert!(
+            HttpChainAdapter::try_new(
+                "http://127.0.0.1:18545".into(),
+                40204,
+                pool_contract(),
+                wallet.clone(),
+            )
+            .is_ok(),
+            "loopback http RPC must be accepted"
+        );
+        assert!(
+            HttpChainAdapter::try_new(
+                "https://rpc.citrate.network".into(),
+                40204,
+                pool_contract(),
+                wallet,
+            )
+            .is_ok(),
+            "https RPC must be accepted"
+        );
+    }
+
+    // FWA-BV-CP-01 / BV-CP-02 (RPC leg tripwire): the JSON-RPC write
+    // client built in `HttpChainAdapter::new` must NOT follow a 3xx.
+    // A node (or MITM) answering `eth_call`/`eth_sendRawTransaction`
+    // with `307 Location: http://<off-gate>` would otherwise make
+    // reqwest re-POST the signed body to a host that bypassed the
+    // construction-time outbound gate. With `redirect(Policy::none())`
+    // the 307 surfaces as a transport/decode error (the redirect body
+    // is not JSON-RPC) instead of being silently followed — the body
+    // never reaches the off-gate sink. Mirrors the dispatch-leg
+    // integration test in tests/redirect_no_follow.rs, covering the
+    // second outbound leg called out in BV-CP-02.
+    #[tokio::test]
+    async fn rpc_client_does_not_follow_redirect_to_off_gate_sink() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        // Sink server: any body delivered here is a signed-write leak.
+        let sink_hits = Arc::new(AtomicUsize::new(0));
+        let sink_app = axum::Router::new()
+            .route(
+                "/sink",
+                post(|State(h): State<Arc<AtomicUsize>>, _b: String| async move {
+                    h.fetch_add(1, Ordering::SeqCst);
+                    Json(json!({ "jsonrpc": "2.0", "id": 1, "result": "0x" }))
+                }),
+            )
+            .with_state(sink_hits.clone());
+        let sink_listener = TcpListener::bind("127.0.0.1:0").await.expect("bind sink");
+        let sink_addr = sink_listener.local_addr().expect("sink addr");
+        tokio::spawn(async move {
+            axum::serve(sink_listener, sink_app).await.expect("sink serve");
+        });
+
+        // Redirector: every RPC POST gets a 307 → http://<sink>/sink.
+        let location = format!("http://{}/sink", sink_addr);
+        let redir_app = axum::Router::new().route(
+            "/",
+            post(move |_b: String| {
+                let location = location.clone();
+                async move {
+                    (
+                        axum::http::StatusCode::TEMPORARY_REDIRECT,
+                        [(axum::http::header::LOCATION, location)],
+                    )
+                }
+            }),
+        );
+        let redir_listener = TcpListener::bind("127.0.0.1:0").await.expect("bind redir");
+        let redir_addr = redir_listener.local_addr().expect("redir addr");
+        tokio::spawn(async move {
+            axum::serve(redir_listener, redir_app).await.expect("redir serve");
+        });
+
+        let adapter = make_adapter(format!("http://{}", redir_addr));
+        // Any RPC call drives the write/read client; coordinator_for is
+        // an eth_call POST.
+        let outcome = adapter.coordinator_for(1, 0).await;
+        assert!(
+            outcome.is_err(),
+            "a 3xx RPC redirect must NOT be followed; expected an error, got {:?}",
+            outcome
+        );
+        assert_eq!(
+            sink_hits.load(Ordering::SeqCst),
+            0,
+            "signed RPC body was re-POSTed to the off-gate redirect sink (BV-CP-01/02 still vulnerable on RPC leg)"
+        );
     }
 
     #[test]
