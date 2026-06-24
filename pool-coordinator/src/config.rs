@@ -5,6 +5,8 @@ use std::env;
 
 use ethereum_types::H160;
 
+use crate::outbound::validate_outbound_url;
+
 /// Runtime config. Operators populate this from env vars in `main.rs`.
 #[derive(Debug, Clone)]
 pub struct CoordinatorConfig {
@@ -15,9 +17,11 @@ pub struct CoordinatorConfig {
     /// Address this daemon's wallet signs as. Must equal the
     /// secp256k1 keystore's address.
     pub wallet_address: H160,
-    /// Map of pool member address → HTTPS endpoint of the member's
+    /// Map of pool member address → endpoint of the member's
     /// `/pool-infer` handler. Operator-supplied; mismatch produces
-    /// `UnknownMemberEndpoint` at dispatch time.
+    /// `UnknownMemberEndpoint` at dispatch time. FWA-C8-01: each URL is
+    /// enforced through the outbound TLS gate at parse time (https any
+    /// host / http loopback only), so this is HTTPS in production.
     pub member_endpoints: HashMap<H160, String>,
     /// Per-request HTTPS timeout against pool members.
     pub provider_timeout_secs: u64,
@@ -33,6 +37,13 @@ impl CoordinatorConfig {
             .unwrap_or(40204);
         let rpc_url = env::var("CITRATE_POOL_RPC_URL")
             .unwrap_or_else(|_| "http://127.0.0.1:18545".to_string());
+        // FWA-C8-01: the RPC leg reads chain truth (coordinator
+        // election, pool membership, job spec) and carries signed
+        // writes — a MITM on a plaintext remote RPC can feed false
+        // chain-truth. Fail closed at config load. Default is loopback,
+        // so production deployments using the default are unaffected.
+        validate_outbound_url(&rpc_url)
+            .map_err(|e| format!("CITRATE_POOL_RPC_URL: {}", e))?;
         let wallet_hex = env::var("CITRATE_POOL_WALLET_ADDRESS")
             .map_err(|_| "CITRATE_POOL_WALLET_ADDRESS unset".to_string())?;
         let wallet_address = parse_addr(&wallet_hex)
@@ -77,7 +88,15 @@ fn parse_endpoints(s: &str) -> Result<HashMap<H160, String>, String> {
             .split_once('=')
             .ok_or_else(|| format!("bad entry (need addr=url): {}", entry))?;
         let parsed = parse_addr(addr).map_err(|e| format!("{}: {}", addr, e))?;
-        out.insert(parsed, url.trim().to_string());
+        let url = url.trim();
+        // FWA-C8-01: the dispatch leg POSTs the buyer prompt to this
+        // URL and trusts the completion to decide completeJob/failJob.
+        // A remote-plaintext endpoint is MITM-able (read prompt, forge
+        // completion, or forge failure). Refuse fail-closed at parse
+        // time so a misconfigured operator dies at startup, not mid-job.
+        // Mirrors node-agent's chainio::outbound gate (FUA-NODE-AGENT-06).
+        validate_outbound_url(url).map_err(|e| format!("member endpoint {}: {}", addr, e))?;
+        out.insert(parsed, url.to_string());
     }
     Ok(out)
 }
@@ -100,8 +119,10 @@ mod tests {
 
     #[test]
     fn parse_endpoints_parses_two_entries() {
-        let s = "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1=http://m1/infer,\
-                 0xb2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2=http://m2/infer";
+        // FWA-C8-01: endpoints now run through the outbound TLS gate at
+        // parse time, so fixtures use the legitimate https shape.
+        let s = "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1=https://m1.pool.example/infer,\
+                 0xb2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2=https://m2.pool.example/infer";
         let map = parse_endpoints(s).expect("ok");
         assert_eq!(map.len(), 2);
     }
@@ -117,5 +138,38 @@ mod tests {
     #[test]
     fn parse_endpoints_rejects_missing_equals() {
         assert!(parse_endpoints("0x1111111111111111111111111111111111111111").is_err());
+    }
+
+    // FWA-C8-01 RED→tripwire (federation-wide audit 2026-06-20, MEDIUM):
+    // the coordinator must NOT accept a remote-plaintext member endpoint —
+    // a network MITM on the plaintext leg can read the buyer prompt and
+    // forge a completion (pay-for-fabricated-work) or a failure (grief an
+    // honest member). This mirrors node-agent's chainio::outbound gate
+    // (FUA-NODE-AGENT-06). Pre-fix this PASSED (endpoint stored verbatim);
+    // post-fix parse_endpoints runs every value through validate_outbound_url.
+    #[test]
+    fn red_fwa_c8_01_remote_plaintext_member_endpoint_is_refused() {
+        // Serialise against the env-override test (shared process env).
+        let _g = crate::outbound::ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let raw = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa=http://attacker.example/infer";
+        assert!(
+            parse_endpoints(raw).is_err(),
+            "remote plaintext http:// member endpoint must be refused (MITM-able)"
+        );
+    }
+
+    // The gate must still permit the legitimate shapes: https to any host,
+    // and plaintext http only to loopback (local provider on the same box).
+    #[test]
+    fn parse_endpoints_accepts_https_and_loopback_http() {
+        let _g = crate::outbound::ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let https = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa=https://m1.pool.example/infer";
+        assert!(parse_endpoints(https).is_ok(), "https endpoint must be accepted");
+        let loop_http = "0xb2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2=http://127.0.0.1:8080/infer";
+        assert!(parse_endpoints(loop_http).is_ok(), "loopback http must be accepted");
     }
 }

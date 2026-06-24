@@ -33,3 +33,16 @@ central finding.
 
 - Phase-1 mapping complete; see `per-repo/citrate-compute-pool/MAP.md` for the mapped surface and
   the high-risk areas queued for Phase-2 vuln-hunting.
+
+## Federation-wide audit 2026-06-20 (FWA-C8) — remediation
+
+- Audit root: `citrate-security/audits/2026-06-20-federation-wide-audit/per-chunk/FWA-C8/`
+- Remediation log + tripwire (local, Hybrid topology):
+  `.agentile/audits/2026-06-21-fwa-remediation/REMEDIATION_LOG.md`
+  and `.../semgrep/fwa-c8-01-outbound-tls-gate.yaml`
+- **FWA-C8-01** (MEDIUM, coordinator outbound plaintext `http://` with no TLS
+  gate) — **FIXED** on branch `remediation/fwa-2026-06`. Ported node-agent's
+  `validate_outbound_url` into `pool-coordinator/src/outbound.rs`; applied at
+  member-endpoint parse, RPC config-load, RPC adapter boundary, and the
+  ws-subscription dial (sweep-found extra sink). RED→green, mutation 24/24 on
+  the gate, semgrep tripwire clean on production source.
