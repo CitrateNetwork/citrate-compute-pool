@@ -36,7 +36,7 @@ impl CoordinatorConfig {
             .and_then(|s| s.parse().ok())
             .unwrap_or(40204);
         let rpc_url = env::var("CITRATE_POOL_RPC_URL")
-            .unwrap_or_else(|_| "http://127.0.0.1:18545".to_string());
+            .unwrap_or_else(|_| "http://127.0.0.1:8545".to_string());
         // FWA-C8-01: the RPC leg reads chain truth (coordinator
         // election, pool membership, job spec) and carries signed
         // writes — a MITM on a plaintext remote RPC can feed false
