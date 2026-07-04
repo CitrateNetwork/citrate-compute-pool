@@ -58,6 +58,12 @@ struct KeystoreKdfParams {
 
 use crate::error::CoordinatorError;
 
+/// Modern floor for PBKDF2-HMAC-SHA256 iteration counts (OWASP 2023
+/// guidance is 600k for HMAC-SHA256). Loading a legacy keystore below
+/// this floor is still permitted (backward compat, ENCRYPT-S1 WP-10)
+/// but emits a soft warning so operators know to re-mint at rotation.
+const MIN_MODERN_PBKDF2_ITERS: u32 = 600_000;
+
 #[derive(Error, Debug)]
 pub enum WalletError {
     #[error("private key hex must be 64 characters (got {0})")]
@@ -137,6 +143,31 @@ impl Wallet {
     /// Keystores are portable: a key created in the JS CitrateWallet
     /// can be unlocked here and vice versa (per ADR-009 / the W-01
     /// "format over protocol" essay).
+    ///
+    /// ── ENCRYPT-S1 WP-10: keystore cipher hardening (planned) ──────
+    /// The V3 keystore parameters accepted here — PBKDF2-HMAC-SHA256 +
+    /// AES-128-CTR — are functional and interoperable but weaker than
+    /// the scrypt + AES-256 family used elsewhere in the ecosystem.
+    ///
+    /// PLAN (deferred to the next operator KEY ROTATION, tracked as
+    /// inventory A21): migrate NEWLY minted keystores to
+    ///   - KDF:    scrypt (N>=2^18, r=8, p=1)   -- memory-hard, resists
+    ///             GPU/ASIC offline passphrase cracking
+    ///   - cipher: aes-256-ctr (key = dkey[0..32])
+    /// The migration is CREATOR-side: keystores are minted by the JS
+    /// SDK (W-01), NOT by this Rust reader. This function only DECRYPTS
+    /// and MUST keep reading the legacy pbkdf2/aes-128-ctr format
+    /// unchanged for backward compatibility — do not tighten the
+    /// `cipher`/`kdf` guards above into hard rejects until every
+    /// operator key has been re-minted under the new parameters.
+    ///
+    /// Why the iteration-count bump is NOT applied here: this reader
+    /// has no keystore-CREATION path (see the JS SDK), so there is no
+    /// creation-time `c` to raise. We instead surface a soft warning
+    /// (below) when a loaded keystore's iteration count is under the
+    /// modern floor, without failing the load. The floor bump for new
+    /// keystores rides the scrypt migration above.
+    /// ───────────────────────────────────────────────────────────────
     pub fn from_keystore(path: &str, passphrase: &str) -> Result<Self, WalletError> {
         let raw = std::fs::read_to_string(path)
             .map_err(|e| WalletError::KeystoreIo(format!("read {}: {}", path, e)))?;
@@ -174,6 +205,20 @@ impl Wallet {
                 "iv must be 16 bytes, got {}",
                 iv.len()
             )));
+        }
+
+        // ENCRYPT-S1 WP-10: non-breaking hardening signal. Legacy
+        // keystores below the modern iteration floor still load (we do
+        // NOT reject — that would break backward compat), but we warn
+        // so the key gets re-minted with stronger params at rotation.
+        if crypto.kdfparams.c < MIN_MODERN_PBKDF2_ITERS {
+            tracing::warn!(
+                iterations = crypto.kdfparams.c,
+                floor = MIN_MODERN_PBKDF2_ITERS,
+                "keystore uses a below-modern PBKDF2 iteration count; \
+                 re-mint with scrypt + AES-256 at next key rotation \
+                 (ENCRYPT-S1 WP-10)"
+            );
         }
 
         // 1. Derive 32-byte key via PBKDF2-HMAC-SHA256.
