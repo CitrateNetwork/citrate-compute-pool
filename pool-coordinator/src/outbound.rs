@@ -285,17 +285,17 @@ mod tests {
     #[test]
     fn ws_gate_matches_http_policy() {
         assert!(validate_outbound_ws_url_with("wss://node.citrate.network", false).is_ok());
-        assert!(validate_outbound_ws_url_with("ws://127.0.0.1:18546", false).is_ok());
-        assert!(validate_outbound_ws_url_with("ws://[::1]:18546", false).is_ok());
+        assert!(validate_outbound_ws_url_with("ws://127.0.0.1:8546", false).is_ok());
+        assert!(validate_outbound_ws_url_with("ws://[::1]:8546", false).is_ok());
         assert!(matches!(
-            validate_outbound_ws_url_with("ws://203.0.113.7:18546", false),
+            validate_outbound_ws_url_with("ws://203.0.113.7:8546", false),
             Err(OutboundUrlError::PlaintextNonLoopback(_))
         ));
         // http/https schemes are not valid ws endpoints → refused.
         assert!(validate_outbound_ws_url_with("https://node.citrate.network", false).is_err());
         assert!(validate_outbound_ws_url_with("", false).is_err());
         // dev override unlocks plaintext remote ws.
-        assert!(validate_outbound_ws_url_with("ws://203.0.113.7:18546", true).is_ok());
+        assert!(validate_outbound_ws_url_with("ws://203.0.113.7:8546", true).is_ok());
     }
 
     #[test]

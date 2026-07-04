@@ -1302,7 +1302,7 @@ mod tests {
         );
         assert!(
             HttpChainAdapter::try_new(
-                "http://127.0.0.1:18545".into(),
+                "http://127.0.0.1:8545".into(),
                 40204,
                 pool_contract(),
                 wallet.clone(),
