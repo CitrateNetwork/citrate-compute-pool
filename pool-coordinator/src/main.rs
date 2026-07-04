@@ -26,7 +26,7 @@
 //! # Optional env vars
 //!
 //! - `CITRATE_POOL_CHAIN_ID` — default 40204 (testnet)
-//! - `CITRATE_POOL_RPC_URL` — default http://127.0.0.1:18545
+//! - `CITRATE_POOL_RPC_URL` — default http://127.0.0.1:8545
 //! - `CITRATE_POOL_PROVIDER_TIMEOUT_SECS` — default 30
 //! - `CITRATE_POOL_POLL_INTERVAL_SECS` — event polling cadence,
 //!   default 3
@@ -342,7 +342,7 @@ fn print_config_help(err: &str) {
     eprintln!();
     eprintln!("Optional:");
     eprintln!("  CITRATE_POOL_CHAIN_ID             default 40204");
-    eprintln!("  CITRATE_POOL_RPC_URL              default http://127.0.0.1:18545");
+    eprintln!("  CITRATE_POOL_RPC_URL              default http://127.0.0.1:8545");
     eprintln!("  CITRATE_POOL_MEMBER_ENDPOINTS     addr1=url1,addr2=url2");
     eprintln!("  CITRATE_POOL_PROVIDER_TIMEOUT_SECS  default 30");
     eprintln!("  CITRATE_POOL_POLL_INTERVAL_SECS   default 3");
