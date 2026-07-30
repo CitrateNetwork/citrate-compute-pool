@@ -591,6 +591,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "citrate-training-coordinator"
+version = "0.4.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "citrate-training-worker",
+ "ethereum-types",
+ "hex",
+ "http-body-util",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "sha3",
+ "thiserror 1.0.69",
+ "tokio",
+ "tower",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "citrate-training-worker"
 version = "0.4.0"
 dependencies = [
