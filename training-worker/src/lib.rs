@@ -53,6 +53,11 @@ pub mod candle_backend;
 pub mod chain;
 pub mod events;
 pub mod http_chain_pipeline;
+/// The real federated signer (secp256k1 over the worker's encrypted keystore),
+/// replacing NAT's `ToyKeyedSigner`. Behind the light `federated` feature — no
+/// Candle, so a node can sign and settle without building the trainer.
+#[cfg(feature = "federated")]
+pub mod federated_signer;
 pub mod job_artifacts;
 /// The real NAT-backed training backend. Feature-gated because it pulls Candle;
 /// the artifact-verification and commitment layers it depends on are NOT gated,
