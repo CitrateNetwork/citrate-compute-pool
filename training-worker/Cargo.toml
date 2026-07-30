@@ -37,6 +37,13 @@ hex = "0.4"
 # three matching reimplementations. Pinned by rev: the grid is a consensus
 # surface for the challenge path, so it must not float.
 citrate-fed-types = { git = "https://github.com/CitrateNetwork/citrate-fed-types.git", rev = "dbbfbff29a5053aa8324a866d52215c2f2281c31" }
+
+# NAT — the model the co-op trains. Pinned by rev: the parameter NAMES are the
+# contract `zone_delta` attributes against, so an unpinned bump could silently
+# reroute a zone's delta.
+nat-candle = { git = "ssh://git@github.com/CitrateNetwork/nat.git", rev = "0a687fb3", optional = true }
+nat-types  = { git = "ssh://git@github.com/CitrateNetwork/nat.git", rev = "0a687fb3", optional = true }
+nat-data   = { git = "ssh://git@github.com/CitrateNetwork/nat.git", rev = "0a687fb3", optional = true }
 parking_lot = { workspace = true }
 ethereum-types = "0.14"
 
@@ -97,6 +104,14 @@ candle-gpu = ["dep:candle-core", "dep:candle-nn", "dep:safetensors"]
 # Enables H100/CUDA acceleration on top of candle-gpu. Requires
 # the CUDA runtime to be present at build + runtime.
 candle-cuda = ["candle-gpu", "candle-core/cuda"]
+
+# The REAL training backend: NAT's zone-partitioned and dense autoregressive LMs
+# behind `ModelBackend`. Off by default so the standard build stays light — the
+# artifact-verification and commitment layers this backend depends on are NOT
+# gated, so the honesty checks compile and test everywhere.
+nat = ["dep:nat-candle", "dep:nat-types", "dep:nat-data", "dep:candle-core"]
+# NAT on CUDA. Additive over `nat`.
+nat-cuda = ["nat", "nat-candle/cuda"]
 
 [dev-dependencies]
 tokio = { workspace = true }
