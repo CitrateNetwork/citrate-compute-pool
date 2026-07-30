@@ -46,6 +46,34 @@ pub struct StepResult {
 
 #[async_trait]
 pub trait ModelBackend: Send + Sync {
+    /// Does this backend actually train THE JOB THE CHAIN DESCRIBES?
+    ///
+    /// True means, specifically: it loads the weights identified by
+    /// `model_start_hash` and trains on the data identified by
+    /// `spec.dataset_hash`. Anything less is a harness.
+    ///
+    /// **Defaults to `false`, and that default is the point.** A backend
+    /// added later is untrusted until its author deliberately claims
+    /// otherwise, so a placeholder can never reach live settlement just
+    /// because nobody remembered this gate existed. `Worker::run` refuses
+    /// to run a backend that answers `false` against a chain that answers
+    /// `ChainClient::is_live_settlement() == true`.
+    ///
+    /// Why it matters: a worker earns per epoch by committing a Merkle root
+    /// of its step commitments, and the protocol cannot tell whether those
+    /// hashes came from real training. A placeholder backend on a real chain
+    /// collects real SALT for work it did not do, and looks identical
+    /// on-chain to a worker that did it. That failure is silent, which is
+    /// why it is gated in code rather than documented in a runbook.
+    ///
+    /// No backend in this crate returns `true` today: `load_starting_weights`
+    /// does not fetch (S2/S3), `dataset_hash` is consumed nowhere, and
+    /// `CandleBackend` trains a locally-initialised layer on synthetic input
+    /// with a placeholder loss.
+    fn honors_job_spec(&self) -> bool {
+        false
+    }
+
     /// Load starting weights for a job. For S0 the weights are
     /// conceptually "the identity" — the backend just returns the
     /// hash it was given; no tensor state is held. S2 real backends

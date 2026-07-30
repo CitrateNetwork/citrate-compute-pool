@@ -434,6 +434,13 @@ impl HttpChainClient {
 
 #[async_trait]
 impl ChainClient for HttpChainClient {
+    /// TRUE: this client is bound to a real `ComputePoolTraining` deployment,
+    /// so a committed epoch releases real SALT. Pairs with
+    /// `ModelBackend::honors_job_spec` to stop a placeholder backend earning.
+    fn is_live_settlement(&self) -> bool {
+        true
+    }
+
     async fn snapshot(&self, job_id: JobId) -> Result<JobChainSnapshot, ChainError> {
         let mut data = Vec::with_capacity(4 + 32);
         data.extend_from_slice(&self.selectors.get_job);

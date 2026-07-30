@@ -166,6 +166,28 @@ where
             "worker starting"
         );
 
+        // CAPABILITY GATE — refuse to earn real money for placeholder work.
+        //
+        // A worker is paid per epoch for committing a Merkle root of its step
+        // commitments, and the protocol cannot distinguish a root produced by
+        // real training from one produced by a harness — both are just hashes.
+        // So the honesty check has to happen here, before the first commit.
+        //
+        // Fails CLOSED by construction: both capabilities default to the safe
+        // answer, so a backend or chain client written later is refused until
+        // someone deliberately asserts it is real.
+        if self.chain.is_live_settlement() && !self.backend.honors_job_spec() {
+            return Err(anyhow::anyhow!(
+                "refusing to run job {job_id}: this chain settles in real SALT but the \
+                 model backend reports honors_job_spec() == false, i.e. it does not load \
+                 the weights named by model_start_hash or train on the data named by \
+                 dataset_hash. Committing epochs from it would collect real payment for \
+                 work that was not done, and would be indistinguishable on-chain from an \
+                 honest worker. Supply a backend that honours the job spec, or point this \
+                 daemon at a non-settling chain."
+            ));
+        }
+
         // Load starting weights. For S0 this is a no-op that just
         // returns the hash; S2 backends fetch from IPFS.
         let snap = self.chain.snapshot(job_id).await?;
