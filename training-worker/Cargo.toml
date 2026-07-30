@@ -21,6 +21,12 @@ path = "src/lib.rs"
 name = "citrate-training-worker"
 path = "src/bin/main.rs"
 
+# The member-facing daemon: register a machine with the training coordinator and
+# poll for work. Separate from the binary above, which is the chain-event daemon.
+[[bin]]
+name = "citrate-coop-worker"
+path = "src/bin/coop_worker.rs"
+
 [dependencies]
 tokio = { workspace = true }
 async-trait = { workspace = true }

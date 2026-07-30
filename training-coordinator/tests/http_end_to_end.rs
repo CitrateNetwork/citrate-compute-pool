@@ -278,3 +278,136 @@ async fn state_survives_a_restart_and_the_lease_is_still_held() {
         .unwrap();
     assert_eq!(res.status(), StatusCode::NO_CONTENT);
 }
+
+// ── The real client against the real server ────────────────────────────
+//
+// Everything above drives the router with hand-built requests. These drive it
+// with the actual `CoordinatorClient` a member's machine runs, over a real
+// socket. This crate is the only one that may depend on both sides, so this is
+// the only place the seam can be tested at all — and the seam is exactly where a
+// digest mismatch would live: two implementations of the same signing preimage
+// agree until one changes a separator, and then every honest submission fails to
+// authenticate while looking like a key problem.
+
+use citrate_training_worker::coordinator_client::{Backoff, CoordinatorClient};
+
+/// Serve the real router on an ephemeral port and hand back its base URL.
+async fn serve(c: Arc<Coordinator>) -> String {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, router(c)).await.unwrap();
+    });
+    format!("http://{addr}")
+}
+
+fn fast_client(url: String, key: &str) -> CoordinatorClient {
+    CoordinatorClient::new(url, Wallet::from_hex(key).unwrap()).with_backoff(Backoff {
+        initial: std::time::Duration::from_millis(5),
+        max: std::time::Duration::from_millis(10),
+    })
+}
+
+#[tokio::test]
+async fn the_real_worker_client_completes_the_whole_loop_against_the_real_server() {
+    let c = coordinator(
+        "realclient",
+        vec![JobSpec::new(
+            "h01-64m-nat-seed1",
+            Capability::H01,
+            serde_json::json!({ "rung": "64M", "arm": "nat", "seed": 1 }),
+        )],
+    );
+    let url = serve(c.clone()).await;
+    let client = fast_client(url, KEY_A);
+
+    // register — the capability is derived from the probe, not claimed
+    let reg = client
+        .register(&probe("candle-cuda", "bf16", 71_098.0, true))
+        .await
+        .expect("register");
+    assert_eq!(reg.capability, Capability::H01);
+    // The server's idea of who we are matches ours, with no id ever transmitted.
+    assert_eq!(reg.worker, format!("{:?}", client.worker_id()));
+
+    // lease
+    let job = client.lease().await.expect("lease").expect("a job");
+    assert_eq!(job.id.0, "h01-64m-nat-seed1");
+    assert_eq!(job.payload["rung"], "64M");
+
+    // submit
+    client
+        .submit(&job.id, r#"{"final_loss":2.31}"#)
+        .await
+        .expect("submit");
+
+    let counts = c.snapshot().counts();
+    assert_eq!((counts.done, counts.pending, counts.workers), (1, 0, 1));
+}
+
+/// The capability gate, end to end through the real client: a CPU machine is told
+/// there is nothing for it rather than handed ablation work.
+#[tokio::test]
+async fn a_cpu_client_is_given_no_work_by_the_real_server() {
+    let c = coordinator(
+        "realcpu",
+        vec![JobSpec::new(
+            "ladder",
+            Capability::H01,
+            serde_json::json!({}),
+        )],
+    );
+    let client = fast_client(serve(c).await, KEY_A);
+
+    let reg = client
+        .register(&probe("candle-cpu", "f32", 7_786.0, true))
+        .await
+        .expect("register");
+    assert_eq!(reg.capability, Capability::Probe);
+    assert!(client
+        .lease()
+        .await
+        .expect("lease is not an error")
+        .is_none());
+}
+
+/// The poll loop is what actually runs on a member's machine: it must pick work
+/// up, run it, and return a result the server accepts, unattended.
+#[tokio::test]
+async fn the_poll_loop_drains_the_queue_unattended() {
+    let c = coordinator(
+        "drain",
+        vec![
+            JobSpec::new("a", Capability::Probe, serde_json::json!({})),
+            JobSpec::new("b", Capability::Probe, serde_json::json!({})),
+        ],
+    );
+    let client = fast_client(serve(c.clone()).await, KEY_A);
+    client
+        .register(&probe("candle-metal", "f32", 40_000.0, true))
+        .await
+        .unwrap();
+
+    let done = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let d2 = done.clone();
+    client
+        .poll_loop(
+            move |job| {
+                let d = d2.clone();
+                async move {
+                    d.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    Ok(format!(r#"{{"job":"{}"}}"#, job.id))
+                }
+            },
+            {
+                let d3 = done.clone();
+                move || d3.load(std::sync::atomic::Ordering::SeqCst) < 2
+            },
+        )
+        .await
+        .unwrap();
+
+    let counts = c.snapshot().counts();
+    assert_eq!(counts.done, 2, "both jobs completed unattended");
+    assert_eq!(counts.pending, 0);
+}

@@ -19,7 +19,7 @@ use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use parking_lot::Mutex;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 use crate::attestation::{self, Attestation};
 use crate::job::JobSpec;
@@ -64,28 +64,10 @@ impl Coordinator {
     }
 }
 
-/// A request that carries only a signature, used to prove who is asking. The
-/// worker signs its own address-bearing probe at registration; for a lease it
-/// signs the fixed [`LEASE_MESSAGE`] so the coordinator can recover the asker
-/// without the worker having to send an identity it could lie about.
-#[derive(Debug, Deserialize)]
-pub struct LeaseRequest {
-    #[serde(with = "crate::attestation::hex_bytes")]
-    pub signature: Vec<u8>,
-}
-
-/// What a worker signs to ask for work. Fixed and domain-separated: it proves key
-/// possession and nothing else, and cannot be replayed as any other message.
-pub const LEASE_MESSAGE: &[u8] = b"citrate-training-lease/1";
-
-pub fn lease_digest() -> [u8; 32] {
-    use sha3::{Digest, Keccak256};
-    let mut h = Keccak256::new();
-    h.update(LEASE_MESSAGE);
-    let mut d = [0u8; 32];
-    d.copy_from_slice(&h.finalize());
-    d
-}
+// The lease request and its digest come from the shared protocol.
+pub use citrate_training_worker::coordinator_protocol::{
+    lease_digest, LeaseRequest, LEASE_MESSAGE,
+};
 
 #[derive(Debug, Serialize)]
 pub struct RegisterResponse {

@@ -19,12 +19,16 @@
 //! the work itself failing verification downstream, not an attestation scheme
 //! that cannot be made sound without hardware roots of trust nobody has.
 
+use citrate_training_worker::coordinator_protocol::attestation_digest;
 use citrate_training_worker::wallet::Wallet;
 use ethereum_types::H160;
 use serde::{Deserialize, Serialize};
-use sha3::{Digest, Keccak256};
 
 use crate::job::Capability;
+
+// Re-exported, never redefined: the worker constructs these and this crate
+// verifies them, so a second definition here could drift from the one on the wire.
+pub use citrate_training_worker::coordinator_protocol::Attestation;
 
 /// Throughput floor separating accelerator-class from CPU-class on the probe's
 /// fixed job, in tokens/second.
@@ -81,32 +85,6 @@ pub fn capability_of(p: &ProbeReport) -> Capability {
     }
 }
 
-/// A signed capability claim, as submitted for registration.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct Attestation {
-    /// The probe document, verbatim, exactly as signed. Kept as the original
-    /// bytes rather than a re-serialization: re-encoding JSON does not round-trip
-    /// byte-for-byte (key order, number formatting), and a signature over
-    /// re-encoded bytes would fail for honest workers.
-    pub probe_json: String,
-    /// 65-byte recoverable secp256k1 signature over `keccak256(probe_json)`.
-    #[serde(with = "hex_bytes")]
-    pub signature: Vec<u8>,
-}
-
-pub(crate) mod hex_bytes {
-    use serde::{Deserialize, Deserializer, Serializer};
-
-    pub fn serialize<S: Serializer>(v: &[u8], s: S) -> Result<S::Ok, S::Error> {
-        s.serialize_str(&format!("0x{}", hex::encode(v)))
-    }
-
-    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<u8>, D::Error> {
-        let s = String::deserialize(d)?;
-        hex::decode(s.strip_prefix("0x").unwrap_or(&s)).map_err(serde::de::Error::custom)
-    }
-}
-
 #[derive(Debug, thiserror::Error, PartialEq)]
 pub enum AttestError {
     #[error("probe is not valid JSON: {0}")]
@@ -144,13 +122,8 @@ pub fn verify(a: &Attestation) -> Result<RegisteredWorker, AttestError> {
     let probe: ProbeReport =
         serde_json::from_value(v).map_err(|e| AttestError::NotJson(e.to_string()))?;
 
-    let mut h = Keccak256::new();
-    h.update(a.probe_json.as_bytes());
-    let mut digest = [0u8; 32];
-    digest.copy_from_slice(&h.finalize());
-
-    let id =
-        Wallet::recover_address(&digest, &a.signature).map_err(|_| AttestError::BadSignature)?;
+    let id = Wallet::recover_address(&attestation_digest(&a.probe_json), &a.signature)
+        .map_err(|_| AttestError::BadSignature)?;
 
     Ok(RegisteredWorker {
         id,

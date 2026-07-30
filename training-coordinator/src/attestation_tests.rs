@@ -3,6 +3,7 @@
 // results count — follows from what is accepted here.
 
 use super::*;
+use citrate_training_worker::coordinator_protocol::attestation_digest;
 use citrate_training_worker::wallet::Wallet;
 
 // Anvil account #0 / #1. Well-known throwaways, used so the derived addresses are
@@ -24,15 +25,17 @@ fn probe_json(backend: &str, dtype: &str, tok_s: f64, self_repeat: bool) -> Stri
     .to_string()
 }
 
+/// Signs through the SHARED digest, which is what a real worker calls. If this
+/// crate ever grew its own copy, this helper would keep passing while the fleet
+/// failed — so the test signs the way the wire does.
 fn sign(key: &str, body: &str) -> Attestation {
     let w = Wallet::from_hex(key).expect("load test key");
-    let mut h = Keccak256::new();
-    h.update(body.as_bytes());
-    let mut d = [0u8; 32];
-    d.copy_from_slice(&h.finalize());
     Attestation {
         probe_json: body.to_string(),
-        signature: w.sign_digest_recoverable(&d).expect("sign").to_vec(),
+        signature: w
+            .sign_digest_recoverable(&attestation_digest(body))
+            .expect("sign")
+            .to_vec(),
     }
 }
 
