@@ -60,8 +60,9 @@ use nat_data::manifest::{CorpusManifest, Shard, ShardManifest};
 use nat_types::ZoneId;
 
 use crate::backend::{ModelBackend, StepResult, Tensor};
-use crate::job_artifacts::{Architecture, JobArtifacts};
+use crate::job_artifacts::{Architecture, CommitmentGrid, JobArtifacts};
 use crate::q16_commitment::{q16_step_commitment, to_q16};
+use crate::quantize::{quantize_tensor, tensor_commitment};
 use crate::types::{CommitmentHash, EpochIndex, PrevWeightsHash, StepIndex, WeightsHash};
 use crate::zone_delta::zone_deltas;
 
@@ -456,15 +457,26 @@ impl ModelBackend for NatBackend {
             })
             .collect();
 
-        // The post-state, hashed on the SAME Q16 grid as the commitment — so
-        // "what the weights became" and "what was committed" are one arithmetic.
-        let post_weights_hash = q16_step_commitment(
-            &post
-                .iter()
-                .enumerate()
-                .map(|(i, (_, v))| (i as u32, to_q16(v)))
-                .collect::<Vec<_>>(),
-        );
+        // The post-state rides the SAME grid as the commitment, so "what the
+        // weights became" and "what was committed" are one arithmetic. Splitting
+        // them across grids would make the two answers incomparable for a
+        // challenger replaying the step.
+        let post_weights_hash = match self.artifacts.commitment_grid {
+            CommitmentGrid::Q16 => q16_step_commitment(
+                &post
+                    .iter()
+                    .enumerate()
+                    .map(|(i, (_, v))| (i as u32, to_q16(v)))
+                    .collect::<Vec<_>>(),
+            ),
+            CommitmentGrid::LegacyF32Scale => {
+                let commits: Vec<_> = post
+                    .iter()
+                    .map(|(_, v)| tensor_commitment(&quantize_tensor(v)))
+                    .collect();
+                crate::quantize::step_commitment(&commits)
+            }
+        };
 
         Ok(StepResult {
             gradients,
@@ -472,17 +484,39 @@ impl ModelBackend for NatBackend {
         })
     }
 
-    /// Commit on the shared Q16 grid, overriding the crate default.
+    /// Commit on the grid the JOB declared — not a grid this worker prefers.
     ///
-    /// The default rides `quantize_tensor`'s data-dependent f32 scale, under
-    /// which two honest workers on different hardware can commit differently for
-    /// the same result and one gets slashed 10%. See `q16_commitment` for the two
-    /// demonstrated failure forms.
+    /// Reading it from the verified sidecar is the whole mechanism: the
+    /// challenger reads the same field, so the two cannot disagree. A worker that
+    /// hardcoded Q16 would be just as wrong as one that hardcoded the legacy
+    /// path, for a job that said otherwise.
+    ///
+    /// `Q16` is the safe grid and the default. `LegacyF32Scale` rides
+    /// `quantize_tensor`'s data-dependent f32 scale, under which two honest
+    /// workers on different hardware can commit differently for the same result
+    /// and one gets slashed 10% — see `q16_commitment` for both demonstrated
+    /// failure forms. It exists so a job pinned to it is still trainable, not
+    /// because it is a reasonable choice.
     fn compute_step_commitment(&self, gradients: &[Tensor]) -> CommitmentHash {
-        let q: Vec<(u32, _)> = gradients
-            .iter()
-            .map(|t| (t.layer_index as u32, to_q16(&t.data)))
-            .collect();
-        q16_step_commitment(&q)
+        match self.artifacts.commitment_grid {
+            CommitmentGrid::Q16 => {
+                let q: Vec<(u32, _)> = gradients
+                    .iter()
+                    .map(|t| (t.layer_index as u32, to_q16(&t.data)))
+                    .collect();
+                q16_step_commitment(&q)
+            }
+            CommitmentGrid::LegacyF32Scale => {
+                // Byte-for-byte the crate default, so a job pinned to the legacy
+                // grid commits exactly what a default-backend worker would.
+                let mut ordered: Vec<&Tensor> = gradients.iter().collect();
+                ordered.sort_by_key(|t| t.layer_index);
+                let commits: Vec<_> = ordered
+                    .iter()
+                    .map(|t| tensor_commitment(&quantize_tensor(&t.data)))
+                    .collect();
+                crate::quantize::step_commitment(&commits)
+            }
+        }
     }
 }

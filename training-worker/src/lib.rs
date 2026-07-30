@@ -89,7 +89,7 @@ pub use attestation::{
     ParsedJwt,
 };
 pub use events::{classify, EventKind, RawLog};
-pub use job_artifacts::{Architecture, ArtifactError, ArtifactStore, JobArtifacts};
+pub use job_artifacts::{Architecture, ArtifactError, ArtifactStore, CommitmentGrid, JobArtifacts};
 pub use q16_commitment::{q16_step_commitment, q16_tensor_commitment, to_q16, Q16Tensor, Q16_ONE};
 pub use zone_delta::{zone_deltas, zone_of, DeltaError, ZoneDelta, SHARED};
 pub use http_chain_pipeline::HttpPipelineChainClient;

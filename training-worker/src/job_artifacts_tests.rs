@@ -218,3 +218,76 @@ fn the_store_is_content_addressed() {
         "the path must contain the hash, so a wrong fetch cannot occupy a right address"
     );
 }
+
+// ── The commitment grid (declared per job, read by BOTH sides) ───────────
+
+/// The default is the SAFE grid. `ComputePoolTraining.nextJobId` is still 0, so
+/// there are no legacy jobs to preserve — defaulting to the broken grid would
+/// buy backwards compatibility with nothing, at the cost of every new job.
+#[test]
+fn the_default_commitment_grid_is_q16() {
+    let (store, m, d) = good_job("grid-default", None);
+    let a = store.resolve(&m, &d).expect("resolve");
+    assert_eq!(a.commitment_grid, CommitmentGrid::Q16);
+}
+
+/// A sidecar with other fields but no `commitment_grid` still defaults to Q16 —
+/// the default applies to the FIELD, not to the absence of a sidecar.
+#[test]
+fn a_sidecar_without_the_field_still_defaults_to_q16() {
+    let (store, m, d) = good_job("grid-absent-field", Some(r#"{"architecture":"dense"}"#));
+    let a = store.resolve(&m, &d).expect("resolve");
+    assert_eq!(a.commitment_grid, CommitmentGrid::Q16);
+}
+
+/// The legacy grid is reachable, but only by asking for itByName. Choosing the
+/// unsafe grid should be visible in the sidecar where a reviewer sees it, not a
+/// silent consequence of omitting a field.
+#[test]
+fn the_legacy_grid_must_be_asked_for_explicitly() {
+    let (store, m, d) = good_job(
+        "grid-legacy",
+        Some(r#"{"architecture":"dense","commitment_grid":"legacy-f32-scale"}"#),
+    );
+    let a = store.resolve(&m, &d).expect("resolve");
+    assert_eq!(a.commitment_grid, CommitmentGrid::LegacyF32Scale);
+    assert_eq!(a.commitment_grid.as_str(), "legacy-f32-scale");
+}
+
+/// THE POINT OF THE FIELD. An unrecognised grid is refused, never defaulted.
+///
+/// Falling back to Q16 for a job that asked for something else would put this
+/// worker on a different grid from the challenger — which is precisely the
+/// disagreement that gets an honest worker slashed 10%. Better to refuse the job.
+#[test]
+fn an_unrecognised_commitment_grid_is_refused_not_defaulted() {
+    let (store, m, d) = good_job(
+        "grid-unknown",
+        Some(r#"{"architecture":"dense","commitment_grid":"int8-per-channel"}"#),
+    );
+    let err = store
+        .resolve(&m, &d)
+        .expect_err("an unknown grid must not resolve");
+    match &err {
+        ArtifactError::UnknownCommitmentGrid(g) => assert_eq!(g, "int8-per-channel"),
+        other => panic!("expected UnknownCommitmentGrid, got {other:?}"),
+    }
+    assert!(
+        err.to_string().contains("indistinguishable from a dishonest one"),
+        "the refusal must explain the consequence of guessing: {err}"
+    );
+}
+
+/// Grid and architecture are independent axes. A zone job on the legacy grid is
+/// a coherent (if unwise) request, and reading one must not silently constrain
+/// the other.
+#[test]
+fn grid_and_architecture_are_independent() {
+    let (store, m, d) = good_job(
+        "grid-x-arch",
+        Some(r#"{"zones":[{"id":"HP"}],"commitment_grid":"legacy-f32-scale"}"#),
+    );
+    let a = store.resolve(&m, &d).expect("resolve");
+    assert_eq!(a.architecture, Architecture::ZonePartitioned);
+    assert_eq!(a.commitment_grid, CommitmentGrid::LegacyF32Scale);
+}

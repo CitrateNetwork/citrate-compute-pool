@@ -65,6 +65,45 @@ impl Architecture {
     }
 }
 
+/// Which quantization grid a job's step commitments ride.
+///
+/// ## Why this is declared per job rather than chosen per worker
+///
+/// `ComputePoolTraining` never recomputes a commitment. `challengeStep` checks
+/// Merkle INCLUSION only, and resolution is a committee vote — so the grid is
+/// off-chain policy, and no contract change is needed to move it.
+///
+/// What that leaves is the thing that actually matters: **the worker that commits
+/// and the committee that recomputes must use the same grid.** If they disagree,
+/// every honest worker looks dishonest and gets slashed 10%. So the grid is a
+/// property of the JOB, read from the same verified sidecar by both sides, not a
+/// local setting either one picks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommitmentGrid {
+    /// The fixed Q16.16 grid from `citrate_fed_types` — the same one NAT and the
+    /// chain's `0x0110` path use. Data-independent, so two workers on different
+    /// hardware commit identically. **The default.**
+    Q16,
+    /// The legacy per-tensor f32 scale (`max|x| / 127`, scale hashed into the
+    /// preimage).
+    ///
+    /// Retained only so a job can be pinned to it deliberately. It is not safe
+    /// for heterogeneous workers: a one-ULP difference in the maximum element
+    /// changes the commitment, and — worse — shifts OTHER coordinates' quantized
+    /// values, because they all share the derived scale. Both failures are
+    /// demonstrated in `q16_commitment`'s tests.
+    LegacyF32Scale,
+}
+
+impl CommitmentGrid {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CommitmentGrid::Q16 => "q16",
+            CommitmentGrid::LegacyF32Scale => "legacy-f32-scale",
+        }
+    }
+}
+
 /// Why a job could not be resolved to something this worker may honestly train.
 ///
 /// Every variant is a refusal. There is deliberately no "close enough" path.
@@ -95,6 +134,10 @@ pub enum ArtifactError {
     /// MoE job on the dense arm would produce a real-looking model that is not the
     /// requested architecture, so it is refused by name.
     UnsupportedArchitecture(String),
+    /// The sidecar named a commitment grid this worker does not implement.
+    /// Refused rather than defaulted: a worker silently on a different grid from
+    /// the challenger is how an honest worker gets slashed.
+    UnknownCommitmentGrid(String),
 }
 
 impl std::fmt::Display for ArtifactError {
@@ -116,6 +159,12 @@ impl std::fmt::Display for ArtifactError {
             ArtifactError::UnreadableSidecar(e) => {
                 write!(f, "cannot determine the job's architecture from its sidecar: {e}")
             }
+            ArtifactError::UnknownCommitmentGrid(g) => write!(
+                f,
+                "commitment grid '{g}' is not implemented by this worker. Refusing \
+                 rather than defaulting — a worker committing on a different grid \
+                 from the challenger is indistinguishable from a dishonest one."
+            ),
             ArtifactError::UnsupportedArchitecture(a) => write!(
                 f,
                 "architecture '{a}' is not trainable by this worker. Refusing rather \
@@ -140,6 +189,9 @@ pub struct JobArtifacts {
     /// The `nat-data` shard manifest describing the corpus.
     pub manifest_path: PathBuf,
     pub architecture: Architecture,
+    /// The grid this job's commitments ride. Both the worker and the challenger
+    /// read it from here, so they cannot disagree.
+    pub commitment_grid: CommitmentGrid,
     /// The verified hashes, retained so the provenance record can state exactly
     /// what was trained rather than restating what was requested.
     pub model_start_hash: B256,
@@ -194,12 +246,15 @@ impl ArtifactStore {
         let manifest_path = self.manifest_path(dataset_hash);
         verify_file("dataset manifest", &manifest_path, dataset_hash)?;
 
-        let architecture = read_architecture(&self.sidecar_path(model_start_hash))?;
+        let sidecar = self.sidecar_path(model_start_hash);
+        let architecture = read_architecture(&sidecar)?;
+        let commitment_grid = read_commitment_grid(&sidecar)?;
 
         Ok(JobArtifacts {
             checkpoint_dir,
             manifest_path,
             architecture,
+            commitment_grid,
             model_start_hash: *model_start_hash,
             dataset_hash: *dataset_hash,
         })
@@ -257,6 +312,35 @@ fn read_architecture(sidecar: &Path) -> Result<Architecture, ArtifactError> {
     match doc.get("zones").and_then(|z| z.as_array()) {
         Some(zones) if !zones.is_empty() => Ok(Architecture::ZonePartitioned),
         _ => Ok(Architecture::Dense),
+    }
+}
+
+/// Read the job's commitment grid from its sidecar.
+///
+/// Absent means [`CommitmentGrid::Q16`]. That default is deliberate in both
+/// directions: it is the correct grid, and choosing the unsafe one has to be an
+/// explicit act that shows up in the sidecar where a reviewer can see it. There
+/// are no legacy jobs on 40204 to preserve — `ComputePoolTraining.nextJobId` is
+/// still 0 — so nothing is broken by defaulting to the right answer.
+///
+/// An UNRECOGNISED grid is refused rather than defaulted. Silently falling back
+/// to Q16 for a job that asked for something else would put the worker and the
+/// challenger on different grids, which is the exact failure this field exists
+/// to prevent.
+fn read_commitment_grid(sidecar: &Path) -> Result<CommitmentGrid, ArtifactError> {
+    let raw = match std::fs::read_to_string(sidecar) {
+        Ok(r) => r,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(CommitmentGrid::Q16),
+        Err(e) => return Err(ArtifactError::UnreadableSidecar(e.to_string())),
+    };
+    let doc: serde_json::Value =
+        serde_json::from_str(&raw).map_err(|e| ArtifactError::UnreadableSidecar(e.to_string()))?;
+
+    match doc.get("commitment_grid").and_then(|v| v.as_str()) {
+        None => Ok(CommitmentGrid::Q16),
+        Some("q16") => Ok(CommitmentGrid::Q16),
+        Some("legacy-f32-scale") => Ok(CommitmentGrid::LegacyF32Scale),
+        Some(other) => Err(ArtifactError::UnknownCommitmentGrid(other.to_string())),
     }
 }
 
