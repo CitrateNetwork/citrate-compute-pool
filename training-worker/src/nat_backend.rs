@@ -210,6 +210,34 @@ pub struct NatBackend {
     model: Mutex<Model>,
 }
 
+/// Which manifest positions a given (step, worker_shard) reads.
+///
+/// **The single definition of the corpus stride.** `read_and_verify_shards` uses
+/// it to decide what to open, and the artifact prefetcher uses it to decide what
+/// to download — so a worker cannot fetch one set of shards and then train on
+/// another. It is also what a challenger replays: same (step, shard) always picks
+/// the same slice, deterministically and worker-disjointly, which is what makes a
+/// step reproducible by someone who was not there.
+///
+/// Returns positions into `manifest.shards`, not shard file numbers; the file
+/// name comes from each entry's `shard_index`.
+pub fn shard_slice_for(
+    total: usize,
+    shards_per_step: usize,
+    step: StepIndex,
+    worker_shard: u32,
+) -> Vec<usize> {
+    if total == 0 {
+        return Vec::new();
+    }
+    let want = shards_per_step.min(total);
+    let offset = ((worker_shard as usize)
+        .wrapping_mul(0x9E37_79B9)
+        .wrapping_add((step as usize).wrapping_mul(total / want.max(1) + 1)))
+        % total;
+    (0..want).map(|i| (offset + i) % total).collect()
+}
+
 impl NatBackend {
     /// Build a backend for artifacts that are ALREADY verified.
     ///
@@ -272,17 +300,9 @@ impl NatBackend {
         let total = manifest.shards.len();
         anyhow::ensure!(total > 0, "corpus manifest declares no shards");
 
-        let want = self.params.shards_per_step.min(total);
-        // Deterministic, worker-disjoint stride. Same (step, shard) always picks
-        // the same slice, so a challenger replaying the step reads what we read.
-        let offset = ((worker_shard as usize)
-            .wrapping_mul(0x9E37_79B9)
-            .wrapping_add((step as usize).wrapping_mul(total / want.max(1) + 1)))
-            % total;
-
-        let mut out = Vec::with_capacity(want);
-        for i in 0..want {
-            let idx = (offset + i) % total;
+        let picks = shard_slice_for(total, self.params.shards_per_step, step, worker_shard);
+        let mut out = Vec::with_capacity(picks.len());
+        for idx in picks {
             let meta = &manifest.shards[idx];
             let path = self
                 .artifacts

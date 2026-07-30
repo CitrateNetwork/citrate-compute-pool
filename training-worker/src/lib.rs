@@ -46,6 +46,7 @@
 //! | `Transport` | `InProcessTransport` | `LibP2pTransport` (S1) |
 //! | `ChainClient` | `MockChainClient` | `HttpChainClient` (S1) |
 
+pub mod artifact_fetch;
 pub mod attestation;
 pub mod backend;
 #[cfg(feature = "candle-gpu")]

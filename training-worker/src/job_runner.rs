@@ -26,22 +26,34 @@
 //!    is `false` by default precisely so a placeholder cannot collect for work it
 //!    did not do.
 //!
-//! ## What it will not do
+//! ## Staging, and why it changes nothing about the checks above
 //!
-//! It does not fetch artifacts. If the corpus and checkpoint are not already in
-//! the local store, the job is declined with the hashes that were wanted. Moving
-//! 2.4 GB to volunteer machines is a distribution problem — IPFS, torrent, a
-//! signed mirror — and solving it badly inside a training runner would mean a
-//! half-built fetcher on the path that settles money.
+//! With a mirror configured ([`NatJobRunner::with_mirror`]) the runner stages
+//! missing artifacts before training. Without one it declines jobs whose
+//! artifacts are absent, which is still right for a member who stages by hand.
+//!
+//! Staging happens **before** `resolve`, never instead of it. It makes files
+//! present; it does not decide whether they are acceptable. So the mirror is
+//! untrusted in the strong sense — see [`crate::artifact_fetch`] — and a mirror
+//! serving the wrong checkpoint produces a declined job, not a poisoned run.
+//!
+//! What it fetches is only what the job reads. corpus-v6 is 2.4 GB; a job reads a
+//! few ~7.4 KB shards per step, so staging the whole corpus would move roughly
+//! twelve times more data than the work requires, per member, per job. Shard
+//! selection uses [`shard_slice_for`] — the same function the reader uses, so a
+//! worker cannot stage one set and train on another.
 
 use std::path::PathBuf;
 
+use crate::artifact_fetch::{
+    dataset_path, fetch_verified, local_dest, model_path, ArtifactSource, FetchError, HttpMirror,
+};
 use crate::backend::ModelBackend;
 use crate::coordinator_protocol::JobSpec;
 use crate::job_artifacts::{ArtifactStore, CommitmentGrid};
 use crate::merkle::compute_epoch_root;
-use crate::nat_backend::{NatBackend, TrainingParams};
-use crate::types::{B256, StepCommit, WorkerAddress};
+use crate::nat_backend::{shard_slice_for, NatBackend, TrainingParams};
+use crate::types::{StepCommit, WorkerAddress, B256};
 use crate::zone_delta::SHARED;
 use serde::{Deserialize, Serialize};
 
@@ -131,8 +143,9 @@ pub enum RunError {
     #[error("this runner handles {TASK_TRAIN:?} jobs, not {0:?}")]
     WrongTask(String),
     #[error(
-        "artifacts are not staged locally: {0}. This worker does not fetch them; \
-         stage the checkpoint and corpus into the artifact store first."
+        "artifacts are not available: {0}. Set CITRATE_ARTIFACT_MIRROR to stage \
+         them on demand, or stage the checkpoint and corpus into the artifact \
+         store by hand."
     )]
     ArtifactsMissing(String),
     #[error(
@@ -151,22 +164,172 @@ pub enum RunError {
     BackendDoesNotHonorSpec,
     #[error("training failed: {0}")]
     Training(String),
+    #[error("could not stage artifacts: {0}")]
+    Fetch(String),
+}
+
+impl From<FetchError> for RunError {
+    fn from(e: FetchError) -> Self {
+        RunError::Fetch(e.to_string())
+    }
+}
+
+/// The sidecar is metadata ABOUT the checkpoint, not part of it, so it has no
+/// content hash of its own. Placed atomically all the same: a half-written
+/// sidecar would be read as a declared shape.
+fn place_unverified_sidecar(dest: &std::path::Path, bytes: &[u8]) -> Result<(), RunError> {
+    write_atomic(dest, bytes)
+}
+
+/// A shard carries no standalone hash either — the verified manifest commits to
+/// its `provenance_root`, and `read_and_verify_shards` checks that at the point
+/// of use. Placement is still atomic so a torn file is never half-read.
+fn place_shard(dest: &std::path::Path, bytes: &[u8]) -> Result<(), RunError> {
+    write_atomic(dest, bytes)
+}
+
+fn write_atomic(dest: &std::path::Path, bytes: &[u8]) -> Result<(), RunError> {
+    let dir = dest
+        .parent()
+        .ok_or_else(|| RunError::Fetch("destination has no parent".into()))?;
+    std::fs::create_dir_all(dir).map_err(|e| RunError::Fetch(e.to_string()))?;
+    let tmp = dest.with_extension("partial");
+    std::fs::write(&tmp, bytes).map_err(|e| RunError::Fetch(e.to_string()))?;
+    std::fs::rename(&tmp, dest).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        RunError::Fetch(e.to_string())
+    })
 }
 
 /// Runs `train` jobs against the real NAT backend.
 pub struct NatJobRunner {
     store: ArtifactStore,
+    store_root: PathBuf,
     scratch: PathBuf,
     worker: WorkerAddress,
+    /// Optional mirror to stage missing artifacts from. Without one the runner
+    /// declines jobs whose artifacts are absent, which is the previous behaviour
+    /// and still the right one for a member who stages by hand.
+    mirror: Option<HttpMirror>,
 }
 
 impl NatJobRunner {
-    pub fn new(store_root: impl Into<PathBuf>, scratch: impl Into<PathBuf>, worker: WorkerAddress) -> Self {
+    pub fn new(
+        store_root: impl Into<PathBuf>,
+        scratch: impl Into<PathBuf>,
+        worker: WorkerAddress,
+    ) -> Self {
+        let store_root = store_root.into();
         Self {
-            store: ArtifactStore::new(store_root),
+            store: ArtifactStore::new(store_root.clone()),
+            store_root,
             scratch: scratch.into(),
             worker,
+            mirror: None,
         }
+    }
+
+    /// Stage missing artifacts from `base_url` before training.
+    ///
+    /// The mirror is **not trusted** — see [`crate::artifact_fetch`]. Everything
+    /// it serves is verified against a hash the job named or the verified
+    /// manifest committed to, so pointing this at a stranger's server is a
+    /// bandwidth decision, not a security one.
+    pub fn with_mirror(mut self, base_url: impl Into<String>) -> Self {
+        self.mirror = Some(HttpMirror::new(base_url));
+        self
+    }
+
+    /// Fetch exactly what this job will read, and nothing else.
+    ///
+    /// The naive implementation downloads the corpus. corpus-v6 is 2.4 GB, and a
+    /// job reads a few ~7.4 KB shards per step — so the naive implementation
+    /// moves roughly twelve times more data than the work requires, per member,
+    /// per job.
+    ///
+    /// Shard selection comes from [`shard_slice_for`], the same function
+    /// `read_and_verify_shards` uses. That shared definition is load-bearing: a
+    /// worker that fetched one set of shards and trained on another would fail
+    /// mid-run on a file that was never staged.
+    async fn stage(&self, p: &TrainingJobPayload) -> Result<(), RunError> {
+        let Some(mirror) = &self.mirror else {
+            return Ok(()); // no mirror configured: resolve() will decline if absent
+        };
+        let fetch = |rel: String, want| async move {
+            let dest = local_dest(&self.store_root, &rel).map_err(RunError::from)?;
+            fetch_verified(mirror, &rel, &dest, want)
+                .await
+                .map_err(RunError::from)
+        };
+
+        // The two big ones, verified against the hashes the JOB named.
+        for (rel, want) in [
+            (
+                model_path(&p.model_start_hash, "model.safetensors"),
+                p.model_start_hash,
+            ),
+            (
+                dataset_path(&p.dataset_hash, "manifest.json"),
+                p.dataset_hash,
+            ),
+        ] {
+            if fetch(rel.clone(), want).await? {
+                tracing::info!(artifact = %rel, "staged");
+            }
+        }
+
+        // The sidecar carries the declared shape and grid. It is NOT
+        // content-addressed (it describes the checkpoint rather than being part
+        // of it), so a mirror could serve a wrong one — which is exactly why
+        // `run` re-checks the grid against the payload after resolving, and why
+        // a wrong shape fails loudly on load rather than training quietly.
+        let side = model_path(&p.model_start_hash, "sidecar.nat.json");
+        if let Ok(dest) = local_dest(&self.store_root, &side) {
+            if !dest.exists() {
+                if let Ok(bytes) = mirror.get(&side).await {
+                    let _ = place_unverified_sidecar(&dest, &bytes);
+                }
+            }
+        }
+
+        // Now the shards — only the ones this job's steps will actually open.
+        let manifest_path = self.store.manifest_path(&p.dataset_hash);
+        let raw = std::fs::read_to_string(&manifest_path)
+            .map_err(|e| RunError::ArtifactsMissing(format!("manifest unreadable: {e}")))?;
+        let manifest: nat_data::manifest::CorpusManifest = serde_json::from_str(&raw)
+            .map_err(|e| RunError::ArtifactsMissing(format!("manifest unparseable: {e}")))?;
+        let total = manifest.shards.len();
+
+        let mut wanted: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
+        for step in 0..p.steps {
+            for idx in shard_slice_for(total, p.shards_per_step, step, p.worker_shard) {
+                wanted.insert(manifest.shards[idx].shard_index);
+            }
+        }
+
+        let mut staged = 0usize;
+        for shard_index in &wanted {
+            let rel = dataset_path(&p.dataset_hash, &format!("shard_{shard_index:04}.json"));
+            let dest = local_dest(&self.store_root, &rel)?;
+            if dest.exists() {
+                continue;
+            }
+            // A shard is verified by `read_and_verify_shards` against the
+            // provenance_root the VERIFIED manifest commits to, so it does not
+            // need a content hash of its own here — the commitment already
+            // exists and is checked at the point of use.
+            let bytes = mirror.get(&rel).await?;
+            place_shard(&dest, &bytes)?;
+            staged += 1;
+        }
+        if staged > 0 {
+            tracing::info!(
+                shards = staged,
+                of_total = total,
+                "staged only the shards this job reads"
+            );
+        }
+        Ok(())
     }
 
     /// Execute a job, or refuse it with a reason.
@@ -180,6 +343,11 @@ impl NatJobRunner {
         if payload.task != TASK_TRAIN {
             return Err(RunError::WrongTask(payload.task));
         }
+
+        // Stage anything missing FIRST, so `resolve` below is the single place
+        // that decides whether the artifacts are acceptable — staging never
+        // relaxes that check, it only makes the files present.
+        self.stage(&payload).await?;
 
         // Verification happens here, not as a courtesy: `JobArtifacts` cannot be
         // constructed without both content hashes matching.
@@ -268,7 +436,12 @@ impl NatJobRunner {
 /// names, which would silently mislabel a model with a different zone set.
 fn accumulate_zone_l2(acc: &mut Vec<(String, f64)>, gradients: &[crate::backend::Tensor]) {
     for t in gradients {
-        let l2 = t.data.iter().map(|v| (*v as f64) * (*v as f64)).sum::<f64>().sqrt();
+        let l2 = t
+            .data
+            .iter()
+            .map(|v| (*v as f64) * (*v as f64))
+            .sum::<f64>()
+            .sqrt();
         let label = if t.layer_index == usize::MAX {
             SHARED.to_string()
         } else {
