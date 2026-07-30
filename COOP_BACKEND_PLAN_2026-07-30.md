@@ -73,7 +73,63 @@ natural home is the sidecar, which already declares the architecture and which
 
 ---
 
-## 2. Gap: `ToyKeyedSigner` — a PORT, not a build
+## 2. Gap: `ToyKeyedSigner` — BLOCKED UPSTREAM, and the reason matters
+
+**Revised after attempting it.** I said this was a port of the existing operator
+signer. The signer does exist and is the right one — but the two interfaces
+cannot be joined faithfully as they stand, and forcing them would build a
+mechanism that turns an AWS outage into a fraud verdict.
+
+### The mismatch
+
+| | NAT | gateway operator signer |
+|---|---|---|
+| shape | `fn sign(&self, msg: &[u8]) -> Vec<u8>` | `async fn sign_hash(&self, &[u8;32]) -> Result<RecoverableSignature, X402Error>` |
+| sync/async | sync | **async** |
+| fallible | **no** | yes |
+
+`SignedContribution::create(...) -> Self` is infallible too, so there is nowhere
+for a signing error to go. An adapter has exactly two options when KMS is
+unreachable: **panic** (kills the training loop) or **return garbage bytes**.
+
+### Why garbage bytes is the worse one
+
+`gather_and_aggregate` rejects an unverifiable contribution as
+`RejectReason::BadSignature`, whose own doc reads *"forged, tampered, or unknown
+node"*, and the contribution "contributes nothing to `total_reward_weight`".
+There is **no transient-failure variant in the enum**. So a network blip at the
+KMS endpoint would be recorded as the node forging signatures, and it would lose
+that round's pay.
+
+That is not a thing to ship and document. It is a thing to fix upstream.
+
+### The ask (small, and it is NAT's to make)
+
+```rust
+pub trait Signer {
+    fn node_id(&self) -> &str;
+    fn sign(&self, msg: &[u8]) -> Result<Vec<u8>, SignError>;   // was -> Vec<u8>
+}
+```
+and `SignedContribution::create(...) -> Result<Self, SignError>`. Optionally an
+async variant; a blocking bridge is acceptable for a LOCAL signer
+(`EncryptedFileSigner` is local crypto — no network, so the only realistic
+failure is a locked vault), but not for KMS.
+
+Once fallible, the adapter is genuinely small, and the identity story is neat:
+the gateway signer is **recoverable secp256k1**, so `node_id` can be the operator
+address and the verifier recovers it from the signature — no roster to
+distribute, which is strictly better than the keyed-hash stand-in.
+
+### What I did NOT do
+
+I did not write the adapter. It would have compiled, passed a happy-path test,
+and converted an AWS outage into a slashing-adjacent fraud record the first time
+KMS hiccupped.
+
+---
+
+## 2b. (superseded) The original framing
 
 `nat-federated` ships `ToyKeyedSigner` (`sig = H(key || msg || key)`),
 self-labelled *"TEST STAND-IN — not for production"*, with no public-key
