@@ -68,14 +68,14 @@ use crate::zone_delta::zone_deltas;
 pub struct TrainingParams {
     pub batch_size: usize,
     pub learning_rate: f64,
-    /// Windows drawn from the corpus. Bounds memory on a large corpus.
+    /// Windows drawn from the corpus. Bounds memory on a large corpus —
+    /// corpus-v6 is 306.5M tokens across 185,475 shards, so this is what keeps a
+    /// step from trying to materialise the whole thing.
     pub max_windows: usize,
-    pub seq_len: usize,
-    /// Model width. With `seq_len` and the zone list this fixes the parameter
-    /// count, so it must match the checkpoint being resumed or `load` fails.
-    pub d: usize,
-    /// Dense-arm FFN width. Ignored by the zone arm.
-    pub d_ff: usize,
+    /// Shards to read per step. Only enough to fill `max_windows` is read; the
+    /// corpus has 185,475 shard FILES and an 80 MB manifest, so slurping it is
+    /// not an option.
+    pub shards_per_step: usize,
     pub seed: u64,
 }
 
@@ -85,19 +85,10 @@ impl Default for TrainingParams {
             batch_size: 16,
             learning_rate: 1e-3,
             max_windows: 4096,
-            seq_len: 64,
-            d: 48,
-            d_ff: 192,
+            shards_per_step: 64,
             seed: 2026,
         }
     }
-}
-
-/// Where the shard documents sit relative to their manifest.
-fn shards_path(manifest: &Path) -> PathBuf {
-    let mut p = manifest.to_path_buf();
-    p.set_extension("shards.json");
-    p
 }
 
 /// The model, in whichever arm the job asked for.
@@ -161,7 +152,24 @@ impl Model {
     }
 }
 
-fn build_model(arch: Architecture, p: &TrainingParams) -> anyhow::Result<Model> {
+fn dtype_of(shape: &crate::job_artifacts::ModelShape) -> anyhow::Result<candle_core::DType> {
+    match shape.dtype.as_str() {
+        "f32" => Ok(candle_core::DType::F32),
+        "bf16" => Ok(candle_core::DType::BF16),
+        other => anyhow::bail!(
+            "unsupported checkpoint dtype '{other}'. Refusing rather than widening \
+             to f32 — the weights would load with different numerics than they \
+             were trained with."
+        ),
+    }
+}
+
+fn build_model(
+    arch: Architecture,
+    shape: &crate::job_artifacts::ModelShape,
+    p: &TrainingParams,
+) -> anyhow::Result<Model> {
+    let dtype = dtype_of(shape)?;
     Ok(match arch {
         Architecture::ZonePartitioned => {
             let cfg = AutoregConfig {
@@ -170,20 +178,21 @@ fn build_model(arch: Architecture, p: &TrainingParams) -> anyhow::Result<Model> 
                 // federated seam rejects an MX delta — so it is excluded here
                 // rather than filtered downstream.
                 zones: vec![ZoneId::SM, ZoneId::CB, ZoneId::HP, ZoneId::PF, ZoneId::CX],
-                vocab: nat_data::tokenizer::BYTE_VOCAB,
-                seq_len: p.seq_len,
-                d: p.d,
+                vocab: shape.vocab,
+                seq_len: shape.seq_len,
+                d: shape.d,
                 tau: 1.0,
                 seed: p.seed,
             };
-            Model::Zone(Box::new(AutoregLm::new(&cfg)?))
+            Model::Zone(Box::new(AutoregLm::new_with_dtype(&cfg, dtype)?))
         }
-        Architecture::Dense => Model::Dense(Box::new(AutoregDenseLm::new(
-            nat_data::tokenizer::BYTE_VOCAB,
-            p.seq_len,
-            p.d,
-            p.d_ff,
+        Architecture::Dense => Model::Dense(Box::new(AutoregDenseLm::new_with_dtype(
+            shape.vocab,
+            shape.seq_len,
+            shape.d,
+            shape.d_ff,
             p.seed,
+            dtype,
         )?)),
     })
 }
@@ -193,8 +202,6 @@ pub struct NatBackend {
     artifacts: JobArtifacts,
     params: TrainingParams,
     model: Mutex<Model>,
-    /// Corpus windows, built once — identical every step.
-    windows: Mutex<Option<candle_core::Tensor>>,
 }
 
 impl NatBackend {
@@ -208,12 +215,11 @@ impl NatBackend {
         params: TrainingParams,
         _scratch: impl Into<PathBuf>,
     ) -> anyhow::Result<Self> {
-        let model = build_model(artifacts.architecture, &params)?;
+        let model = build_model(artifacts.architecture, &artifacts.shape, &params)?;
         Ok(Self {
             artifacts,
             params,
             model: Mutex::new(model),
-            windows: Mutex::new(None),
         })
     }
 
@@ -237,30 +243,53 @@ impl NatBackend {
         Ok(self.load_manifest()?.aggregate_quality)
     }
 
-    /// Load the shard documents and check each against the manifest's committed
-    /// `provenance_root`.
+    /// Read a BOUNDED set of shards and verify each against the manifest's
+    /// committed `provenance_root`.
     ///
     /// `CorpusManifest` is METADATA: its `shards` are per-shard counts, quality
     /// and a provenance root — not the documents. So `dataset_hash` verifying the
-    /// manifest is necessary and NOT sufficient. This is the step that binds the
-    /// bytes actually trained on to the on-chain hash.
-    fn load_and_verify_shards(&self) -> anyhow::Result<Vec<Shard>> {
-        let manifest = self.load_manifest()?;
-        let path = shards_path(&self.artifacts.manifest_path);
-        let raw = std::fs::read_to_string(&path).map_err(|e| {
-            anyhow::anyhow!("shard documents not present at {}: {e}", path.display())
-        })?;
-        let shards: Vec<Shard> = serde_json::from_str(&raw)?;
+    /// manifest is necessary and NOT sufficient. Recomputing each shard's root is
+    /// what actually binds the bytes trained on to the on-chain hash.
+    ///
+    /// Bounded because the real corpus is not small: corpus-v6 is **185,475
+    /// shard files** against an **80 MB manifest**, 306.5M tokens. Reading all of
+    /// it per step is not a performance nit, it is impossible. Only
+    /// `shards_per_step` are read, chosen deterministically from `worker_shard`
+    /// and `step` so two workers draw DIFFERENT shards — that is the
+    /// data-parallel split, and without it every worker trains the same slice.
+    fn read_and_verify_shards(
+        &self,
+        manifest: &CorpusManifest,
+        step: StepIndex,
+        worker_shard: u32,
+    ) -> anyhow::Result<Vec<Shard>> {
+        let total = manifest.shards.len();
+        anyhow::ensure!(total > 0, "corpus manifest declares no shards");
 
-        if shards.len() != manifest.shards.len() {
-            anyhow::bail!(
-                "corpus has {} shards but the verified manifest commits to {}",
-                shards.len(),
-                manifest.shards.len()
-            );
-        }
-        for (shard, meta) in shards.iter().zip(manifest.shards.iter()) {
-            if ShardManifest::of(shard).provenance_root != meta.provenance_root {
+        let want = self.params.shards_per_step.min(total);
+        // Deterministic, worker-disjoint stride. Same (step, shard) always picks
+        // the same slice, so a challenger replaying the step reads what we read.
+        let offset = ((worker_shard as usize)
+            .wrapping_mul(0x9E37_79B9)
+            .wrapping_add((step as usize).wrapping_mul(total / want.max(1) + 1)))
+            % total;
+
+        let mut out = Vec::with_capacity(want);
+        for i in 0..want {
+            let idx = (offset + i) % total;
+            let meta = &manifest.shards[idx];
+            let path = self
+                .artifacts
+                .manifest_path
+                .parent()
+                .ok_or_else(|| anyhow::anyhow!("manifest has no parent directory"))?
+                .join(format!("shard_{:04}.json", meta.shard_index));
+
+            let raw = std::fs::read_to_string(&path)
+                .map_err(|e| anyhow::anyhow!("shard {} unreadable at {}: {e}", meta.shard_index, path.display()))?;
+            let shard: Shard = serde_json::from_str(&raw)?;
+
+            if ShardManifest::of(&shard).provenance_root != meta.provenance_root {
                 anyhow::bail!(
                     "shard {} does not reproduce the provenance_root the verified \
                      manifest commits to. Refusing: these are not the documents \
@@ -268,10 +297,10 @@ impl NatBackend {
                     meta.shard_index
                 );
             }
+            out.push(shard);
         }
-        Ok(shards)
+        Ok(out)
     }
-
 }
 
 #[async_trait]
@@ -320,7 +349,8 @@ impl ModelBackend for NatBackend {
         step: StepIndex,
         worker_shard: u32,
     ) -> anyhow::Result<StepResult> {
-        let shards = self.load_and_verify_shards()?;
+        let manifest = self.load_manifest()?;
+        let shards = self.read_and_verify_shards(&manifest, step, worker_shard)?;
         let shuffle_seed =
             ((epoch as u64) << 40) | ((step as u64) << 16) | worker_shard as u64;
 
@@ -330,18 +360,15 @@ impl ModelBackend for NatBackend {
         let (pre, post) = {
             let mut model = self.model.lock();
 
-            let mut windows = self.windows.lock();
-            if windows.is_none() {
-                let (ids, _t) = nat_candle::corpus::next_byte_windows(
-                    &shards,
-                    self.params.seq_len,
-                    self.params.max_windows,
-                    model.device(),
-                )?;
-                *windows = Some(ids);
-            }
-            let ids = windows.as_ref().expect("just set").clone();
-            drop(windows);
+            // Rebuilt every step, deliberately. The shards differ per step and
+            // per worker (that is the data-parallel split), so caching windows
+            // would train every step on the same slice while looking busy.
+            let (ids, _targets) = nat_candle::corpus::next_byte_windows(
+                &shards,
+                self.artifacts.shape.seq_len,
+                self.params.max_windows,
+                model.device(),
+            )?;
 
             let pre = model.named_parameters()?;
             model.train_one_pass(&ids, &self.params, shuffle_seed)?;
