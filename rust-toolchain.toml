@@ -1,3 +1,11 @@
+# Pinned to match the rest of the federation. `citrate-chain`, `nat` and the
+# `citrate-fed-types` Q16 kernel all pin 1.96.0; this repo floated on "stable",
+# which is how it ended up unable to depend on the shared Q16 grid at all (the
+# kernel's MSRV is 1.96.0 and local stable resolved to 1.93.0).
+#
+# A floating compiler is the wrong default here for two reasons: this repo
+# settles money, and its commitment path has to be bit-reproducible against a
+# chain built with a pinned toolchain. Bump deliberately, with a full re-test.
 [toolchain]
-channel = "stable"
+channel = "1.96.0"
 components = ["rustfmt", "clippy"]

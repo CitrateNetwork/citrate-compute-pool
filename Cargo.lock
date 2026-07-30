@@ -525,6 +525,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "citrate-fed-types"
+version = "0.1.0"
+source = "git+https://github.com/CitrateNetwork/citrate-fed-types.git?rev=dbbfbff29a5053aa8324a866d52215c2f2281c31#dbbfbff29a5053aa8324a866d52215c2f2281c31"
+dependencies = [
+ "serde",
+ "sha2",
+]
+
+[[package]]
 name = "citrate-pool-coordinator"
 version = "0.4.0"
 dependencies = [
@@ -565,6 +574,7 @@ dependencies = [
  "bincode",
  "candle-core",
  "candle-nn",
+ "citrate-fed-types",
  "ctr",
  "ethereum-types",
  "futures",

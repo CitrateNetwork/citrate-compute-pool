@@ -10,9 +10,13 @@
 //! compute mathematically identical gradients but accumulate them in a different
 //! order — CPU vs GPU, a different batch split, a different reduction tree —
 //! can land on `max|x|` values that differ in the last bit, and produce
-//! **different commitments for the same result**. `tests` below demonstrates it:
-//! a one-ULP change in the maximum element leaves every quantized value
-//! bit-identical and still moves the commitment.
+//! **different commitments for the same result**. The tests demonstrate two
+//! distinct forms of it, both found by probing the real functions:
+//!   1. a one-ULP change in the maximum moves the commitment even when the
+//!      quantized payload is byte-identical (the scale is in the preimage);
+//!   2. worse, the shared scale couples coordinates — that same one-ULP change
+//!      flips a DIFFERENT element's quantized value, so the payload itself is
+//!      unstable and no amount of care about hashing would fix it.
 //!
 //! That is not a theoretical nuisance on this chain. `ComputePoolTraining` has a
 //! challenge path with a `CHALLENGE_BOND`, a committee vote, and `SLASH_BPS`
@@ -33,6 +37,11 @@
 //! nodes that agree on the value agree on the bits, on any hardware, with no
 //! shared scale to negotiate.
 //!
+//! The encoding here does not reimplement that grid — it calls
+//! `citrate_fed_types::Q16`, the same kernel `nat-types` re-exports. Pulling it
+//! in is why this repo now pins the federation's 1.96.0 toolchain (the kernel's
+//! MSRV) instead of floating on "stable".
+//!
 //! ## Scope
 //!
 //! This module is the encoding + commitment only. It does not change the default
@@ -41,12 +50,13 @@
 //! that method — which is what the NAT backend does, since its contribution unit
 //! is a per-zone Q16 weight delta already.
 
+use citrate_fed_types::Q16;
 use sha3::{Digest, Keccak256};
 
 use crate::types::B256;
 
-/// One unit of the Q16.16 grid, matching `citrate_fed_types::Q16`
-/// (`FRAC_BITS = 16`, so `ONE_RAW = 65536`).
+/// One unit of the Q16.16 grid. Asserted against the real kernel in tests rather
+/// than defined independently — see [`to_q16`].
 pub const Q16_ONE: i64 = 1 << 16;
 
 /// A tensor encoded on the fixed Q16 grid.
@@ -60,37 +70,21 @@ pub struct Q16Tensor {
 
 /// Encode f32s onto the fixed Q16 grid.
 ///
-/// Rounds half-away-from-zero, which is symmetric about zero — so negating a
-/// gradient negates its encoding exactly, and a sign convention cannot introduce
-/// a one-unit asymmetry between two workers.
+/// Delegates to [`citrate_fed_types::Q16::from_f32`] — the SAME function
+/// `nat-types` re-exports and the chain's Q16 precompile path uses. This is
+/// deliberate: three matching reimplementations of a consensus-critical grid is
+/// three chances to drift, and the drift would only surface as honest workers
+/// being challenged. Depending on the kernel makes "same grid" structural.
 ///
-/// Saturates rather than wrapping: a gradient beyond the Q16 range is clamped to
-/// the representable extreme, never wrapped into a value of the opposite sign.
-/// Non-finite inputs encode as 0 — a NaN gradient is a bug upstream, and it must
-/// not become an unpredictable commitment.
+/// The properties the federated path relies on are the kernel's, and are pinned
+/// by tests here so a kernel bump that changed them fails loudly:
+///   - rounds half away from zero, so negation is exact;
+///   - non-finite inputs map to ZERO rather than a poison raw;
+///   - huge finite inputs saturate rather than wrapping the sign.
 pub fn to_q16(values: &[f32]) -> Q16Tensor {
-    let out = values
-        .iter()
-        .map(|&v| {
-            if !v.is_finite() {
-                return 0i64;
-            }
-            let scaled = (v as f64) * (Q16_ONE as f64);
-            let rounded = if scaled >= 0.0 {
-                (scaled + 0.5).floor()
-            } else {
-                (scaled - 0.5).ceil()
-            };
-            if rounded >= i64::MAX as f64 {
-                i64::MAX
-            } else if rounded <= i64::MIN as f64 {
-                i64::MIN
-            } else {
-                rounded as i64
-            }
-        })
-        .collect();
-    Q16Tensor { values: out }
+    Q16Tensor {
+        values: values.iter().map(|&v| Q16::from_f32(v).raw()).collect(),
+    }
 }
 
 /// Per-tensor commitment on the Q16 grid: `keccak256(be_bytes(v) for v in values)`.
