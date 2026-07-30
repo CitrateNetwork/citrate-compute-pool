@@ -54,6 +54,11 @@ pub mod chain;
 pub mod events;
 pub mod http_chain_pipeline;
 pub mod job_artifacts;
+/// The real NAT-backed training backend. Feature-gated because it pulls Candle;
+/// the artifact-verification and commitment layers it depends on are NOT gated,
+/// so the honesty checks compile and test everywhere.
+#[cfg(feature = "nat")]
+pub mod nat_backend;
 pub mod q16_commitment;
 pub mod zone_delta;
 pub mod http_chain_training;
