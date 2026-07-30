@@ -111,6 +111,22 @@ pub enum JobChainState {
 
 #[async_trait]
 pub trait ChainClient: Send + Sync {
+    /// Do commits made through this client SETTLE IN REAL MONEY?
+    ///
+    /// True for a client bound to a real `ComputePoolTraining` deployment,
+    /// where a committed epoch releases real SALT via `EpochPaymentReleased`.
+    ///
+    /// **Defaults to `false`** so mocks and in-process harnesses are
+    /// unaffected without having to know this exists. `HttpChainClient`
+    /// overrides it to `true`.
+    ///
+    /// Paired with [`ModelBackend::honors_job_spec`]: a worker refuses to run
+    /// when this is `true` and the backend cannot honour the job spec, which
+    /// is the combination that would earn real money for placeholder work.
+    fn is_live_settlement(&self) -> bool {
+        false
+    }
+
     /// Read the current snapshot of a job's on-chain state.
     async fn snapshot(&self, job_id: JobId) -> Result<JobChainSnapshot, ChainError>;
 
@@ -207,6 +223,9 @@ pub trait ChainClient: Send + Sync {
 /// bugs they'd catch against a live deployment.
 pub struct MockChainClient {
     inner: Arc<Mutex<MockState>>,
+    /// See [`MockChainClient::new_live_settlement`]. Defaults to false so every
+    /// existing harness is unaffected.
+    live_settlement: bool,
 }
 
 struct MockState {
@@ -261,7 +280,21 @@ const BPS: u128 = 10_000;
 
 impl MockChainClient {
     pub fn new() -> Arc<Self> {
+        Self::with_live_settlement(false)
+    }
+
+    /// A mock that reports LIVE SETTLEMENT — it stands in for `HttpChainClient`
+    /// against a real deployment, where a committed epoch pays real SALT.
+    ///
+    /// Exists so the capability gate in `Worker::run` can be tested without a
+    /// live chain. The state machine is identical; only the honesty bit differs.
+    pub fn new_live_settlement() -> Arc<Self> {
+        Self::with_live_settlement(true)
+    }
+
+    fn with_live_settlement(live_settlement: bool) -> Arc<Self> {
         Arc::new(Self {
+            live_settlement,
             inner: Arc::new(Mutex::new(MockState {
                 jobs: HashMap::new(),
                 next_job_id: 0,
@@ -320,6 +353,8 @@ const COORDINATION_TIMEOUT: u64 = 100;
 impl Default for MockChainClient {
     fn default() -> Self {
         Self {
+            // Fail-safe: a defaulted mock never claims live settlement.
+            live_settlement: false,
             inner: Arc::new(Mutex::new(MockState {
                 jobs: HashMap::new(),
                 next_job_id: 0,
@@ -333,6 +368,10 @@ impl Default for MockChainClient {
 
 #[async_trait]
 impl ChainClient for MockChainClient {
+    fn is_live_settlement(&self) -> bool {
+        self.live_settlement
+    }
+
     async fn snapshot(&self, job_id: JobId) -> Result<JobChainSnapshot, ChainError> {
         let state = self.inner.lock();
         let job = state
