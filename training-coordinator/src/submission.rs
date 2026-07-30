@@ -1,47 +1,22 @@
-//! The signed result a worker returns, and the exact bytes it signs.
+//! Recovering who produced a result.
 //!
-//! The digest is defined **here, once**, and both sides call this function. A
-//! coordinator and a worker that each hand-roll "the obvious" concatenation agree
-//! right up until one of them changes a separator, at which point every honest
-//! submission fails to authenticate and the failure looks like a key problem.
+//! The submission type and its digest are **re-exported** from
+//! `citrate_training_worker::coordinator_protocol`, never redefined: the worker
+//! signs with exactly those bytes. A coordinator and a worker that each hand-roll
+//! "the obvious" concatenation agree right up until one changes a separator, at
+//! which point every honest submission fails to authenticate and the failure
+//! presents as a key problem rather than an encoding one.
+//!
+//! What lives here is the part that is genuinely the server's: turning a
+//! signature into an address. Whether that address is *entitled* to submit is a
+//! further question, answered by the state machine — signed is not authorised.
 
 use citrate_training_worker::wallet::Wallet;
 use ethereum_types::H160;
-use serde::{Deserialize, Serialize};
-use sha3::{Digest, Keccak256};
 
-use crate::job::JobId;
-
-/// `keccak256("citrate-training-submission/1\n" || job_id || "\n" || payload)`.
-///
-/// The domain prefix keeps a submission signature from being replayable as any
-/// other message this key signs — notably a chain transaction, since the worker
-/// signs both with the same key. The newline separators make the encoding
-/// unambiguous for the job ids actually in use (`h01-64m-nat-seed2`), which
-/// contain no newlines.
-pub fn submission_digest(job: &JobId, payload: &str) -> [u8; 32] {
-    let mut h = Keccak256::new();
-    h.update(b"citrate-training-submission/1\n");
-    h.update(job.0.as_bytes());
-    h.update(b"\n");
-    h.update(payload.as_bytes());
-    let mut d = [0u8; 32];
-    d.copy_from_slice(&h.finalize());
-    d
-}
-
-/// A result as it arrives from a worker.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct SignedSubmission {
-    pub job: JobId,
-    /// Opaque to the coordinator: it schedules work and records outcomes, it does
-    /// not interpret training output. Verification of the *content* belongs to
-    /// the challenge path, which can re-run the work; the coordinator can only
-    /// establish who said it.
-    pub payload: String,
-    #[serde(with = "crate::attestation::hex_bytes")]
-    pub signature: Vec<u8>,
-}
+// Both the digest and the type come from the shared protocol: the worker signs
+// with exactly these bytes, so this crate must not have its own idea of them.
+pub use citrate_training_worker::coordinator_protocol::{submission_digest, SignedSubmission};
 
 #[derive(Debug, thiserror::Error, PartialEq)]
 pub enum SubmissionAuthError {
@@ -59,6 +34,9 @@ pub fn recover_submitter(s: &SignedSubmission) -> Result<H160, SubmissionAuthErr
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::job::JobId;
+    // Only for building the naive digest these tests prove we do NOT use.
+    use sha3::{Digest, Keccak256};
 
     const KEY_A: &str = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
     const KEY_B: &str = "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d";

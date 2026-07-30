@@ -51,6 +51,12 @@ pub mod backend;
 #[cfg(feature = "candle-gpu")]
 pub mod candle_backend;
 pub mod chain;
+// The coordinator seam. `coordinator_protocol` is the wire vocabulary shared with
+// the coordinator crate — it lives here because the coordinator already depends
+// on this crate for wallets and signatures, so this is the only placement giving
+// both sides ONE copy of the digests without a dependency cycle.
+pub mod coordinator_client;
+pub mod coordinator_protocol;
 pub mod events;
 pub mod http_chain_pipeline;
 /// The real federated signer (secp256k1 over the worker's encrypted keystore),
