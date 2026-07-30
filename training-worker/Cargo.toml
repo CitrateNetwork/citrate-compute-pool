@@ -44,6 +44,11 @@ citrate-fed-types = { git = "https://github.com/CitrateNetwork/citrate-fed-types
 nat-candle = { git = "ssh://git@github.com/CitrateNetwork/nat.git", rev = "870863c4", optional = true }
 nat-types  = { git = "ssh://git@github.com/CitrateNetwork/nat.git", rev = "870863c4", optional = true }
 nat-data   = { git = "ssh://git@github.com/CitrateNetwork/nat.git", rev = "870863c4", optional = true }
+# The federated seam (signing, gather, settlement). Deliberately a SEPARATE
+# feature from `nat`: it pulls no Candle, so a node can sign and settle
+# contributions without building the trainer.
+nat-federated = { git = "ssh://git@github.com/CitrateNetwork/nat.git", rev = "870863c4", optional = true }
+nat-train  = { git = "ssh://git@github.com/CitrateNetwork/nat.git", rev = "870863c4", optional = true }
 parking_lot = { workspace = true }
 ethereum-types = "0.14"
 
@@ -109,7 +114,9 @@ candle-cuda = ["candle-gpu", "candle-core/cuda"]
 # behind `ModelBackend`. Off by default so the standard build stays light — the
 # artifact-verification and commitment layers this backend depends on are NOT
 # gated, so the honesty checks compile and test everywhere.
-nat = ["dep:nat-candle", "dep:nat-types", "dep:nat-data", "dep:candle-core"]
+nat = ["dep:nat-candle", "dep:nat-types", "dep:nat-data", "dep:candle-core", "federated"]
+# The federated seam alone — signing + settlement, no Candle, no GPU stack.
+federated = ["dep:nat-federated", "dep:nat-train", "dep:nat-types"]
 # NAT on CUDA. Additive over `nat`.
 nat-cuda = ["nat", "nat-candle/cuda"]
 
