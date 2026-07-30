@@ -514,6 +514,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "ciborium"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "42e69ffd6f0917f5c029256a24d0161db17cea3997d185db0d35926308770f0e"
+dependencies = [
+ "ciborium-io",
+ "ciborium-ll",
+ "serde",
+]
+
+[[package]]
+name = "ciborium-io"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "05afea1e0a06c9be33d539b876f1ce3692f4afea2cb41f740e7743225ed1c757"
+
+[[package]]
+name = "ciborium-ll"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "57663b653d948a338bfb3eeba9bb2fd5fcfaecb9e199e87e1eda4d9e8b240fd9"
+dependencies = [
+ "ciborium-io",
+ "half",
+]
+
+[[package]]
 name = "cipher"
 version = "0.4.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -522,6 +549,15 @@ dependencies = [
  "crypto-common",
  "inout",
  "zeroize",
+]
+
+[[package]]
+name = "citrate-fed-types"
+version = "0.1.0"
+source = "git+https://github.com/CitrateNetwork/citrate-fed-types.git?rev=dbbfbff29a5053aa8324a866d52215c2f2281c31#dbbfbff29a5053aa8324a866d52215c2f2281c31"
+dependencies = [
+ "serde",
+ "sha2",
 ]
 
 [[package]]
@@ -565,12 +601,16 @@ dependencies = [
  "bincode",
  "candle-core",
  "candle-nn",
+ "citrate-fed-types",
  "ctr",
  "ethereum-types",
  "futures",
  "hex",
  "k256",
  "libp2p",
+ "nat-candle",
+ "nat-data",
+ "nat-types",
  "parking_lot",
  "pbkdf2",
  "reqwest",
@@ -2714,6 +2754,95 @@ dependencies = [
  "pin-project",
  "smallvec",
  "unsigned-varint 0.7.2",
+]
+
+[[package]]
+name = "nat-candle"
+version = "0.0.1"
+source = "git+ssh://git@github.com/CitrateNetwork/nat.git?rev=870863c4#870863c403817f250d9f430390b891c1e0cdecc2"
+dependencies = [
+ "candle-core",
+ "candle-nn",
+ "nat-core",
+ "nat-data",
+ "nat-sidecar",
+ "nat-train",
+ "nat-types",
+]
+
+[[package]]
+name = "nat-core"
+version = "0.0.1"
+source = "git+ssh://git@github.com/CitrateNetwork/nat.git?rev=870863c4#870863c403817f250d9f430390b891c1e0cdecc2"
+dependencies = [
+ "nat-mcp",
+ "nat-provenance",
+ "nat-sidecar",
+ "nat-types",
+ "sha2",
+]
+
+[[package]]
+name = "nat-data"
+version = "0.0.1"
+source = "git+ssh://git@github.com/CitrateNetwork/nat.git?rev=870863c4#870863c403817f250d9f430390b891c1e0cdecc2"
+dependencies = [
+ "nat-types",
+ "serde",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
+name = "nat-mcp"
+version = "0.0.1"
+source = "git+ssh://git@github.com/CitrateNetwork/nat.git?rev=870863c4#870863c403817f250d9f430390b891c1e0cdecc2"
+dependencies = [
+ "nat-types",
+ "serde",
+]
+
+[[package]]
+name = "nat-provenance"
+version = "0.0.1"
+source = "git+ssh://git@github.com/CitrateNetwork/nat.git?rev=870863c4#870863c403817f250d9f430390b891c1e0cdecc2"
+dependencies = [
+ "ciborium",
+ "nat-types",
+ "serde",
+ "sha2",
+]
+
+[[package]]
+name = "nat-sidecar"
+version = "0.0.1"
+source = "git+ssh://git@github.com/CitrateNetwork/nat.git?rev=870863c4#870863c403817f250d9f430390b891c1e0cdecc2"
+dependencies = [
+ "nat-types",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "nat-train"
+version = "0.0.1"
+source = "git+ssh://git@github.com/CitrateNetwork/nat.git?rev=870863c4#870863c403817f250d9f430390b891c1e0cdecc2"
+dependencies = [
+ "nat-core",
+ "nat-types",
+ "serde",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
+name = "nat-types"
+version = "0.0.1"
+source = "git+ssh://git@github.com/CitrateNetwork/nat.git?rev=870863c4#870863c403817f250d9f430390b891c1e0cdecc2"
+dependencies = [
+ "citrate-fed-types",
+ "serde",
 ]
 
 [[package]]

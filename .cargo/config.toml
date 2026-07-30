@@ -1,0 +1,24 @@
+# Workspace build configuration.
+#
+# aarch64 (the GB10 DGX and other ARM64 dev boxes): enable the Armv8.2-A
+# half-precision instructions. Without this, `gemm-f16` — pulled transitively by
+# candle via the `nat` feature — fails to assemble its `fmla v0.8h, …` kernels
+# and the workspace will not build on aarch64 at all.
+#
+# ONLY `+fp16`, deliberately NOT `target-cpu=native`. This mirrors `nat`'s
+# config, and the reason binds harder here than it does there: this worker's
+# COMMITMENTS must be bit-reproducible across heterogeneous machines, because a
+# worker whose numbers differ from its peers' gets challenged and slashed 10%.
+# `target-cpu=native` ties codegen to each host's microarchitecture, which is
+# precisely the class of difference the Q16 grid exists to eliminate — it would
+# reintroduce at the compiler what we removed at the quantizer.
+#
+# x86_64 builds (including CI images) are unaffected.
+[target.aarch64-unknown-linux-gnu]
+rustflags = ["-C", "target-feature=+fp16"]
+
+# Fetch private git dependencies (`nat`, and `citrate-fed-types` transitively)
+# through system git, so an authenticated credential helper / CI deploy key is
+# used. Cargo's built-in fetcher cannot read the private CitrateNetwork repos.
+[net]
+git-fetch-with-cli = true

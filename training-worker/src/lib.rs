@@ -53,6 +53,14 @@ pub mod candle_backend;
 pub mod chain;
 pub mod events;
 pub mod http_chain_pipeline;
+pub mod job_artifacts;
+/// The real NAT-backed training backend. Feature-gated because it pulls Candle;
+/// the artifact-verification and commitment layers it depends on are NOT gated,
+/// so the honesty checks compile and test everywhere.
+#[cfg(feature = "nat")]
+pub mod nat_backend;
+pub mod q16_commitment;
+pub mod zone_delta;
 pub mod http_chain_training;
 pub mod libp2p_transport;
 pub mod merkle;
@@ -81,6 +89,9 @@ pub use attestation::{
     ParsedJwt,
 };
 pub use events::{classify, EventKind, RawLog};
+pub use job_artifacts::{Architecture, ArtifactError, ArtifactStore, CommitmentGrid, JobArtifacts};
+pub use q16_commitment::{q16_step_commitment, q16_tensor_commitment, to_q16, Q16Tensor, Q16_ONE};
+pub use zone_delta::{zone_deltas, zone_of, DeltaError, ZoneDelta, SHARED};
 pub use http_chain_pipeline::HttpPipelineChainClient;
 pub use http_chain_training::HttpChainClient;
 pub use wallet::{tx_hash_of_signed, Eip1559Tx, Wallet, WalletError};
