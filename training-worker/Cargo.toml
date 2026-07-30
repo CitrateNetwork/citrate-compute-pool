@@ -125,3 +125,10 @@ tokio = { workspace = true }
 # Stub JSON-RPC server for http_chain_* tests, mirroring the
 # pool-coordinator pattern (axum is dev-only for training-worker).
 axum = "0.7"
+
+# The real end-to-end run needs the trainer AND the federated seam, so it is
+# gated: without this, `cargo test --workspace` on a default build tries to
+# compile it and fails on the missing nat crates.
+[[example]]
+name = "real_training_run"
+required-features = ["nat"]
