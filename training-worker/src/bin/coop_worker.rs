@@ -33,14 +33,18 @@
 //! fabricated results that nobody could reproduce. Declining is the correct
 //! behaviour for a machine that cannot do the work.
 //!
-//! # Artifacts are not fetched
+//! # Artifacts: staged on demand, from a mirror nobody trusts
 //!
-//! With `nat`, jobs are run against a local artifact store
-//! (`CITRATE_ARTIFACT_STORE`, default `./artifacts`). If the checkpoint and
-//! corpus a job names are not staged there, the job is declined with the hashes
-//! that were wanted. Moving 2.4 GB to volunteer machines is a distribution
-//! problem, and half-solving it inside the daemon that settles money is not the
-//! place to start.
+//! Jobs run against a local artifact store (`CITRATE_ARTIFACT_STORE`, default
+//! `./artifacts`). Set `CITRATE_ARTIFACT_MIRROR` to stage missing artifacts on
+//! demand; without it, a job whose artifacts are absent is declined.
+//!
+//! The mirror is **not trusted**. Everything it serves is verified against a hash
+//! the job named or the verified manifest committed to, so pointing this at a
+//! stranger's server is a bandwidth decision rather than a security one. And it
+//! fetches only what the job reads — corpus-v6 is 2.4 GB, but a job needs the
+//! manifest, the checkpoint and a few ~7.4 KB shards per step: about 200 MB, not
+//! the corpus.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -65,10 +69,24 @@ impl Executor {
         let store =
             std::env::var("CITRATE_ARTIFACT_STORE").unwrap_or_else(|_| "./artifacts".into());
         let scratch = std::env::var("CITRATE_SCRATCH").unwrap_or_else(|_| "./scratch".into());
-        tracing::info!(%store, %scratch, "training backend ready (nat)");
-        Self {
-            inner: citrate_training_worker::job_runner::NatJobRunner::new(store, scratch, worker),
+        let mut runner =
+            citrate_training_worker::job_runner::NatJobRunner::new(&store, &scratch, worker);
+        // A mirror is optional. With one, missing artifacts are staged on demand;
+        // without one, a job whose artifacts are absent is declined — right for a
+        // member who stages by hand, and it means no traffic is ever generated on
+        // their behalf without being asked for.
+        match std::env::var("CITRATE_ARTIFACT_MIRROR") {
+            Ok(m) if !m.trim().is_empty() => {
+                tracing::info!(%store, %scratch, mirror = %m, "training backend ready (nat)");
+                runner = runner.with_mirror(m);
+            }
+            _ => tracing::info!(
+                %store, %scratch,
+                "training backend ready (nat); no CITRATE_ARTIFACT_MIRROR set, so \
+                 jobs whose artifacts are not staged locally will be declined"
+            ),
         }
+        Self { inner: runner }
     }
 
     #[cfg(not(feature = "nat"))]

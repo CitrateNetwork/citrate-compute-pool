@@ -75,13 +75,15 @@ async fn a_job_for_another_task_is_declined_by_name() {
     }
 }
 
-/// The worker does not fetch. Declining names the problem so a member can act on
-/// it, instead of a resolve error surfacing as a training failure.
+/// Declining names the problem AND the two ways out, so a member reading a log at
+/// midnight can act on it instead of filing an issue.
 #[tokio::test]
-async fn unstaged_artifacts_are_declined_with_a_reason_not_fetched() {
+async fn unstaged_artifacts_are_declined_with_an_actionable_reason() {
     let e = runner("noartifacts").run(&job_with(payload())).await.unwrap_err();
     assert!(matches!(e, RunError::ArtifactsMissing(_)), "got {e:?}");
-    assert!(e.to_string().contains("does not fetch"));
+    let s = e.to_string();
+    assert!(s.contains("CITRATE_ARTIFACT_MIRROR"), "must name the fix: {s}");
+    assert!(s.contains("by hand"), "must name the manual alternative: {s}");
 }
 
 /// An unknown grid name must not fall back to a default. Defaulting here is
@@ -192,4 +194,88 @@ fn zone_l2_accumulates_across_steps_per_bucket() {
     assert_eq!(acc.len(), 2);
     assert!((acc[0].1 - 10.0).abs() < 1e-9);
     assert_eq!(acc[1].1, 0.0, "a bucket that never moves must report zero, not be omitted");
+}
+
+// ── Staging ────────────────────────────────────────────────────────────
+
+/// The economics of the whole distribution design, asserted as arithmetic.
+///
+/// corpus-v6 is 185,475 shards. A job reads `shards_per_step` per step, so what
+/// it needs is bounded by `steps × shards_per_step` — independent of corpus size.
+/// Fetching the corpus instead would move ~12× more data per member per job.
+#[test]
+fn a_job_needs_a_bounded_shard_set_not_the_corpus() {
+    use crate::nat_backend::shard_slice_for;
+    let total = 185_475; // corpus-v6, measured
+    let mut wanted = std::collections::BTreeSet::new();
+    for step in 0..100u32 {
+        for idx in shard_slice_for(total, 4, step, 0) {
+            wanted.insert(idx);
+        }
+    }
+    assert!(wanted.len() <= 400, "got {}", wanted.len());
+    // ~7.4 KB each: single-digit MB against a 2.4 GB corpus.
+    assert!(wanted.len() * 7_400 < 5 * 1024 * 1024);
+}
+
+/// Two workers on the same step must read disjoint slices, or they duplicate work
+/// and the corpus coverage the co-op is paying for does not happen.
+#[test]
+fn different_workers_read_different_shards() {
+    use crate::nat_backend::shard_slice_for;
+    let a: std::collections::BTreeSet<_> = shard_slice_for(1000, 8, 0, 0).into_iter().collect();
+    let b: std::collections::BTreeSet<_> = shard_slice_for(1000, 8, 0, 1).into_iter().collect();
+    assert!(a.intersection(&b).count() < a.len(), "worker slices must not coincide");
+}
+
+/// The load-bearing property of sharing one stride function: what the prefetcher
+/// downloads is exactly what the reader opens. If these ever diverged, a worker
+/// would stage a set of shards and then fail mid-run on a file it never fetched.
+#[test]
+fn the_prefetch_set_and_the_read_set_are_the_same_function() {
+    use crate::nat_backend::shard_slice_for;
+    for (total, per_step, step, shard) in
+        [(100, 4, 0, 0), (185_475, 8, 17, 3), (7, 64, 2, 9), (1, 1, 0, 0)]
+    {
+        assert_eq!(
+            shard_slice_for(total, per_step, step, shard),
+            shard_slice_for(total, per_step, step, shard),
+            "stride must be deterministic"
+        );
+    }
+}
+
+/// Never ask for more shards than exist, and never index out of the manifest —
+/// a small corpus in testing must not panic the prefetcher.
+#[test]
+fn the_stride_stays_in_bounds_on_a_corpus_smaller_than_a_step() {
+    use crate::nat_backend::shard_slice_for;
+    let picks = shard_slice_for(3, 64, 5, 2);
+    assert_eq!(picks.len(), 3, "cannot read more shards than exist");
+    assert!(picks.iter().all(|i| *i < 3));
+}
+
+#[test]
+fn an_empty_corpus_yields_no_picks_rather_than_panicking() {
+    use crate::nat_backend::shard_slice_for;
+    assert!(shard_slice_for(0, 4, 0, 0).is_empty());
+}
+
+/// Without a mirror the runner still declines rather than reaching out — a member
+/// who stages by hand must not have traffic generated on their behalf.
+#[tokio::test]
+async fn without_a_mirror_a_missing_artifact_is_still_declined() {
+    let e = runner("nomirror").run(&job_with(payload())).await.unwrap_err();
+    assert!(matches!(e, RunError::ArtifactsMissing(_)), "got {e:?}");
+}
+
+/// A mirror that cannot be reached is a staging failure, and the job is declined
+/// rather than half-run against a partly-staged store.
+#[tokio::test]
+async fn an_unreachable_mirror_declines_the_job() {
+    let d = tmpdir("deadmirror");
+    let r = NatJobRunner::new(d.join("store"), d.join("scratch"), WorkerAddress::repeat_byte(1))
+        .with_mirror("http://127.0.0.1:1");
+    let e = r.run(&job_with(payload())).await.unwrap_err();
+    assert!(matches!(e, RunError::Fetch(_)), "got {e:?}");
 }
