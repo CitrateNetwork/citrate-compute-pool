@@ -41,9 +41,9 @@ citrate-fed-types = { git = "https://github.com/CitrateNetwork/citrate-fed-types
 # NAT — the model the co-op trains. Pinned by rev: the parameter NAMES are the
 # contract `zone_delta` attributes against, so an unpinned bump could silently
 # reroute a zone's delta.
-nat-candle = { git = "ssh://git@github.com/CitrateNetwork/nat.git", rev = "0a687fb3", optional = true }
-nat-types  = { git = "ssh://git@github.com/CitrateNetwork/nat.git", rev = "0a687fb3", optional = true }
-nat-data   = { git = "ssh://git@github.com/CitrateNetwork/nat.git", rev = "0a687fb3", optional = true }
+nat-candle = { git = "ssh://git@github.com/CitrateNetwork/nat.git", rev = "870863c4", optional = true }
+nat-types  = { git = "ssh://git@github.com/CitrateNetwork/nat.git", rev = "870863c4", optional = true }
+nat-data   = { git = "ssh://git@github.com/CitrateNetwork/nat.git", rev = "870863c4", optional = true }
 parking_lot = { workspace = true }
 ethereum-types = "0.14"
 

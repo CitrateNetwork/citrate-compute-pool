@@ -2759,7 +2759,7 @@ dependencies = [
 [[package]]
 name = "nat-candle"
 version = "0.0.1"
-source = "git+ssh://git@github.com/CitrateNetwork/nat.git?rev=0a687fb3#0a687fb3cd5a644329ca4cb25f75e9d23344cf36"
+source = "git+ssh://git@github.com/CitrateNetwork/nat.git?rev=870863c4#870863c403817f250d9f430390b891c1e0cdecc2"
 dependencies = [
  "candle-core",
  "candle-nn",
@@ -2773,7 +2773,7 @@ dependencies = [
 [[package]]
 name = "nat-core"
 version = "0.0.1"
-source = "git+ssh://git@github.com/CitrateNetwork/nat.git?rev=0a687fb3#0a687fb3cd5a644329ca4cb25f75e9d23344cf36"
+source = "git+ssh://git@github.com/CitrateNetwork/nat.git?rev=870863c4#870863c403817f250d9f430390b891c1e0cdecc2"
 dependencies = [
  "nat-mcp",
  "nat-provenance",
@@ -2785,7 +2785,7 @@ dependencies = [
 [[package]]
 name = "nat-data"
 version = "0.0.1"
-source = "git+ssh://git@github.com/CitrateNetwork/nat.git?rev=0a687fb3#0a687fb3cd5a644329ca4cb25f75e9d23344cf36"
+source = "git+ssh://git@github.com/CitrateNetwork/nat.git?rev=870863c4#870863c403817f250d9f430390b891c1e0cdecc2"
 dependencies = [
  "nat-types",
  "serde",
@@ -2796,7 +2796,7 @@ dependencies = [
 [[package]]
 name = "nat-mcp"
 version = "0.0.1"
-source = "git+ssh://git@github.com/CitrateNetwork/nat.git?rev=0a687fb3#0a687fb3cd5a644329ca4cb25f75e9d23344cf36"
+source = "git+ssh://git@github.com/CitrateNetwork/nat.git?rev=870863c4#870863c403817f250d9f430390b891c1e0cdecc2"
 dependencies = [
  "nat-types",
  "serde",
@@ -2805,7 +2805,7 @@ dependencies = [
 [[package]]
 name = "nat-provenance"
 version = "0.0.1"
-source = "git+ssh://git@github.com/CitrateNetwork/nat.git?rev=0a687fb3#0a687fb3cd5a644329ca4cb25f75e9d23344cf36"
+source = "git+ssh://git@github.com/CitrateNetwork/nat.git?rev=870863c4#870863c403817f250d9f430390b891c1e0cdecc2"
 dependencies = [
  "ciborium",
  "nat-types",
@@ -2816,7 +2816,7 @@ dependencies = [
 [[package]]
 name = "nat-sidecar"
 version = "0.0.1"
-source = "git+ssh://git@github.com/CitrateNetwork/nat.git?rev=0a687fb3#0a687fb3cd5a644329ca4cb25f75e9d23344cf36"
+source = "git+ssh://git@github.com/CitrateNetwork/nat.git?rev=870863c4#870863c403817f250d9f430390b891c1e0cdecc2"
 dependencies = [
  "nat-types",
  "serde",
@@ -2827,7 +2827,7 @@ dependencies = [
 [[package]]
 name = "nat-train"
 version = "0.0.1"
-source = "git+ssh://git@github.com/CitrateNetwork/nat.git?rev=0a687fb3#0a687fb3cd5a644329ca4cb25f75e9d23344cf36"
+source = "git+ssh://git@github.com/CitrateNetwork/nat.git?rev=870863c4#870863c403817f250d9f430390b891c1e0cdecc2"
 dependencies = [
  "nat-core",
  "nat-types",
@@ -2839,7 +2839,7 @@ dependencies = [
 [[package]]
 name = "nat-types"
 version = "0.0.1"
-source = "git+ssh://git@github.com/CitrateNetwork/nat.git?rev=0a687fb3#0a687fb3cd5a644329ca4cb25f75e9d23344cf36"
+source = "git+ssh://git@github.com/CitrateNetwork/nat.git?rev=870863c4#870863c403817f250d9f430390b891c1e0cdecc2"
 dependencies = [
  "citrate-fed-types",
  "serde",

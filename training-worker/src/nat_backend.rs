@@ -26,20 +26,17 @@
 //! and the delta is the honest description of what this worker contributed to the
 //! shared model.
 //!
-//! The cost is real and stated: a step is `save → train → save → diff`, so it is
-//! I/O-heavy. A `varmap` accessor upstream would remove the round-trip.
+//! The delta is read via `named_parameters()` (NAT ADR-0011) — the parameters
+//! straight out of the model. An earlier revision had to `save` to safetensors,
+//! read the file back and diff it, once per step; that round-trip is gone.
 //!
-//! ## Thread confinement (not optional)
+//! ## Held directly, not on a worker thread
 //!
-//! `ModelBackend` requires `Send + Sync`. `AutoregLm` holds
-//! `Vec<Box<dyn CausalCore>>` and that trait object carries no `Send` bound
-//! upstream, so the TYPE is not `Send` — even though candle's tensors are. The
-//! model therefore lives on a dedicated thread and is driven by commands.
-//!
-//! The alternative would have been `unsafe impl Send`, asserting a property of
-//! someone else's private trait object. That assertion could silently become
-//! false on any NAT bump, so it is not made. One line upstream
-//! (`Box<dyn CausalCore + Send + Sync>`) removes the need for this thread.
+//! An earlier revision confined the model to a dedicated thread behind a command
+//! channel, because `AutoregLm` was not `Send`: it holds
+//! `Vec<Box<dyn CausalCore>>` and the trait object carried no bound, even though
+//! every field it owns already is. NAT ADR-0011 added `CausalCore: Send + Sync`,
+//! so the model is held directly under a `Mutex` and the channel is gone.
 //!
 //! ## Both architectures, neither a fallback for the other
 //!
@@ -50,10 +47,9 @@
 //! included, never reaches this module: `ArtifactStore::resolve` refuses it.
 
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{self, Sender};
-use std::thread;
 
 use async_trait::async_trait;
+use parking_lot::Mutex;
 
 use nat_candle::autoreg::{AutoregConfig, AutoregDenseLm, AutoregLm};
 use nat_data::manifest::{CorpusManifest, Shard, ShardManifest};
@@ -104,38 +100,21 @@ fn shards_path(manifest: &Path) -> PathBuf {
     p
 }
 
-/// Commands to the model thread. Every payload is plain data, so nothing
-/// non-`Send` crosses the channel.
-enum Cmd {
-    Load {
-        dir: PathBuf,
-        reply: Sender<anyhow::Result<()>>,
-    },
-    Step {
-        shards: Vec<Shard>,
-        shuffle_seed: u64,
-        before: PathBuf,
-        after: PathBuf,
-        reply: Sender<anyhow::Result<()>>,
-    },
-    BackendTag {
-        reply: Sender<&'static str>,
-    },
-}
-
-/// The model, in whichever arm the job asked for. Lives only on its thread.
+/// The model, in whichever arm the job asked for.
 enum Model {
     Zone(Box<AutoregLm>),
     Dense(Box<AutoregDenseLm>),
 }
 
 impl Model {
-    fn save(&self, dir: &Path) -> anyhow::Result<()> {
-        match self {
-            Model::Zone(m) => m.save(dir)?,
-            Model::Dense(m) => m.save(dir)?,
-        }
-        Ok(())
+    /// Parameters as `(name, values)`, name-ordered — NAT ADR-0011. The names
+    /// carry zone identity (`zone_HP.wq`, `score_PF`), which is what
+    /// `zone_delta` attributes against.
+    fn named_parameters(&self) -> anyhow::Result<Vec<(String, Vec<f32>)>> {
+        Ok(match self {
+            Model::Zone(m) => m.named_parameters()?,
+            Model::Dense(m) => m.named_parameters()?,
+        })
     }
 
     fn load(&mut self, dir: &Path) -> anyhow::Result<()> {
@@ -212,8 +191,10 @@ fn build_model(arch: Architecture, p: &TrainingParams) -> anyhow::Result<Model> 
 /// NAT-backed [`ModelBackend`].
 pub struct NatBackend {
     artifacts: JobArtifacts,
-    tx: Sender<Cmd>,
-    scratch: PathBuf,
+    params: TrainingParams,
+    model: Mutex<Model>,
+    /// Corpus windows, built once — identical every step.
+    windows: Mutex<Option<candle_core::Tensor>>,
 }
 
 impl NatBackend {
@@ -225,85 +206,20 @@ impl NatBackend {
     pub fn new(
         artifacts: JobArtifacts,
         params: TrainingParams,
-        scratch: impl Into<PathBuf>,
+        _scratch: impl Into<PathBuf>,
     ) -> anyhow::Result<Self> {
-        let scratch = scratch.into();
-        std::fs::create_dir_all(&scratch)?;
-
-        let arch = artifacts.architecture;
-        let (tx, rx) = mpsc::channel::<Cmd>();
-        let (ready_tx, ready_rx) = mpsc::channel::<anyhow::Result<()>>();
-
-        thread::Builder::new()
-            .name("nat-model".into())
-            .spawn(move || {
-                let mut model = match build_model(arch, &params) {
-                    Ok(m) => {
-                        let _ = ready_tx.send(Ok(()));
-                        m
-                    }
-                    Err(e) => {
-                        let _ = ready_tx.send(Err(e));
-                        return;
-                    }
-                };
-                // The corpus is identical every step; building it once and caching
-                // avoids re-reading a large shard set per step.
-                let mut windows: Option<candle_core::Tensor> = None;
-
-                while let Ok(cmd) = rx.recv() {
-                    match cmd {
-                        Cmd::Load { dir, reply } => {
-                            let _ = reply.send(model.load(&dir));
-                        }
-                        Cmd::BackendTag { reply } => {
-                            let _ = reply.send(model.backend_tag());
-                        }
-                        Cmd::Step {
-                            shards,
-                            shuffle_seed,
-                            before,
-                            after,
-                            reply,
-                        } => {
-                            let r = (|| -> anyhow::Result<()> {
-                                if windows.is_none() {
-                                    let (ids, _t) = nat_candle::corpus::next_byte_windows(
-                                        &shards,
-                                        params.seq_len,
-                                        params.max_windows,
-                                        model.device(),
-                                    )?;
-                                    windows = Some(ids);
-                                }
-                                let ids = windows.as_ref().expect("just set");
-                                model.save(&before)?;
-                                model.train_one_pass(ids, &params, shuffle_seed)?;
-                                model.save(&after)?;
-                                Ok(())
-                            })();
-                            let _ = reply.send(r);
-                        }
-                    }
-                }
-            })?;
-
-        ready_rx
-            .recv()
-            .map_err(|_| anyhow::anyhow!("model thread died during construction"))??;
-
+        let model = build_model(artifacts.architecture, &params)?;
         Ok(Self {
             artifacts,
-            tx,
-            scratch,
+            params,
+            model: Mutex::new(model),
+            windows: Mutex::new(None),
         })
     }
 
     /// `"candle-cpu"` or `"candle-cuda"`.
-    pub fn backend_tag(&self) -> anyhow::Result<&'static str> {
-        let (tx, rx) = mpsc::channel();
-        self.tx.send(Cmd::BackendTag { reply: tx })?;
-        Ok(rx.recv()?)
+    pub fn backend_tag(&self) -> &'static str {
+        self.model.lock().backend_tag()
     }
 
     /// The verified corpus manifest.
@@ -356,18 +272,6 @@ impl NatBackend {
         Ok(shards)
     }
 
-    /// Read a safetensors checkpoint as `(name, values)` — the input
-    /// `zone_delta` attributes by name.
-    fn read_checkpoint(dir: &Path) -> anyhow::Result<Vec<(String, Vec<f32>)>> {
-        let tensors =
-            candle_core::safetensors::load(dir.join("model.safetensors"), &candle_core::Device::Cpu)?;
-        let mut out = Vec::with_capacity(tensors.len());
-        for (name, t) in tensors {
-            out.push((name, t.flatten_all()?.to_vec1::<f32>()?));
-        }
-        out.sort_by(|a, b| a.0.cmp(&b.0));
-        Ok(out)
-    }
 }
 
 #[async_trait]
@@ -398,12 +302,7 @@ impl ModelBackend for NatBackend {
                 self.artifacts.model_start_hash
             );
         }
-        let (tx, rx) = mpsc::channel();
-        self.tx.send(Cmd::Load {
-            dir: self.artifacts.checkpoint_dir.clone(),
-            reply: tx,
-        })?;
-        rx.recv()??;
+        self.model.lock().load(&self.artifacts.checkpoint_dir)?;
         Ok(model_start_hash)
     }
 
@@ -422,27 +321,34 @@ impl ModelBackend for NatBackend {
         worker_shard: u32,
     ) -> anyhow::Result<StepResult> {
         let shards = self.load_and_verify_shards()?;
-
-        let before = self.scratch.join("before");
-        let after = self.scratch.join("after");
-        std::fs::create_dir_all(&before)?;
-        std::fs::create_dir_all(&after)?;
-
         let shuffle_seed =
             ((epoch as u64) << 40) | ((step as u64) << 16) | worker_shard as u64;
 
-        let (tx, rx) = mpsc::channel();
-        self.tx.send(Cmd::Step {
-            shards,
-            shuffle_seed,
-            before: before.clone(),
-            after: after.clone(),
-            reply: tx,
-        })?;
-        rx.recv()??;
+        // Snapshot -> train -> snapshot, entirely in memory. NAT ADR-0011's
+        // `named_parameters` removed the safetensors round-trip that used to sit
+        // on the hot path of every step.
+        let (pre, post) = {
+            let mut model = self.model.lock();
 
-        let pre = Self::read_checkpoint(&before)?;
-        let post = Self::read_checkpoint(&after)?;
+            let mut windows = self.windows.lock();
+            if windows.is_none() {
+                let (ids, _t) = nat_candle::corpus::next_byte_windows(
+                    &shards,
+                    self.params.seq_len,
+                    self.params.max_windows,
+                    model.device(),
+                )?;
+                *windows = Some(ids);
+            }
+            let ids = windows.as_ref().expect("just set").clone();
+            drop(windows);
+
+            let pre = model.named_parameters()?;
+            model.train_one_pass(&ids, &self.params, shuffle_seed)?;
+            let post = model.named_parameters()?;
+            (pre, post)
+        };
+
         let deltas = zone_deltas(&pre, &post)?;
 
         // Zone -> layer_index. `zone_deltas` returns zones sorted, so the index is
