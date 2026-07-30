@@ -1,0 +1,60 @@
+# Citrate coordinator + artifact mirror.
+#
+# APPEND this to the droplet's existing /etc/caddy/Caddyfile. Do not replace the
+# file: this box already runs Caddy for other things, and a prod Caddyfile is
+# edited, never reset.
+
+coordinator.citrate.ai {
+	# The coordinator itself is loopback-only (see the systemd unit). Every route
+	# it serves authenticates by recovering the signer from the request, so there
+	# is no API key here to configure and nothing to rotate.
+	reverse_proxy 127.0.0.1:8088
+
+	# A worker polls on a long cadence and a job can take hours, but no single
+	# HTTP call should. Generous enough for a 200 MB-era client, short enough
+	# that a wedged request does not hold a connection open forever.
+	request_body {
+		max_size 4MB
+	}
+
+	encode gzip
+
+	log {
+		output file /var/log/caddy/coordinator.log {
+			roll_size 20MiB
+			roll_keep 5
+		}
+	}
+}
+
+mirror.citrate.ai {
+	# Static content-addressed artifacts. Nothing here is trusted by a client:
+	# every file is verified against a hash the job named or the verified
+	# manifest committed to, so this being public is a bandwidth decision rather
+	# than a security one.
+	root * /var/lib/citrate-artifacts
+	file_server {
+		# Deliberately off. The layout is content-addressed, so a browsable index
+		# invites crawling 185,475 shard files and serves no one — a client that
+		# needs a file already knows its exact path.
+		hide .git
+	}
+
+	# Content-addressed means immutable: a given path's bytes can never change,
+	# because the path IS the hash. So cache hard and let a CDN or a member's
+	# local cache absorb the repeat traffic.
+	header Cache-Control "public, max-age=31536000, immutable"
+
+	# Read-only. Nothing should ever write here over HTTP.
+	@notget not method GET HEAD
+	respond @notget 405
+
+	encode gzip
+
+	log {
+		output file /var/log/caddy/mirror.log {
+			roll_size 20MiB
+			roll_keep 5
+		}
+	}
+}
