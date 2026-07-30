@@ -80,6 +80,18 @@ pub fn capability_of(p: &ProbeReport) -> Capability {
     match (p.backend.as_str(), p.dtype.as_str()) {
         // H-01 is measured in bf16; an f32 arm is a different experiment.
         ("candle-cuda", "bf16") => Capability::H01,
+        // Metal is held out of the ladder as a PROTOCOL decision, not a hardware
+        // one. Candle's Metal backend does implement bf16 matmul (it dispatches
+        // to `GemmDType::BF16`), so an Apple machine is perfectly capable of the
+        // arithmetic. The reason to exclude it is continuity: every existing H-01
+        // number was measured on CUDA, and mixing backends into the re-run would
+        // confound it against the prior ladder — the same class of uncontrolled
+        // variable that ADR-0012's dead PF zone already cost us once.
+        //
+        // Revisit once a Mac has actually run `divergence_probe` and Metal-vs-CUDA
+        // divergence is measured rather than assumed. If it lands near the
+        // CPU-vs-CUDA figure (1.19e-7), holding Macs out stops being worth the
+        // capacity it wastes.
         ("candle-cuda", _) | ("candle-metal", _) => Capability::Federated,
         _ => Capability::Probe,
     }
