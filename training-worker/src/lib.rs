@@ -70,6 +70,11 @@ pub mod job_artifacts;
 /// so the honesty checks compile and test everywhere.
 #[cfg(feature = "nat")]
 pub mod nat_backend;
+/// Turns a coordinator job payload into a real NAT run. Feature-gated with the
+/// backend it drives — a build without `nat` can still register and poll, it just
+/// declines training work rather than pretending to do it.
+#[cfg(feature = "nat")]
+pub mod job_runner;
 pub mod q16_commitment;
 pub mod zone_delta;
 pub mod http_chain_training;

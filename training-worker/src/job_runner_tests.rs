@@ -1,0 +1,195 @@
+// The refusal path.
+//
+// Every test here is about work NOT happening. That is deliberate: the expensive
+// failures in a training runner are the ones where it proceeds. A job that runs
+// for two days against the wrong commitment grid produces honest work that fails
+// every challenge and costs the worker 10% of its stake — and nothing in the
+// system notices, because the numbers all look fine.
+//
+// The success path needs a real 2.4 GB corpus and a 64M checkpoint on a GPU, so
+// it lives in `examples/real_training_run.rs`, which runs against the genuine
+// artifacts rather than fabricating them here.
+
+use super::*;
+use crate::coordinator_protocol::{Capability, JobSpec};
+
+fn tmpdir(name: &str) -> PathBuf {
+    let d = std::env::temp_dir().join(format!("citrate-runner-test-{name}"));
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(&d).unwrap();
+    d
+}
+
+fn runner(name: &str) -> NatJobRunner {
+    let d = tmpdir(name);
+    NatJobRunner::new(d.join("store"), d.join("scratch"), WorkerAddress::repeat_byte(1))
+}
+
+fn payload() -> serde_json::Value {
+    serde_json::json!({
+        "task": "train",
+        "model_start_hash": format!("{:?}", B256::repeat_byte(0xAA)),
+        "dataset_hash": format!("{:?}", B256::repeat_byte(0xBB)),
+        "commitment_grid": "q16",
+        "epoch": 0,
+        "steps": 4,
+        "worker_shard": 0,
+        "batch_size": 4,
+        "learning_rate": 0.0001,
+        "max_windows": 64,
+        "shards_per_step": 8,
+        "seed": 2026
+    })
+}
+
+fn job_with(payload: serde_json::Value) -> JobSpec {
+    JobSpec::new("t1", Capability::H01, payload)
+}
+
+#[tokio::test]
+async fn a_payload_that_is_not_a_training_job_is_refused_before_anything_loads() {
+    let r = runner("badpayload");
+    let e = r.run(&job_with(serde_json::json!({ "hello": "world" }))).await.unwrap_err();
+    assert!(matches!(e, RunError::BadPayload(_)), "got {e:?}");
+}
+
+/// A missing field must be a refusal, not a default. A worker that quietly trains
+/// one epoch because `steps` was absent has produced a result nobody asked for.
+#[tokio::test]
+async fn a_payload_missing_a_field_is_refused_rather_than_defaulted() {
+    let mut p = payload();
+    p.as_object_mut().unwrap().remove("steps");
+    let e = runner("missingfield").run(&job_with(p)).await.unwrap_err();
+    assert!(matches!(e, RunError::BadPayload(_)), "got {e:?}");
+}
+
+/// A runner handed someone else's job type must decline it whole rather than
+/// half-understand it.
+#[tokio::test]
+async fn a_job_for_another_task_is_declined_by_name() {
+    let mut p = payload();
+    p["task"] = serde_json::json!("divergence_probe");
+    match runner("wrongtask").run(&job_with(p)).await.unwrap_err() {
+        RunError::WrongTask(t) => assert_eq!(t, "divergence_probe"),
+        e => panic!("got {e:?}"),
+    }
+}
+
+/// The worker does not fetch. Declining names the problem so a member can act on
+/// it, instead of a resolve error surfacing as a training failure.
+#[tokio::test]
+async fn unstaged_artifacts_are_declined_with_a_reason_not_fetched() {
+    let e = runner("noartifacts").run(&job_with(payload())).await.unwrap_err();
+    assert!(matches!(e, RunError::ArtifactsMissing(_)), "got {e:?}");
+    assert!(e.to_string().contains("does not fetch"));
+}
+
+/// An unknown grid name must not fall back to a default. Defaulting here is
+/// exactly how a worker ends up committing on a grid the committee is not
+/// resolving on.
+#[tokio::test]
+async fn an_unrecognised_commitment_grid_is_refused_rather_than_defaulted() {
+    let mut p = payload();
+    p["commitment_grid"] = serde_json::json!("float64-someday");
+    let e = runner("badgrid").run(&job_with(p)).await.unwrap_err();
+    assert!(matches!(e, RunError::BadPayload(_)), "got {e:?}");
+}
+
+/// Both grids must be expressible, so a job can be pinned to the legacy scale
+/// deliberately — the check is that declared and actual AGREE, not that one
+/// particular grid is hardcoded.
+#[test]
+fn both_commitment_grids_round_trip_through_the_payload() {
+    for (name, grid) in [
+        ("q16", CommitmentGrid::Q16),
+        ("legacy-f32-scale", CommitmentGrid::LegacyF32Scale),
+    ] {
+        let mut p = payload();
+        p["commitment_grid"] = serde_json::json!(name);
+        let parsed: TrainingJobPayload = serde_json::from_value(p).unwrap();
+        assert_eq!(parsed.commitment_grid, grid);
+        assert_eq!(parsed.commitment_grid.as_str(), name);
+    }
+}
+
+/// The grid mismatch message has to explain the consequence, because the person
+/// reading it is a volunteer whose machine just declined a job and who has no
+/// reason to know what a commitment grid is.
+#[test]
+fn the_grid_mismatch_error_explains_why_it_matters() {
+    let e = RunError::GridMismatch {
+        declared: "q16",
+        actual: "legacy-f32-scale",
+    };
+    let s = e.to_string();
+    assert!(s.contains("q16") && s.contains("legacy-f32-scale"));
+    assert!(s.contains("challenge"), "must say what goes wrong: {s}");
+}
+
+#[test]
+fn the_backend_honesty_gate_names_the_actual_risk() {
+    let s = RunError::BackendDoesNotHonorSpec.to_string();
+    assert!(s.contains("honour the job spec"));
+}
+
+/// The chain-of-custody property, asserted on the type rather than on a run:
+/// every step carries the previous step's post-weights, which is what makes a
+/// mid-run weight substitution detectable by a challenger.
+#[test]
+fn step_records_carry_what_a_challenger_needs() {
+    let r = StepRecord {
+        step: 3,
+        commitment: B256::repeat_byte(1),
+        post_weights: B256::repeat_byte(2),
+    };
+    let v = serde_json::to_value(&r).unwrap();
+    assert!(v.get("commitment").is_some());
+    assert!(v.get("post_weights").is_some());
+    assert_eq!(v["step"], 3);
+}
+
+/// Reporting only the epoch root would make the work unfalsifiable — a challenger
+/// needs the per-step commitments to prove a specific step wrong.
+#[test]
+fn the_result_reports_per_step_commitments_and_not_only_the_root() {
+    let res = TrainingJobResult {
+        job: "t1".into(),
+        task: TASK_TRAIN,
+        backend: "candle-cuda",
+        commitment_grid: "q16",
+        epoch: 0,
+        worker_shard: 0,
+        steps: vec![StepRecord {
+            step: 0,
+            commitment: B256::repeat_byte(9),
+            post_weights: B256::repeat_byte(8),
+        }],
+        epoch_root: B256::repeat_byte(7),
+        final_weights: B256::repeat_byte(8),
+        data_quality_raw: 65536,
+        zone_l2: vec![("bucket_0".into(), 1.5)],
+        seconds: 1.0,
+    };
+    let v = serde_json::to_value(&res).unwrap();
+    assert_eq!(v["steps"].as_array().unwrap().len(), 1);
+    assert!(v.get("epoch_root").is_some());
+    // The backend is provenance once the fleet is heterogeneous.
+    assert_eq!(v["backend"], "candle-cuda");
+    // A dead zone must be visible in the result, not discovered months later.
+    assert!(v.get("zone_l2").is_some());
+}
+
+#[test]
+fn zone_l2_accumulates_across_steps_per_bucket() {
+    use crate::backend::Tensor;
+    let mut acc = Vec::new();
+    let grads = vec![
+        Tensor { data: vec![3.0, 4.0], layer_index: 0 }, // L2 = 5
+        Tensor { data: vec![0.0, 0.0], layer_index: 1 }, // L2 = 0 — a dead bucket
+    ];
+    accumulate_zone_l2(&mut acc, &grads);
+    accumulate_zone_l2(&mut acc, &grads);
+    assert_eq!(acc.len(), 2);
+    assert!((acc[0].1 - 10.0).abs() < 1e-9);
+    assert_eq!(acc[1].1, 0.0, "a bucket that never moves must report zero, not be omitted");
+}

@@ -78,11 +78,16 @@ impl Architecture {
 /// every honest worker looks dishonest and gets slashed 10%. So the grid is a
 /// property of the JOB, read from the same verified sidecar by both sides, not a
 /// local setting either one picks.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Serde names are the SIDECAR's wire names, so a job payload and a sidecar spell
+/// the grid identically. An unknown name is a deserialization error rather than a
+/// silent fallback to the default — defaulting is precisely how a worker ends up
+/// committing on a grid the committee is not resolving on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum CommitmentGrid {
     /// The fixed Q16.16 grid from `citrate_fed_types` — the same one NAT and the
     /// chain's `0x0110` path use. Data-independent, so two workers on different
     /// hardware commit identically. **The default.**
+    #[serde(rename = "q16")]
     Q16,
     /// The legacy per-tensor f32 scale (`max|x| / 127`, scale hashed into the
     /// preimage).
@@ -92,6 +97,7 @@ pub enum CommitmentGrid {
     /// changes the commitment, and — worse — shifts OTHER coordinates' quantized
     /// values, because they all share the derived scale. Both failures are
     /// demonstrated in `q16_commitment`'s tests.
+    #[serde(rename = "legacy-f32-scale")]
     LegacyF32Scale,
 }
 

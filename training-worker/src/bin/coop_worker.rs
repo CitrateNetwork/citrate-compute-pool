@@ -19,23 +19,28 @@
 //! coordinator recovers the signing address from each request, so a member has
 //! one key and nothing to rotate.
 //!
-//! # Scope, stated plainly
+//! # Two builds, and the difference is honest
 //!
-//! **This binary does not execute training jobs yet.** It registers, polls, and
-//! reports what it is asked to do. Any job it is offered is refused with a
-//! reason, its lease expires, and the coordinator hands the work to another
-//! machine — which is the correct behaviour for a worker that cannot do the job,
-//! and is exactly the `failed_by` path the coordinator implements.
+//! Built **with `--features nat`**, this executes training jobs against the real
+//! NAT backend via [`job_runner::NatJobRunner`] — verified artifacts, real steps,
+//! a reproducible commitment.
 //!
-//! That is a deliberate boundary, not an oversight. Executing a job means turning
-//! a `JobSpec` payload into a real run against `NatBackend` with verified
-//! artifacts, and a worker that *pretended* to complete jobs would poison the
-//! ladder with fabricated results — far worse than one that honestly declines.
-//! [`JobRunner`] is the seam that work plugs into.
+//! Built **without it**, there is no training backend compiled in, so every job
+//! is declined with a reason and its lease expires for the coordinator to
+//! reassign. That is not a degraded mode to apologise for: a CPU-only member
+//! still registers, still contributes divergence measurements, and — critically —
+//! a worker that *pretended* to complete jobs would poison the ladder with
+//! fabricated results that nobody could reproduce. Declining is the correct
+//! behaviour for a machine that cannot do the work.
 //!
-//! What it IS useful for today: proving a member's machine can reach the
-//! coordinator, that its keystore signs correctly, and that its measured
-//! capability is what they expect — before any GPU time is committed.
+//! # Artifacts are not fetched
+//!
+//! With `nat`, jobs are run against a local artifact store
+//! (`CITRATE_ARTIFACT_STORE`, default `./artifacts`). If the checkpoint and
+//! corpus a job names are not staged there, the job is declined with the hashes
+//! that were wanted. Moving 2.4 GB to volunteer machines is a distribution
+//! problem, and half-solving it inside the daemon that settles money is not the
+//! place to start.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -44,23 +49,65 @@ use citrate_training_worker::coordinator_client::CoordinatorClient;
 use citrate_training_worker::coordinator_protocol::JobSpec;
 use citrate_training_worker::wallet::Wallet;
 
-/// How a job gets executed. The insertion point for the training backend.
-#[allow(async_fn_in_trait)]
-pub trait JobRunner {
-    /// Return the payload to submit, or an error to decline the job.
-    async fn run(&self, job: JobSpec) -> anyhow::Result<String>;
+/// Executes a job, or returns the reason it will not.
+///
+/// Declining is a first-class outcome throughout: the coordinator lets the lease
+/// expire and reassigns the work, which is why `RunError` variants explain the
+/// consequence rather than just naming the fault.
+struct Executor {
+    #[cfg(feature = "nat")]
+    inner: citrate_training_worker::job_runner::NatJobRunner,
 }
 
-/// The runner this binary ships with: it declines everything, loudly and with a
-/// reason. Named for what it does so no one reads it as a stub that "works".
-struct DeclineUntilBackendWired;
+impl Executor {
+    #[cfg(feature = "nat")]
+    fn new(worker: ethereum_types::H160) -> Self {
+        let store =
+            std::env::var("CITRATE_ARTIFACT_STORE").unwrap_or_else(|_| "./artifacts".into());
+        let scratch = std::env::var("CITRATE_SCRATCH").unwrap_or_else(|_| "./scratch".into());
+        tracing::info!(%store, %scratch, "training backend ready (nat)");
+        Self {
+            inner: citrate_training_worker::job_runner::NatJobRunner::new(store, scratch, worker),
+        }
+    }
 
-impl JobRunner for DeclineUntilBackendWired {
+    #[cfg(not(feature = "nat"))]
+    fn new(_worker: ethereum_types::H160) -> Self {
+        tracing::warn!(
+            "built WITHOUT the `nat` feature: no training backend is compiled in, so \
+             training jobs will be declined and reassigned. Rebuild with \
+             `--features nat` (or `nat-cuda`) to execute them."
+        );
+        Self {}
+    }
+
+    #[cfg(feature = "nat")]
+    async fn run(&self, job: JobSpec) -> anyhow::Result<String> {
+        let result = self.inner.run(&job).await?;
+        tracing::info!(
+            job = %result.job,
+            backend = result.backend,
+            steps = result.steps.len(),
+            epoch_root = ?result.epoch_root,
+            seconds = result.seconds,
+            "trained"
+        );
+        // A zone that never moved is the ADR-0012 failure, and it is far cheaper
+        // to see it in a log line now than in a checkpoint months later.
+        for (bucket, l2) in &result.zone_l2 {
+            if *l2 == 0.0 {
+                tracing::warn!(job = %result.job, %bucket, "bucket received NO gradient this job");
+            }
+        }
+        Ok(serde_json::to_string(&result)?)
+    }
+
+    #[cfg(not(feature = "nat"))]
     async fn run(&self, job: JobSpec) -> anyhow::Result<String> {
         anyhow::bail!(
-            "this worker cannot execute job {} ({:?}): the training backend is not \
-             wired to the coordinator yet. Declining so the lease expires and the \
-             coordinator reassigns it.",
+            "cannot execute job {} ({:?}): this worker was built without the `nat` \
+             training backend. Declining so the lease expires and the coordinator \
+             reassigns it.",
             job.id,
             job.requires
         )
@@ -88,8 +135,9 @@ async fn main() -> anyhow::Result<()> {
 
     // Same key the worker transacts with, so a member has ONE identity.
     let wallet = Wallet::from_env()?;
+    let worker_id = wallet.address();
     let client = CoordinatorClient::new(&url, wallet);
-    tracing::info!(worker = ?client.worker_id(), coordinator = %url, "starting");
+    tracing::info!(worker = ?worker_id, coordinator = %url, "starting");
 
     // Registration is also the connectivity check: if this succeeds, the member
     // knows their key signs correctly and what their machine is rated for.
@@ -110,13 +158,13 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
-    let runner = Arc::new(DeclineUntilBackendWired);
+    let executor = Arc::new(Executor::new(worker_id));
     let check = running.clone();
     client
         .poll_loop(
             move |job| {
-                let r = runner.clone();
-                async move { r.run(job).await }
+                let e = executor.clone();
+                async move { e.run(job).await }
             },
             move || check.load(Ordering::SeqCst),
         )
