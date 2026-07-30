@@ -265,6 +265,60 @@ impl Wallet {
 
     /// Sign an EIP-1559 (type-2) transaction. Returns the RLP-encoded
     /// signed tx bytes suitable for `eth_sendRawTransaction`.
+    /// Recoverable secp256k1 signature over an arbitrary 32-byte digest,
+    /// returned as the 65-byte `r || s || v` form (`v` is the recovery id, 0/1).
+    ///
+    /// "Recoverable" is the load-bearing word: a verifier can recover the signing
+    /// ADDRESS from the signature and the digest alone. That is what lets the
+    /// federated gather verify a contribution with **no roster and no distributed
+    /// key registry** — the claimed identity IS the address, and a signature
+    /// either recovers to it or does not.
+    ///
+    /// Unlike `trial_recovery_from_prehash`'s fallback in `sign_eip1559`, a
+    /// failure here is returned rather than defaulted to recovery id 0: a wrong
+    /// `v` yields a signature that recovers to the WRONG address, which the
+    /// gather would read as a different node — or as forgery.
+    pub fn sign_digest_recoverable(&self, digest: &[u8; 32]) -> Result<[u8; 65], WalletError> {
+        let sig: Signature = self
+            .signing_key
+            .sign_prehash(digest)
+            .map_err(|e| WalletError::Sign(format!("{}", e)))?;
+        let recid = RecoveryId::trial_recovery_from_prehash(
+            &self.signing_key.verifying_key().clone(),
+            digest,
+            &sig,
+        )
+        .map_err(|e| WalletError::Sign(format!("recovery id: {}", e)))?;
+
+        let mut out = [0u8; 65];
+        out[..64].copy_from_slice(&sig.to_bytes());
+        out[64] = recid.to_byte();
+        Ok(out)
+    }
+
+    /// Recover the signing address from a digest and a 65-byte recoverable
+    /// signature. Pure — no key material, which is why a verifier can run it.
+    pub fn recover_address(digest: &[u8; 32], sig65: &[u8]) -> Result<H160, WalletError> {
+        if sig65.len() != 65 {
+            return Err(WalletError::Sign(format!(
+                "recoverable signature must be 65 bytes, got {}",
+                sig65.len()
+            )));
+        }
+        let sig = Signature::from_slice(&sig65[..64])
+            .map_err(|e| WalletError::Sign(format!("bad r||s: {}", e)))?;
+        let recid = RecoveryId::from_byte(sig65[64])
+            .ok_or_else(|| WalletError::Sign(format!("bad recovery id {}", sig65[64])))?;
+        let vk = k256::ecdsa::VerifyingKey::recover_from_prehash(digest, &sig, recid)
+            .map_err(|e| WalletError::Sign(format!("recover: {}", e)))?;
+
+        let point = vk.to_encoded_point(false);
+        let h = keccak256(&point.as_bytes()[1..]);
+        let mut addr = [0u8; 20];
+        addr.copy_from_slice(&h[12..]);
+        Ok(H160::from(addr))
+    }
+
     pub fn sign_eip1559(&self, tx: &Eip1559Tx) -> Result<Vec<u8>, WalletError> {
         let signing_payload = encode_eip1559_for_signing(tx);
         let digest = keccak256(&signing_payload);
