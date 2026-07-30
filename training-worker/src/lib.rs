@@ -53,6 +53,7 @@ pub mod candle_backend;
 pub mod chain;
 pub mod events;
 pub mod http_chain_pipeline;
+pub mod job_artifacts;
 pub mod http_chain_training;
 pub mod libp2p_transport;
 pub mod merkle;
@@ -81,6 +82,7 @@ pub use attestation::{
     ParsedJwt,
 };
 pub use events::{classify, EventKind, RawLog};
+pub use job_artifacts::{Architecture, ArtifactError, ArtifactStore, JobArtifacts};
 pub use http_chain_pipeline::HttpPipelineChainClient;
 pub use http_chain_training::HttpChainClient;
 pub use wallet::{tx_hash_of_signed, Eip1559Tx, Wallet, WalletError};

@@ -1,0 +1,279 @@
+//! Resolving a training job's on-chain spec to REAL, VERIFIED artifacts.
+//!
+//! This is the honesty core of the training backend. `ModelBackend::honors_job_spec`
+//! is allowed to answer `true` only because this module exists: it is what turns
+//! `spec.model_start_hash` and `spec.dataset_hash` from decorative bytes into the
+//! actual weights and the actual corpus, checked by content.
+//!
+//! ## Why this is a separate, dependency-light layer
+//!
+//! Deliberately no Candle, no CUDA, no NAT. Verification is hashing and parsing;
+//! it does not need a GPU stack, and keeping it independent means the part that
+//! decides *whether it is honest to train* is fully testable on any machine, in
+//! CI, without a 300 MB dependency tree. The training itself is feature-gated
+//! behind that; this is not.
+//!
+//! ## What the chain says vs. what a worker must prove
+//!
+//! `ComputePoolTraining` publishes a job as `(model_start_hash, dataset_hash, …)`.
+//! Those are commitments, not content. A worker that trains *something* and commits
+//! a Merkle root of its gradients is paid regardless — the protocol cannot see
+//! which model or which data produced the hashes (see
+//! `tests/refuses_to_earn_on_a_placeholder_backend.rs`). So the binding has to be
+//! made here, before the first step:
+//!
+//!   - the checkpoint bytes must hash to `model_start_hash`;
+//!   - the corpus manifest must hash to `dataset_hash`;
+//!   - the architecture must be one this worker can actually train.
+//!
+//! Any of those failing is a REFUSAL, never a fallback. A worker that quietly
+//! trained a different model would still be paid, which is precisely the failure
+//! mode being designed out.
+
+use std::path::{Path, PathBuf};
+
+use sha3::{Digest, Keccak256};
+
+use crate::types::B256;
+
+/// The model architecture a job asks for.
+///
+/// Resolved from the NAT sidecar that accompanies the checkpoint, NOT guessed
+/// from tensor shapes — a guess that lands on the wrong arm would train the wrong
+/// thing and still commit valid-looking roots.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Architecture {
+    /// NAT's zone-partitioned LM (`nat_candle::autoreg::AutoregLm`). The hidden
+    /// width is split across declared zones; attention cores for HP/PF/CX, causal
+    /// SSM recurrence for SM/CB, and `MX` is a non-learned harness that is not
+    /// trained at all.
+    ZonePartitioned,
+    /// The dense per-position autoregressive LM
+    /// (`nat_candle::autoreg::AutoregDenseLm`). Same embedding and readout as the
+    /// zone arm, a single causal attention block plus FFN instead of zones — this
+    /// is the H-01 equal-parameter baseline, and a perfectly good standalone
+    /// training target in its own right.
+    Dense,
+}
+
+impl Architecture {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Architecture::ZonePartitioned => "zone-partitioned",
+            Architecture::Dense => "dense",
+        }
+    }
+}
+
+/// Why a job could not be resolved to something this worker may honestly train.
+///
+/// Every variant is a refusal. There is deliberately no "close enough" path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ArtifactError {
+    /// The artifact is not on this host. Not a failure of honesty — the worker
+    /// simply has not fetched it yet — but still a refusal to train.
+    Missing { what: &'static str, path: PathBuf },
+    /// The bytes are present but do not hash to what the chain committed. This is
+    /// the serious one: it means the worker would be training a DIFFERENT model or
+    /// a DIFFERENT corpus than the job it is being paid for.
+    HashMismatch {
+        what: &'static str,
+        expected: String,
+        actual: String,
+    },
+    /// The sidecar could not be read or parsed, so the architecture is unknown.
+    /// Unknown is refused rather than defaulted — defaulting to dense would
+    /// silently train the H-01 baseline for a zone job.
+    UnreadableSidecar(String),
+    /// The job asks for an architecture this worker cannot train.
+    ///
+    /// Notably **mixture-of-experts**: NAT rejected learned expert routing in
+    /// ADR-0001 ("loses interpretability") and `02_ARCHITECTURE.md` §11 makes
+    /// "declared zone partitioning … versus learned-from-scratch expert routing"
+    /// the novelty wedge. There is no MoE trainer in NAT — no gate network, no
+    /// expert dispatch, no load-balancing loss, no capacity factor. Training an
+    /// MoE job on the dense arm would produce a real-looking model that is not the
+    /// requested architecture, so it is refused by name.
+    UnsupportedArchitecture(String),
+}
+
+impl std::fmt::Display for ArtifactError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ArtifactError::Missing { what, path } => {
+                write!(f, "{what} not present on this host at {}", path.display())
+            }
+            ArtifactError::HashMismatch {
+                what,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "{what} does not match the on-chain commitment: job expects {expected}, \
+                 the bytes on disk hash to {actual}. Refusing to train — committing \
+                 epochs from this would be paid work on the wrong artifact."
+            ),
+            ArtifactError::UnreadableSidecar(e) => {
+                write!(f, "cannot determine the job's architecture from its sidecar: {e}")
+            }
+            ArtifactError::UnsupportedArchitecture(a) => write!(
+                f,
+                "architecture '{a}' is not trainable by this worker. Refusing rather \
+                 than substituting a different architecture, which would train a real \
+                 model that is not the one the job asked for."
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ArtifactError {}
+
+/// A job's artifacts, resolved and VERIFIED against the on-chain commitments.
+///
+/// Holding one of these is the evidence that lets `honors_job_spec()` answer
+/// `true`: it cannot be constructed without both hashes matching.
+#[derive(Debug, Clone)]
+pub struct JobArtifacts {
+    /// Directory holding `model.safetensors` — what `nat_candle`'s
+    /// `AutoregLm::load` / `AutoregDenseLm::load` read.
+    pub checkpoint_dir: PathBuf,
+    /// The `nat-data` shard manifest describing the corpus.
+    pub manifest_path: PathBuf,
+    pub architecture: Architecture,
+    /// The verified hashes, retained so the provenance record can state exactly
+    /// what was trained rather than restating what was requested.
+    pub model_start_hash: B256,
+    pub dataset_hash: B256,
+}
+
+/// Where a worker keeps fetched artifacts. Content-addressed by the on-chain
+/// hash, so two jobs naming the same model share one copy and a corrupted fetch
+/// cannot masquerade as a good one.
+#[derive(Debug, Clone)]
+pub struct ArtifactStore {
+    root: PathBuf,
+}
+
+impl ArtifactStore {
+    pub fn new(root: impl Into<PathBuf>) -> Self {
+        Self { root: root.into() }
+    }
+
+    /// `<root>/models/<hex>/` — the directory `nat_candle` loads from.
+    pub fn model_dir(&self, hash: &B256) -> PathBuf {
+        self.root.join("models").join(hex_of(hash))
+    }
+
+    /// `<root>/datasets/<hex>.json` — a `nat_data::manifest::ShardManifest`.
+    pub fn manifest_path(&self, hash: &B256) -> PathBuf {
+        self.root
+            .join("datasets")
+            .join(format!("{}.json", hex_of(hash)))
+    }
+
+    /// `<root>/models/<hex>/sidecar.nat.json` — the zone graph. Its presence is
+    /// what distinguishes a zone-partitioned job from a dense one.
+    pub fn sidecar_path(&self, hash: &B256) -> PathBuf {
+        self.model_dir(hash).join("sidecar.nat.json")
+    }
+
+    /// Resolve and VERIFY both artifacts for a job.
+    ///
+    /// Returns `Ok` only when the checkpoint bytes hash to `model_start_hash`, the
+    /// manifest bytes hash to `dataset_hash`, and the architecture is trainable.
+    /// There is no partial success: a caller holding `JobArtifacts` may train.
+    pub fn resolve(
+        &self,
+        model_start_hash: &B256,
+        dataset_hash: &B256,
+    ) -> Result<JobArtifacts, ArtifactError> {
+        let checkpoint_dir = self.model_dir(model_start_hash);
+        let weights = checkpoint_dir.join("model.safetensors");
+        verify_file("model checkpoint", &weights, model_start_hash)?;
+
+        let manifest_path = self.manifest_path(dataset_hash);
+        verify_file("dataset manifest", &manifest_path, dataset_hash)?;
+
+        let architecture = read_architecture(&self.sidecar_path(model_start_hash))?;
+
+        Ok(JobArtifacts {
+            checkpoint_dir,
+            manifest_path,
+            architecture,
+            model_start_hash: *model_start_hash,
+            dataset_hash: *dataset_hash,
+        })
+    }
+}
+
+/// Keccak-256 of a file's bytes, compared against the on-chain commitment.
+///
+/// Keccak (not SHA-256) so the digest is reproducible by an on-chain verifier
+/// with no extra precompile — the same hash family the rest of the chain uses.
+fn verify_file(what: &'static str, path: &Path, expected: &B256) -> Result<(), ArtifactError> {
+    let bytes = std::fs::read(path).map_err(|_| ArtifactError::Missing {
+        what,
+        path: path.to_path_buf(),
+    })?;
+    let actual = keccak_of(&bytes);
+    if &actual != expected {
+        return Err(ArtifactError::HashMismatch {
+            what,
+            expected: hex_of(expected),
+            actual: hex_of(&actual),
+        });
+    }
+    Ok(())
+}
+
+/// Determine the architecture from the sidecar next to the checkpoint.
+///
+/// No sidecar means a plain dense checkpoint — that is a real, supported job
+/// shape, not a fallback: `AutoregDenseLm` is a standalone trainer as well as the
+/// H-01 baseline. A sidecar that names an architecture we cannot train is refused
+/// by name rather than approximated.
+fn read_architecture(sidecar: &Path) -> Result<Architecture, ArtifactError> {
+    let raw = match std::fs::read_to_string(sidecar) {
+        Ok(r) => r,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Architecture::Dense),
+        Err(e) => return Err(ArtifactError::UnreadableSidecar(e.to_string())),
+    };
+
+    let doc: serde_json::Value = serde_json::from_str(&raw)
+        .map_err(|e| ArtifactError::UnreadableSidecar(e.to_string()))?;
+
+    // An explicit architecture wins, so a sidecar can name something we must
+    // refuse (MoE) instead of being read as "has zones, therefore zone-trainable".
+    if let Some(kind) = doc.get("architecture").and_then(|v| v.as_str()) {
+        return match kind {
+            "zone-partitioned" | "nat-zone" => Ok(Architecture::ZonePartitioned),
+            "dense" => Ok(Architecture::Dense),
+            other => Err(ArtifactError::UnsupportedArchitecture(other.to_string())),
+        };
+    }
+
+    // Otherwise infer from the zone graph: a NAT sidecar with declared zones is a
+    // zone-partitioned model.
+    match doc.get("zones").and_then(|z| z.as_array()) {
+        Some(zones) if !zones.is_empty() => Ok(Architecture::ZonePartitioned),
+        _ => Ok(Architecture::Dense),
+    }
+}
+
+fn keccak_of(bytes: &[u8]) -> B256 {
+    let mut h = Keccak256::new();
+    h.update(bytes);
+    let out = h.finalize();
+    let mut arr = [0u8; 32];
+    arr.copy_from_slice(&out);
+    B256::from(arr)
+}
+
+fn hex_of(h: &B256) -> String {
+    format!("0x{}", hex::encode(h.as_bytes()))
+}
+
+#[cfg(test)]
+mod tests {
+    include!("job_artifacts_tests.rs");
+}
