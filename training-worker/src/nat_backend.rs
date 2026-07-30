@@ -182,6 +182,12 @@ fn build_model(
                 seq_len: shape.seq_len,
                 d: shape.d,
                 tau: 1.0,
+                // NAT ADR-0012: guarantees every zone a share of the merge, so
+                // none can be driven to exactly zero and starve of gradient. The
+                // 64M checkpoint was measured with PF at share 0.000000 — a
+                // dead zone contributes nothing to the federated aggregate while
+                // the worker is still paid for the step.
+                merge_floor: nat_candle::autoreg::DEFAULT_MERGE_FLOOR,
                 seed: p.seed,
             };
             Model::Zone(Box::new(AutoregLm::new_with_dtype(&cfg, dtype)?))

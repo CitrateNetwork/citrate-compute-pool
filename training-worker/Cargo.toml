@@ -41,14 +41,14 @@ citrate-fed-types = { git = "https://github.com/CitrateNetwork/citrate-fed-types
 # NAT — the model the co-op trains. Pinned by rev: the parameter NAMES are the
 # contract `zone_delta` attributes against, so an unpinned bump could silently
 # reroute a zone's delta.
-nat-candle = { git = "ssh://git@github.com/CitrateNetwork/nat.git", rev = "870863c4", optional = true }
-nat-types  = { git = "ssh://git@github.com/CitrateNetwork/nat.git", rev = "870863c4", optional = true }
-nat-data   = { git = "ssh://git@github.com/CitrateNetwork/nat.git", rev = "870863c4", optional = true }
+nat-candle = { git = "ssh://git@github.com/CitrateNetwork/nat.git", rev = "1e9e2ad0", optional = true }
+nat-types  = { git = "ssh://git@github.com/CitrateNetwork/nat.git", rev = "1e9e2ad0", optional = true }
+nat-data   = { git = "ssh://git@github.com/CitrateNetwork/nat.git", rev = "1e9e2ad0", optional = true }
 # The federated seam (signing, gather, settlement). Deliberately a SEPARATE
 # feature from `nat`: it pulls no Candle, so a node can sign and settle
 # contributions without building the trainer.
-nat-federated = { git = "ssh://git@github.com/CitrateNetwork/nat.git", rev = "870863c4", optional = true }
-nat-train  = { git = "ssh://git@github.com/CitrateNetwork/nat.git", rev = "870863c4", optional = true }
+nat-federated = { git = "ssh://git@github.com/CitrateNetwork/nat.git", rev = "1e9e2ad0", optional = true }
+nat-train  = { git = "ssh://git@github.com/CitrateNetwork/nat.git", rev = "1e9e2ad0", optional = true }
 parking_lot = { workspace = true }
 ethereum-types = "0.14"
 
