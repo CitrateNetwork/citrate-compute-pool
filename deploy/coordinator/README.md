@@ -10,18 +10,52 @@ running Caddy, and the ALF planset designates it for exactly these endpoints
 
 Idempotent. Re-running rebuilds, restarts, and skips artifacts already staged.
 
-## Two things a human must do first
+## Status: DEPLOYED 2026-07-30
 
-**1. Open SSH on the droplet.** Port 22 is currently filtered by a host firewall
-(no DigitalOcean firewall is attached, so it is `ufw` on the box). From the
-DigitalOcean web console → Droplets → citrate-alf-gateway → Access → Console:
+Live and verified end to end — a worker with an empty store staged 203 MB from
+the mirror and trained the real 64M checkpoint, producing an `epoch_root`
+identical to two prior local runs.
+
+| | |
+|---|---|
+| coordinator | https://coordinator.citrate.ai/v1/status |
+| mirror | https://mirror.citrate.ai |
+| TLS | Let's Encrypt, both names |
+
+**The corpus was already on the droplet.** `citrate-alf-gateway` has a 200 GiB
+volume (`nat-corpus-backup`) carrying corpus-v6, byte-verified identical to the
+local copy by sha256 on manifest and sampled shards. It is mounted at
+`/mnt/nat-corpus` (in `/etc/fstab`, `nofail`) and **symlinked** into the store
+layout rather than copied, so the mirror serves 2.4 GB that never had to be
+uploaded and does not consume the 80 GB boot disk. Only the 123 MB checkpoint
+was transferred.
+
+If that volume is ever detached, the dataset symlink dangles and every fetch
+404s — the coordinator would then decline jobs rather than serve wrong bytes,
+which is the right failure, but the cause would not be obvious from the logs.
+
+## Recovering SSH, if it is ever lost again
+
+Port 22 was firewalled with no working web console. What worked, entirely from
+the CLI:
 
 ```sh
-ufw allow 22/tcp && ufw reload && ufw status
+doctl compute droplet-action snapshot 583045283 --snapshot-name pre-rebuild --wait
+doctl compute droplet-action rebuild 583045283 --image ubuntu-24-04-x64 --wait
 ```
 
+A rebuild restores a clean image (ufw inactive) and re-injects the droplet's
+registered SSH keys, **keeps the same IP** so DNS needs no change, and **does
+not touch attached volumes** — the corpus survived it. Snapshot first; that is
+what makes it reversible. The host key changes, so clear the stale entry:
+`ssh-keygen -R <ip>`.
+
+## Prerequisites (both now satisfied — kept for a rebuild elsewhere)
+
+**1. SSH reachable.** See the recovery section above if it is not.
+
 **2. Two DNS records, in Cloudflare.** `citrate.ai` is on Cloudflare, not DO, so
-this cannot be scripted from here.
+this cannot be scripted from here. Both records now exist.
 
 | type | name | content | proxy |
 |---|---|---|---|

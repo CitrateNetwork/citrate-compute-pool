@@ -20,9 +20,18 @@ NAT_DIR="${NAT_DIR:-$(cd "$REPO_ROOT/../nat" && pwd)}"
 say() { printf '\n\033[1;32m==>\033[0m %s\n' "$*"; }
 
 # ── 1. Preconditions, checked before anything is changed ─────────────────
-say "checking the droplet"
+say "checking the droplet, installing Caddy if absent"
 $SSH 'set -e
-  command -v caddy >/dev/null || { echo "caddy is not installed"; exit 1; }
+  if ! command -v caddy >/dev/null; then
+    echo "  installing caddy"
+    apt-get update -qq
+    apt-get install -y -qq debian-keyring debian-archive-keyring apt-transport-https curl
+    curl -1sLf https://dl.cloudsmith.io/public/caddy/stable/gpg.key \
+      | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+    curl -1sLf https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt \
+      | tee /etc/apt/sources.list.d/caddy-stable.list >/dev/null
+    apt-get update -qq && apt-get install -y -qq caddy
+  fi
   free_kb=$(df --output=avail / | tail -1)
   [ "$free_kb" -gt 8000000 ] || { echo "less than 8 GB free on /"; exit 1; }
   echo "  ok: caddy present, $(( free_kb / 1024 / 1024 )) GB free, $(uname -m)"'
@@ -33,6 +42,10 @@ $SSH 'set -e
   id -u citrate >/dev/null 2>&1 || useradd --system --no-create-home --shell /usr/sbin/nologin citrate
   mkdir -p /var/lib/citrate-coordinator /var/lib/citrate-artifacts /var/log/caddy
   chown -R citrate:citrate /var/lib/citrate-coordinator
+  # Caddy runs as `caddy`, not root. Without this its log writer cannot open the
+  # file and the whole config reload fails — while `systemctl reload` still
+  # exits 0 and Caddy keeps serving the previous config. Cost an hour once.
+  chown -R caddy:caddy /var/log/caddy
   # The mirror is read-only to the world and writable only by root (rsync target).
   chmod 755 /var/lib/citrate-artifacts'
 
@@ -51,15 +64,24 @@ rsync -az --delete \
   --exclude target/ --exclude .git/ --exclude deploy/ \
   "$REPO_ROOT/training-coordinator" "$REPO_ROOT/training-worker" \
   "$REPO_ROOT/pool-coordinator" "$REPO_ROOT/Cargo.toml" "$REPO_ROOT/Cargo.lock" \
-  "$REPO_ROOT/rust-toolchain.toml" \
+  "$REPO_ROOT/rust-toolchain.toml" "$REPO_ROOT/.cargo" \
   "root@${HOST}:/opt/citrate-compute-pool/"
 
 say "building on the droplet (x86_64 — this takes a few minutes the first time)"
 # Only the coordinator. The worker's `nat` feature pulls candle and is not
 # needed here: this box hands out work, it does not train.
-$SSH 'set -e
+#
+# The private deps are fetched through a FORWARDED ssh agent (-A), so no deploy
+# key or token is ever written to the droplet — the credential lives for exactly
+# the length of this command and dies with the connection. The `insteadOf`
+# rewrite is what lets an https:// dependency URL travel over that agent.
+ssh -A -o StrictHostKeyChecking=accept-new "root@${HOST}" 'set -e
+  git config --global url."ssh://git@github.com/".insteadOf "https://github.com/"
+  ssh-keyscan -t ed25519 github.com >> /root/.ssh/known_hosts 2>/dev/null || true
+  sort -u /root/.ssh/known_hosts -o /root/.ssh/known_hosts 2>/dev/null || true
   cd /opt/citrate-compute-pool
   export PATH=/root/.cargo/bin:$PATH
+  export CARGO_NET_GIT_FETCH_WITH_CLI=true
   cargo build --release -p citrate-training-coordinator
   install -m 0755 target/release/citrate-training-coordinator /usr/local/bin/
   echo "  installed: $(/usr/local/bin/citrate-training-coordinator --help 2>&1 | head -1 || echo built)"'
@@ -90,8 +112,21 @@ $SSH 'set -e
     cat /tmp/citrate-coordinator.caddy >> /etc/caddy/Caddyfile
     echo "  appended"
   fi
+  # `caddy validate` checks SYNTAX only. It does not test whether the running
+  # process can actually apply the config — not file permissions, not ports.
   caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
-  systemctl reload caddy'
+  systemctl reload caddy
+  # And `systemctl reload` exits 0 even when Caddy rejects the new config over
+  # its admin API and carries on serving the OLD one. That failure is entirely
+  # silent, so the reload is verified rather than assumed: no 443 listener means
+  # the config did not take.
+  sleep 3
+  if ! ss -tln | grep -q ":443 "; then
+    echo "  caddy did not bind 443 after reload — the config was rejected:"
+    journalctl -u caddy -n 20 --no-pager | grep -i error | tail -5
+    exit 1
+  fi
+  echo "  reload verified (443 bound)"'
 
 # ── 6. Artifacts ─────────────────────────────────────────────────────────
 # rsync skips bytes already present, so a re-run costs a directory listing
