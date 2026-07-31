@@ -132,6 +132,19 @@ impl Model {
         }
     }
 
+    /// Per-zone merge shares, or `None` for the dense arm (which has no zones).
+    ///
+    /// This is what ADR-0012 says must be recorded alongside the loss. The dead
+    /// PF zone was not subtle or rare — it was *unobservable*, and it survived an
+    /// entire ablation ladder because nothing in the protocol asked which zones
+    /// were still training.
+    fn zone_merge_weights(&self, ids: &candle_core::Tensor) -> anyhow::Result<Option<Vec<f32>>> {
+        Ok(match self {
+            Model::Zone(m) => Some(m.zone_merge_weights(ids)?),
+            Model::Dense(_) => None,
+        })
+    }
+
     fn train_one_pass(
         &mut self,
         ids: &candle_core::Tensor,
@@ -266,6 +279,51 @@ impl NatBackend {
     pub fn load_manifest(&self) -> anyhow::Result<CorpusManifest> {
         let raw = std::fs::read_to_string(&self.artifacts.manifest_path)?;
         Ok(serde_json::from_str(&raw)?)
+    }
+
+    /// Per-zone merge shares, measured on a **fixed** corpus slice.
+    ///
+    /// Fixed on purpose: shares measured on whatever the last step happened to
+    /// train on would move with the data as well as with the model, and the
+    /// question being asked — "is this zone still getting gradient?" — is about
+    /// the model. Using shard 0 every time makes successive samples comparable,
+    /// which is what turns a series of them into a trajectory.
+    ///
+    /// Returns `None` for the dense arm.
+    pub fn zone_shares(&self) -> anyhow::Result<Option<Vec<(String, f32)>>> {
+        let manifest = self.load_manifest()?;
+        let shards = self.read_and_verify_shards(&manifest, 0, 0)?;
+        let model = self.model.lock();
+        let (ids, _t) = nat_candle::corpus::next_byte_windows(
+            &shards,
+            self.artifacts.shape.seq_len,
+            // A small batch: this is a measurement, not a training step, and it
+            // runs at every checkpoint.
+            self.params.batch_size.min(8).max(1),
+            model.device(),
+        )?;
+        let Some(w) = model.zone_merge_weights(&ids)? else {
+            return Ok(None);
+        };
+        // The five learned zones, in the order `AutoregConfig` declares them.
+        const ZONES: [&str; 5] = ["SM", "CB", "HP", "PF", "CX"];
+        Ok(Some(
+            ZONES
+                .iter()
+                .zip(w.iter())
+                .map(|(z, s)| ((*z).to_string(), *s))
+                .collect(),
+        ))
+    }
+
+    /// The share a zone is GUARANTEED by the merge floor alone.
+    ///
+    /// A zone sitting at this value has no learned contribution — the floor is
+    /// carrying it entirely. That is the operational definition of a dead zone
+    /// once ADR-0012's floor is in place: not "share zero" (the floor makes that
+    /// impossible) but "share indistinguishable from the floor".
+    pub fn floor_share(&self) -> f64 {
+        nat_candle::autoreg::DEFAULT_MERGE_FLOOR / 5.0
     }
 
     /// The corpus `data_quality` for `nat_train::StepContribution`.
