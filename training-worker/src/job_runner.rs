@@ -83,6 +83,23 @@ pub struct TrainingJobPayload {
     pub max_windows: usize,
     pub shards_per_step: usize,
     pub seed: u64,
+    /// Sample zone shares every N steps. 0 disables sampling entirely, which
+    /// should only ever be used for the dense arm.
+    #[serde(default = "default_share_every")]
+    pub share_every: u32,
+    /// Consecutive dead samples before the run is abandoned. One sample is not
+    /// evidence — zones move around early in training, and the 400-step probes
+    /// in the H-01 scope showed a severe transient that RECOVERED. What is fatal
+    /// is a zone that stays at the floor.
+    #[serde(default = "default_dead_zone_patience")]
+    pub dead_zone_patience: u32,
+}
+
+fn default_share_every() -> u32 {
+    1
+}
+fn default_dead_zone_patience() -> u32 {
+    5
 }
 
 pub const TASK_TRAIN: &str = "train";
@@ -97,6 +114,13 @@ impl TrainingJobPayload {
             seed: self.seed,
         }
     }
+}
+
+/// Per-zone merge shares at one point in the run.
+#[derive(Clone, Debug, Serialize)]
+pub struct ShareSample {
+    pub step: u32,
+    pub shares: Vec<(String, f32)>,
 }
 
 /// One step, as the challenger will re-derive it.
@@ -133,6 +157,9 @@ pub struct TrainingJobResult {
     /// Per-zone gradient L2 over the job, so a dead zone (ADR-0012) is visible in
     /// the result rather than discovered in a checkpoint months later.
     pub zone_l2: Vec<(String, f64)>,
+    /// The zone-share trajectory — ADR-0012's first-class output. Empty for the
+    /// dense arm, which has no zones.
+    pub share_trace: Vec<ShareSample>,
     pub seconds: f64,
 }
 
@@ -166,6 +193,19 @@ pub enum RunError {
     Training(String),
     #[error("could not stage artifacts: {0}")]
     Fetch(String),
+    #[error(
+        "zone {zone} sat at the merge floor ({share:.6} vs floor {floor:.6}) for {samples} \
+         consecutive samples, through step {step}. Abandoning: a run with a dead zone \
+         produces a number nobody can quote, so continuing would burn GPU to manufacture \
+         something unusable."
+    )]
+    DeadZone {
+        zone: String,
+        share: f32,
+        floor: f64,
+        samples: u32,
+        step: u32,
+    },
 }
 
 impl From<FetchError> for RunError {
@@ -379,6 +419,10 @@ impl NatJobRunner {
         let mut steps = Vec::with_capacity(payload.steps as usize);
         let mut commits = Vec::with_capacity(payload.steps as usize);
         let mut zone_l2: Vec<(String, f64)> = Vec::new();
+        let mut share_trace: Vec<ShareSample> = Vec::new();
+        // Consecutive dead samples, per zone.
+        let mut dead_run: std::collections::BTreeMap<String, u32> = Default::default();
+        let floor = backend.floor_share();
 
         for step in 0..payload.steps {
             let result = backend
@@ -401,6 +445,36 @@ impl NatJobRunner {
                 commitment,
                 post_weights: result.post_weights_hash,
             });
+            // ── ADR-0012: record which zones are actually training ──────────
+            //
+            // Alongside the loss, not as a diagnostic to consult when something
+            // looks wrong. The dead PF zone survived an entire ladder because
+            // nothing asked.
+            if payload.share_every > 0 && step % payload.share_every == 0 {
+                if let Some(shares) = backend
+                    .zone_shares()
+                    .map_err(|e| RunError::Training(e.to_string()))?
+                {
+                    for (zone, share) in &shares {
+                        // "Dead" means indistinguishable from what the floor
+                        // guarantees — the floor is carrying the zone entirely.
+                        let dead = (*share as f64) <= floor * 1.05;
+                        let run = dead_run.entry(zone.clone()).or_insert(0);
+                        *run = if dead { *run + 1 } else { 0 };
+                        if *run >= payload.dead_zone_patience {
+                            return Err(RunError::DeadZone {
+                                zone: zone.clone(),
+                                share: *share,
+                                floor,
+                                samples: *run,
+                                step,
+                            });
+                        }
+                    }
+                    share_trace.push(ShareSample { step, shares });
+                }
+            }
+
             // Chained: step s's post-weights are step s+1's prev-weights, which is
             // what makes a mid-run substitution detectable.
             prev = result.post_weights_hash;
@@ -423,6 +497,7 @@ impl NatJobRunner {
             final_weights: prev,
             data_quality_raw: data_quality.raw(),
             zone_l2,
+            share_trace,
             seconds: started.elapsed().as_secs_f64(),
         })
     }

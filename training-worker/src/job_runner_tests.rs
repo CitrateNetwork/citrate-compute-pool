@@ -170,6 +170,7 @@ fn the_result_reports_per_step_commitments_and_not_only_the_root() {
         final_weights: B256::repeat_byte(8),
         data_quality_raw: 65536,
         zone_l2: vec![("bucket_0".into(), 1.5)],
+        share_trace: vec![],
         seconds: 1.0,
     };
     let v = serde_json::to_value(&res).unwrap();
@@ -278,4 +279,84 @@ async fn an_unreachable_mirror_declines_the_job() {
         .with_mirror("http://127.0.0.1:1");
     let e = r.run(&job_with(payload())).await.unwrap_err();
     assert!(matches!(e, RunError::Fetch(_)), "got {e:?}");
+}
+
+// ── ADR-0012: recording which zones train, and abandoning runs where one does not
+
+/// The floor guarantees each of five zones `merge_floor / 5`. A zone sitting at
+/// that value has NO learned contribution — the floor is carrying it entirely,
+/// which is what "dead" means once ADR-0012's floor exists. It is no longer
+/// "share zero"; the floor makes zero impossible, which is precisely why the
+/// detector cannot look for zero.
+#[test]
+fn the_dead_zone_threshold_is_the_floor_not_zero() {
+    let floor = nat_candle::autoreg::DEFAULT_MERGE_FLOOR / 5.0;
+    assert!((floor - 0.002).abs() < 1e-9, "floor share is {floor}");
+    // The shipped 64M checkpoint had PF at exactly 0.000000 — below the floor,
+    // because it predates the floor. It must still register as dead.
+    assert!(0.0_f64 <= floor * 1.05);
+    // And a zone the router genuinely favours must NOT register as dead.
+    assert!(!(0.38_f64 <= floor * 1.05), "CB at 0.38 must not read as dead");
+}
+
+/// One bad sample is not evidence. The H-01 scope's own 400-step probes showed a
+/// severe early transient (CX to 0.001) that RECOVERED — aborting on that would
+/// throw away good runs.
+#[test]
+fn a_single_dead_sample_does_not_abort_by_default() {
+    let p: TrainingJobPayload = serde_json::from_value(payload()).unwrap();
+    assert!(p.dead_zone_patience > 1, "patience must tolerate a transient");
+}
+
+/// Sampling is on by default. The entire lesson of ADR-0012 is that the failure
+/// was unobservable, so a run that records nothing is the default we must not have.
+#[test]
+fn share_recording_is_on_by_default() {
+    let p: TrainingJobPayload = serde_json::from_value(payload()).unwrap();
+    assert_eq!(p.share_every, 1);
+}
+
+/// But it must be disableable for the dense arm, which has no zones to record.
+#[test]
+fn share_recording_can_be_disabled_for_the_dense_arm() {
+    let mut v = payload();
+    v["share_every"] = serde_json::json!(0);
+    let p: TrainingJobPayload = serde_json::from_value(v).unwrap();
+    assert_eq!(p.share_every, 0);
+}
+
+/// The abort message has to explain the consequence. A volunteer whose two-day
+/// job just died deserves to know it was the right outcome, not a crash.
+#[test]
+fn the_dead_zone_error_explains_why_the_run_was_abandoned() {
+    let e = RunError::DeadZone {
+        zone: "PF".into(),
+        share: 0.002,
+        floor: 0.002,
+        samples: 5,
+        step: 400,
+    };
+    let s = e.to_string();
+    assert!(s.contains("PF"));
+    assert!(s.contains("merge floor"));
+    assert!(s.contains("nobody can quote"), "must say why abandoning is right: {s}");
+}
+
+/// The trajectory is part of the signed result, not a local log. A challenger
+/// re-running the job must be able to see the same zone history.
+#[test]
+fn the_share_trace_is_carried_in_the_submitted_result() {
+    let v = serde_json::to_value(TrainingJobResult {
+        job: "t".into(), task: TASK_TRAIN, backend: "candle-cuda", commitment_grid: "q16",
+        epoch: 0, worker_shard: 0, steps: vec![], epoch_root: B256::zero(),
+        final_weights: B256::zero(), data_quality_raw: 0, zone_l2: vec![],
+        share_trace: vec![ShareSample {
+            step: 0,
+            shares: vec![("PF".into(), 0.0027), ("SM".into(), 0.61)],
+        }],
+        seconds: 1.0,
+    })
+    .unwrap();
+    assert_eq!(v["share_trace"][0]["shares"][0][0], "PF");
+    assert_eq!(v["share_trace"][0]["step"], 0);
 }
