@@ -47,14 +47,14 @@ citrate-fed-types = { git = "https://github.com/CitrateNetwork/citrate-fed-types
 # NAT — the model the co-op trains. Pinned by rev: the parameter NAMES are the
 # contract `zone_delta` attributes against, so an unpinned bump could silently
 # reroute a zone's delta.
-nat-candle = { git = "ssh://git@github.com/CitrateNetwork/nat.git", rev = "1e9e2ad0", optional = true }
-nat-types  = { git = "ssh://git@github.com/CitrateNetwork/nat.git", rev = "1e9e2ad0", optional = true }
-nat-data   = { git = "ssh://git@github.com/CitrateNetwork/nat.git", rev = "1e9e2ad0", optional = true }
+nat-candle = { git = "ssh://git@github.com/CitrateNetwork/nat.git", rev = "52dd6b0b", optional = true }
+nat-types  = { git = "ssh://git@github.com/CitrateNetwork/nat.git", rev = "52dd6b0b", optional = true }
+nat-data   = { git = "ssh://git@github.com/CitrateNetwork/nat.git", rev = "52dd6b0b", optional = true }
 # The federated seam (signing, gather, settlement). Deliberately a SEPARATE
 # feature from `nat`: it pulls no Candle, so a node can sign and settle
 # contributions without building the trainer.
-nat-federated = { git = "ssh://git@github.com/CitrateNetwork/nat.git", rev = "1e9e2ad0", optional = true }
-nat-train  = { git = "ssh://git@github.com/CitrateNetwork/nat.git", rev = "1e9e2ad0", optional = true }
+nat-federated = { git = "ssh://git@github.com/CitrateNetwork/nat.git", rev = "52dd6b0b", optional = true }
+nat-train  = { git = "ssh://git@github.com/CitrateNetwork/nat.git", rev = "52dd6b0b", optional = true }
 parking_lot = { workspace = true }
 ethereum-types = "0.14"
 
@@ -125,6 +125,13 @@ nat = ["dep:nat-candle", "dep:nat-types", "dep:nat-data", "dep:candle-core", "fe
 federated = ["dep:nat-federated", "dep:nat-train", "dep:nat-types"]
 # NAT on CUDA. Additive over `nat`.
 nat-cuda = ["nat", "nat-candle/cuda"]
+# Apple Silicon. Needs nat >= 52dd6b0b: earlier revisions have no `metal`
+# feature at all, and the one before that resolved a fresh Metal device per call
+# — which candle treats as a DIFFERENT device, so the first forward pass died on
+# a mismatch whose two printed ids were identical. Measured on an M2 Max: f32 is
+# run-to-run deterministic, bf16 is NOT, so Apple hardware should be pinned to
+# f32 for any work that will be verified by recomputation.
+nat-metal = ["nat", "nat-candle/metal"]
 
 [dev-dependencies]
 tokio = { workspace = true }
