@@ -4,7 +4,7 @@
     "requires": "h01",
     "payload": {
       "task": "train",
-      "model_start_hash": "0x2e67547b5e893a413f44acfa9c8c0eb7be1931096683fbd79d1d6da433754d08",
+      "model_start_hash": "0x142a2ee0400a64d5d6aba6fe7cce5b0b2c7b4c408c4c2512718395663a18a9c4",
       "dataset_hash": "0x027bcde07e148979a854b6e1d042299190f482d1ba5f4c6b2f17afc84da8e2fc",
       "commitment_grid": "q16",
       "epoch": 0,
@@ -18,7 +18,7 @@
       "share_every": 50,
       "dead_zone_patience": 5
     },
-    "lease_secs": 3723,
+    "lease_secs": 3741,
     "max_attempts": 3
   }
 ,
@@ -27,7 +27,7 @@
     "requires": "h01",
     "payload": {
       "task": "train",
-      "model_start_hash": "0x70a129d4a9ba2e47d9bb529d20222e4a1d1077c9c90cc81358d4c0a44c608635",
+      "model_start_hash": "0xc2eb76f18a4af428375f9f7c9b40835022b617ba87d9939328e66d72e6776ced",
       "dataset_hash": "0x027bcde07e148979a854b6e1d042299190f482d1ba5f4c6b2f17afc84da8e2fc",
       "commitment_grid": "q16",
       "epoch": 0,
@@ -41,7 +41,7 @@
       "share_every": 50,
       "dead_zone_patience": 5
     },
-    "lease_secs": 3723,
+    "lease_secs": 3741,
     "max_attempts": 3
   }
 ,
@@ -50,7 +50,7 @@
     "requires": "h01",
     "payload": {
       "task": "train",
-      "model_start_hash": "0x28109cd931f78c174aa4aa893657cadc1e5d5772b9f2030ef56ef945708d1bc6",
+      "model_start_hash": "0x5869e7b5a72a4faf7fe682b0bd6bea0a3ab8618c1a6e91181f2466c172862c1e",
       "dataset_hash": "0x027bcde07e148979a854b6e1d042299190f482d1ba5f4c6b2f17afc84da8e2fc",
       "commitment_grid": "q16",
       "epoch": 0,
@@ -64,7 +64,7 @@
       "share_every": 50,
       "dead_zone_patience": 5
     },
-    "lease_secs": 3723,
+    "lease_secs": 3741,
     "max_attempts": 3
   }
 ,
@@ -73,7 +73,7 @@
     "requires": "h01",
     "payload": {
       "task": "train",
-      "model_start_hash": "0x2835768a52d7c85c64c1cdadb6d1c094ceb8b2ae83e3c8f68860641c2c202bcf",
+      "model_start_hash": "0x0cac6693289569cf7e1e152de588affa4c586f67dca00b6c344150c09863c41d",
       "dataset_hash": "0x027bcde07e148979a854b6e1d042299190f482d1ba5f4c6b2f17afc84da8e2fc",
       "commitment_grid": "q16",
       "epoch": 0,
@@ -87,7 +87,7 @@
       "share_every": 0,
       "dead_zone_patience": 5
     },
-    "lease_secs": 3723,
+    "lease_secs": 3741,
     "max_attempts": 3
   }
 ,
@@ -96,7 +96,7 @@
     "requires": "h01",
     "payload": {
       "task": "train",
-      "model_start_hash": "0x885e398edde585e8fe99198a004dbf19a479525521a7f0770d2d54d8b6033bec",
+      "model_start_hash": "0x83c611beb38e3c670f2e7bb0f8e237abda471da0a6ae8c61ef79158ba8c7648e",
       "dataset_hash": "0x027bcde07e148979a854b6e1d042299190f482d1ba5f4c6b2f17afc84da8e2fc",
       "commitment_grid": "q16",
       "epoch": 0,
@@ -110,7 +110,7 @@
       "share_every": 0,
       "dead_zone_patience": 5
     },
-    "lease_secs": 3723,
+    "lease_secs": 3741,
     "max_attempts": 3
   }
 ,
@@ -119,7 +119,7 @@
     "requires": "h01",
     "payload": {
       "task": "train",
-      "model_start_hash": "0x13487851a3e52f7eddd247690c58bb94e06ca371688330236806c32216d2897d",
+      "model_start_hash": "0x9c6ef78bf7cbf8509ed96c24bee822183b96e0ee34006db039b33fe621054d66",
       "dataset_hash": "0x027bcde07e148979a854b6e1d042299190f482d1ba5f4c6b2f17afc84da8e2fc",
       "commitment_grid": "q16",
       "epoch": 0,
@@ -133,7 +133,7 @@
       "share_every": 0,
       "dead_zone_patience": 5
     },
-    "lease_secs": 3723,
+    "lease_secs": 3741,
     "max_attempts": 3
   }
 ,
@@ -142,7 +142,7 @@
     "requires": "h01",
     "payload": {
       "task": "train",
-      "model_start_hash": "0xe45531dce04bb039f9b16ae6f7ee87a494d8781c75217ea374b9abc0ef8941b7",
+      "model_start_hash": "0xf2f9eb7a0e5723d7a3d326c97fbebc98c16b0dfe94539cc1145019d468c8f906",
       "dataset_hash": "0x027bcde07e148979a854b6e1d042299190f482d1ba5f4c6b2f17afc84da8e2fc",
       "commitment_grid": "q16",
       "epoch": 0,
@@ -156,7 +156,7 @@
       "share_every": 50,
       "dead_zone_patience": 5
     },
-    "lease_secs": 4122,
+    "lease_secs": 4179,
     "max_attempts": 3
   }
 ,
@@ -165,7 +165,7 @@
     "requires": "h01",
     "payload": {
       "task": "train",
-      "model_start_hash": "0xd6df226eaf18e05e7ea2531a71411813bfc2cfd03c7fac60f37c72549a9582bd",
+      "model_start_hash": "0x823c45062800e829589bbf5df478811b90d76514781694a9d91f7dfeef88c6b4",
       "dataset_hash": "0x027bcde07e148979a854b6e1d042299190f482d1ba5f4c6b2f17afc84da8e2fc",
       "commitment_grid": "q16",
       "epoch": 0,
@@ -179,7 +179,7 @@
       "share_every": 50,
       "dead_zone_patience": 5
     },
-    "lease_secs": 4122,
+    "lease_secs": 4179,
     "max_attempts": 3
   }
 ,
@@ -188,7 +188,7 @@
     "requires": "h01",
     "payload": {
       "task": "train",
-      "model_start_hash": "0x8cce48043788684f61881ae338191e7b3b467aa78e7ada262995d268bf39ce91",
+      "model_start_hash": "0x86327a456d510b8ad57ddaa8b7464260514d92039e3a960036c773d5521fc64f",
       "dataset_hash": "0x027bcde07e148979a854b6e1d042299190f482d1ba5f4c6b2f17afc84da8e2fc",
       "commitment_grid": "q16",
       "epoch": 0,
@@ -202,7 +202,7 @@
       "share_every": 50,
       "dead_zone_patience": 5
     },
-    "lease_secs": 4122,
+    "lease_secs": 4179,
     "max_attempts": 3
   }
 ,
@@ -211,7 +211,7 @@
     "requires": "h01",
     "payload": {
       "task": "train",
-      "model_start_hash": "0x4596f22406b4e106dcefeba91dfaa5c6ca16b0dc007c7842a011e3a79c50016d",
+      "model_start_hash": "0xd0bc3ae2296102af735e0dabe3306a584aaeb2e3c24fc0e03a17ec7524c9969e",
       "dataset_hash": "0x027bcde07e148979a854b6e1d042299190f482d1ba5f4c6b2f17afc84da8e2fc",
       "commitment_grid": "q16",
       "epoch": 0,
@@ -225,7 +225,7 @@
       "share_every": 0,
       "dead_zone_patience": 5
     },
-    "lease_secs": 4122,
+    "lease_secs": 4179,
     "max_attempts": 3
   }
 ,
@@ -234,7 +234,7 @@
     "requires": "h01",
     "payload": {
       "task": "train",
-      "model_start_hash": "0x6438a34e79b405d7caf6a8879c11062bd815824e6a30399a418cdcceedc8fa11",
+      "model_start_hash": "0x1163a5453abccde60d8beed54fd2eab317afd733ccb5a0cc8f1641c5ccb575b4",
       "dataset_hash": "0x027bcde07e148979a854b6e1d042299190f482d1ba5f4c6b2f17afc84da8e2fc",
       "commitment_grid": "q16",
       "epoch": 0,
@@ -248,7 +248,7 @@
       "share_every": 0,
       "dead_zone_patience": 5
     },
-    "lease_secs": 4122,
+    "lease_secs": 4179,
     "max_attempts": 3
   }
 ,
@@ -257,7 +257,7 @@
     "requires": "h01",
     "payload": {
       "task": "train",
-      "model_start_hash": "0x1dd4bc6b7c43ec8c624427bc16d26830f6e558278f67d844ada78b865d22cf79",
+      "model_start_hash": "0x3348fb82ef3e94e4e84d664d4fd6ca3cbc850e4d30baa2cf345215fc34a01341",
       "dataset_hash": "0x027bcde07e148979a854b6e1d042299190f482d1ba5f4c6b2f17afc84da8e2fc",
       "commitment_grid": "q16",
       "epoch": 0,
@@ -271,7 +271,7 @@
       "share_every": 0,
       "dead_zone_patience": 5
     },
-    "lease_secs": 4122,
+    "lease_secs": 4179,
     "max_attempts": 3
   }
 ,
@@ -280,7 +280,7 @@
     "requires": "h01",
     "payload": {
       "task": "train",
-      "model_start_hash": "0x7c27e16dda48b6dc918c79ea2b282b61e4b62cb9d871b627d81606a8dcbb6103",
+      "model_start_hash": "0x596a200d6acae5b998bf25c076256288d0e16e2a1d650377b500c5e6a8ce1eaf",
       "dataset_hash": "0x027bcde07e148979a854b6e1d042299190f482d1ba5f4c6b2f17afc84da8e2fc",
       "commitment_grid": "q16",
       "epoch": 0,
@@ -294,7 +294,7 @@
       "share_every": 50,
       "dead_zone_patience": 5
     },
-    "lease_secs": 4680,
+    "lease_secs": 4905,
     "max_attempts": 3
   }
 ,
@@ -303,7 +303,7 @@
     "requires": "h01",
     "payload": {
       "task": "train",
-      "model_start_hash": "0x774e48591968d5883a5c8d246fbf115c75b3df96ca4a621733c7c1fc137f0f85",
+      "model_start_hash": "0x1f5a8484074ac89ac7275c316ffa398a7bb5070b8ce9b8fb8233165a9a42eb4a",
       "dataset_hash": "0x027bcde07e148979a854b6e1d042299190f482d1ba5f4c6b2f17afc84da8e2fc",
       "commitment_grid": "q16",
       "epoch": 0,
@@ -317,7 +317,7 @@
       "share_every": 50,
       "dead_zone_patience": 5
     },
-    "lease_secs": 4680,
+    "lease_secs": 4905,
     "max_attempts": 3
   }
 ,
@@ -326,7 +326,7 @@
     "requires": "h01",
     "payload": {
       "task": "train",
-      "model_start_hash": "0x88a0d63f1466d1b49f75297b35d0992b2268f73329fce1e5f9c14512171bcd99",
+      "model_start_hash": "0xa517a55c9e49a5be5c6452e37ec59ac59b85f6904f590f7d595ec6c517816da5",
       "dataset_hash": "0x027bcde07e148979a854b6e1d042299190f482d1ba5f4c6b2f17afc84da8e2fc",
       "commitment_grid": "q16",
       "epoch": 0,
@@ -340,7 +340,7 @@
       "share_every": 50,
       "dead_zone_patience": 5
     },
-    "lease_secs": 4680,
+    "lease_secs": 4905,
     "max_attempts": 3
   }
 ,
@@ -349,7 +349,7 @@
     "requires": "h01",
     "payload": {
       "task": "train",
-      "model_start_hash": "0x9819da57cd472b340d1e9a81434349da239061f54c76bf68fbd22c6de48f3ee9",
+      "model_start_hash": "0xeb7c9e011c7a536c67d5a745aec129b47e9d286a08b7cfff8aade4a411e9601e",
       "dataset_hash": "0x027bcde07e148979a854b6e1d042299190f482d1ba5f4c6b2f17afc84da8e2fc",
       "commitment_grid": "q16",
       "epoch": 0,
@@ -363,7 +363,7 @@
       "share_every": 0,
       "dead_zone_patience": 5
     },
-    "lease_secs": 4680,
+    "lease_secs": 4905,
     "max_attempts": 3
   }
 ,
@@ -372,7 +372,7 @@
     "requires": "h01",
     "payload": {
       "task": "train",
-      "model_start_hash": "0xf8255ae851909360cab374f59ccc8435f08dea2922e25680ae82689b964e45f9",
+      "model_start_hash": "0x09a809f9cbea39c9d66406fa5a96e6e9cc9c008e413360e3a3f4c7e7d1cb4202",
       "dataset_hash": "0x027bcde07e148979a854b6e1d042299190f482d1ba5f4c6b2f17afc84da8e2fc",
       "commitment_grid": "q16",
       "epoch": 0,
@@ -386,7 +386,7 @@
       "share_every": 0,
       "dead_zone_patience": 5
     },
-    "lease_secs": 4680,
+    "lease_secs": 4905,
     "max_attempts": 3
   }
 ,
@@ -395,7 +395,7 @@
     "requires": "h01",
     "payload": {
       "task": "train",
-      "model_start_hash": "0x7866d97d487b02a912f5a1f91dec2d0c1b26614a3be73d4b3f23931be3979e0d",
+      "model_start_hash": "0x9d6dfef91b8388ec1d20eafa6fbf9373882353370167cef70d5c40a21de2eaeb",
       "dataset_hash": "0x027bcde07e148979a854b6e1d042299190f482d1ba5f4c6b2f17afc84da8e2fc",
       "commitment_grid": "q16",
       "epoch": 0,
@@ -409,7 +409,7 @@
       "share_every": 0,
       "dead_zone_patience": 5
     },
-    "lease_secs": 4680,
+    "lease_secs": 4905,
     "max_attempts": 3
   }
 ,
@@ -418,7 +418,7 @@
     "requires": "h01",
     "payload": {
       "task": "train",
-      "model_start_hash": "0x606b36a58a96437e69cdc7d6e4c33857a092613e25224330f7b5547bb8cec025",
+      "model_start_hash": "0x107ecf74986bc3a042c9f40a66c8b78bc6e5be2c0c3c23d595cd328a64e300dc",
       "dataset_hash": "0x027bcde07e148979a854b6e1d042299190f482d1ba5f4c6b2f17afc84da8e2fc",
       "commitment_grid": "q16",
       "epoch": 0,
@@ -432,7 +432,7 @@
       "share_every": 50,
       "dead_zone_patience": 5
     },
-    "lease_secs": 5976,
+    "lease_secs": 6918,
     "max_attempts": 3
   }
 ,
@@ -441,7 +441,7 @@
     "requires": "h01",
     "payload": {
       "task": "train",
-      "model_start_hash": "0xfd8146ab0e6e0272b6ce9e0b2cb198b5d16eddd51aa001435d848ebcd643fe99",
+      "model_start_hash": "0x8955f802758a82931e02046897168886db255f675d94c32ec325d0b587af39e5",
       "dataset_hash": "0x027bcde07e148979a854b6e1d042299190f482d1ba5f4c6b2f17afc84da8e2fc",
       "commitment_grid": "q16",
       "epoch": 0,
@@ -455,7 +455,7 @@
       "share_every": 50,
       "dead_zone_patience": 5
     },
-    "lease_secs": 5976,
+    "lease_secs": 6918,
     "max_attempts": 3
   }
 ,
@@ -464,7 +464,7 @@
     "requires": "h01",
     "payload": {
       "task": "train",
-      "model_start_hash": "0xcc82f822b62120e090ab99e5361b83078fc1e87593e8efe576cccc57d3f3c980",
+      "model_start_hash": "0xbc472c996d669a131432731ee814037753ed2844d41a781ef7a7b377dbed754b",
       "dataset_hash": "0x027bcde07e148979a854b6e1d042299190f482d1ba5f4c6b2f17afc84da8e2fc",
       "commitment_grid": "q16",
       "epoch": 0,
@@ -478,7 +478,7 @@
       "share_every": 50,
       "dead_zone_patience": 5
     },
-    "lease_secs": 5976,
+    "lease_secs": 6918,
     "max_attempts": 3
   }
 ,
@@ -487,7 +487,7 @@
     "requires": "h01",
     "payload": {
       "task": "train",
-      "model_start_hash": "0x773740ca87ef5f3c98cf09b94c0de80a3388ffc283294f69a1dcff7133374635",
+      "model_start_hash": "0x76ee93066b2827beb41ea7b39b1a4be0de17a7bede5ace1142caa6c9fe8a9ded",
       "dataset_hash": "0x027bcde07e148979a854b6e1d042299190f482d1ba5f4c6b2f17afc84da8e2fc",
       "commitment_grid": "q16",
       "epoch": 0,
@@ -501,7 +501,7 @@
       "share_every": 0,
       "dead_zone_patience": 5
     },
-    "lease_secs": 5976,
+    "lease_secs": 6918,
     "max_attempts": 3
   }
 ,
@@ -510,7 +510,7 @@
     "requires": "h01",
     "payload": {
       "task": "train",
-      "model_start_hash": "0x48b304e4246b6e0e4274adcb4ce50c24ae9486aaa73ef68fcb78825ef3457702",
+      "model_start_hash": "0x82e9e974de673654244773202efeeea8b423a4987c6745cb2524bda3682b2e09",
       "dataset_hash": "0x027bcde07e148979a854b6e1d042299190f482d1ba5f4c6b2f17afc84da8e2fc",
       "commitment_grid": "q16",
       "epoch": 0,
@@ -524,7 +524,7 @@
       "share_every": 0,
       "dead_zone_patience": 5
     },
-    "lease_secs": 5976,
+    "lease_secs": 6918,
     "max_attempts": 3
   }
 ,
@@ -533,7 +533,7 @@
     "requires": "h01",
     "payload": {
       "task": "train",
-      "model_start_hash": "0xc360ccf12190b19ea99cf8cf48efa6bc7164403baa5d67853dbfbbda0dcc7b21",
+      "model_start_hash": "0x31df9a2dc2f71556a3edc533dea60bcc59faa1784e23bec422f3c12cba7fdf38",
       "dataset_hash": "0x027bcde07e148979a854b6e1d042299190f482d1ba5f4c6b2f17afc84da8e2fc",
       "commitment_grid": "q16",
       "epoch": 0,
@@ -547,7 +547,7 @@
       "share_every": 0,
       "dead_zone_patience": 5
     },
-    "lease_secs": 5976,
+    "lease_secs": 6918,
     "max_attempts": 3
   }
 ,
@@ -556,7 +556,7 @@
     "requires": "h01",
     "payload": {
       "task": "train",
-      "model_start_hash": "0x9ae4b4450e96cddb7b0537ad6b1b842d12a8fc5abdd51a386a969c62f21e837d",
+      "model_start_hash": "0x745ed15730d115f00ce27abd2849b28bf86846163a884a45ab0d8a21e8640c96",
       "dataset_hash": "0x027bcde07e148979a854b6e1d042299190f482d1ba5f4c6b2f17afc84da8e2fc",
       "commitment_grid": "q16",
       "epoch": 0,
@@ -570,7 +570,7 @@
       "share_every": 50,
       "dead_zone_patience": 5
     },
-    "lease_secs": 9537,
+    "lease_secs": 14715,
     "max_attempts": 3
   }
 ,
@@ -579,7 +579,7 @@
     "requires": "h01",
     "payload": {
       "task": "train",
-      "model_start_hash": "0x5be419f000738f8f3ddc1e6d3f6f2ad53c9de117221395feb49db95017256e1f",
+      "model_start_hash": "0xe1042098410cd7ec3201b8e4f96bf2b8b11038c741657ca2e987a6b198b536b1",
       "dataset_hash": "0x027bcde07e148979a854b6e1d042299190f482d1ba5f4c6b2f17afc84da8e2fc",
       "commitment_grid": "q16",
       "epoch": 0,
@@ -593,7 +593,7 @@
       "share_every": 50,
       "dead_zone_patience": 5
     },
-    "lease_secs": 9537,
+    "lease_secs": 14715,
     "max_attempts": 3
   }
 ,
@@ -602,7 +602,7 @@
     "requires": "h01",
     "payload": {
       "task": "train",
-      "model_start_hash": "0xd00b2a4a976737218ffb92f7bb7eb745a1cb0ada6bc0f54d8a1cdd3023ebaf25",
+      "model_start_hash": "0xe0614906a3415610831578b1c9b2146230d859204e7d4c4443ad341520aa00ac",
       "dataset_hash": "0x027bcde07e148979a854b6e1d042299190f482d1ba5f4c6b2f17afc84da8e2fc",
       "commitment_grid": "q16",
       "epoch": 0,
@@ -616,7 +616,7 @@
       "share_every": 50,
       "dead_zone_patience": 5
     },
-    "lease_secs": 9537,
+    "lease_secs": 14715,
     "max_attempts": 3
   }
 ,
@@ -625,7 +625,7 @@
     "requires": "h01",
     "payload": {
       "task": "train",
-      "model_start_hash": "0x637dfd9032cebd8f6354d6f464f838edeaec104ee100fd5627d1ebad58e193bb",
+      "model_start_hash": "0x9355f2bd41fa0e8d96278de0d3f4496e3403278150534453a72b4749c36d8417",
       "dataset_hash": "0x027bcde07e148979a854b6e1d042299190f482d1ba5f4c6b2f17afc84da8e2fc",
       "commitment_grid": "q16",
       "epoch": 0,
@@ -639,7 +639,7 @@
       "share_every": 0,
       "dead_zone_patience": 5
     },
-    "lease_secs": 9537,
+    "lease_secs": 14715,
     "max_attempts": 3
   }
 ,
@@ -648,7 +648,7 @@
     "requires": "h01",
     "payload": {
       "task": "train",
-      "model_start_hash": "0xb2e5d37a8c7432f5570d193d498a27e5d4b2cbacc8a4eb2d04b337bfd4f197dd",
+      "model_start_hash": "0x20722363d04a2baa6a08371292028b814f71e8d5bfb7c6b7254aa4f4384c686f",
       "dataset_hash": "0x027bcde07e148979a854b6e1d042299190f482d1ba5f4c6b2f17afc84da8e2fc",
       "commitment_grid": "q16",
       "epoch": 0,
@@ -662,7 +662,7 @@
       "share_every": 0,
       "dead_zone_patience": 5
     },
-    "lease_secs": 9537,
+    "lease_secs": 14715,
     "max_attempts": 3
   }
 ,
@@ -671,7 +671,7 @@
     "requires": "h01",
     "payload": {
       "task": "train",
-      "model_start_hash": "0xf9246f16fb7fc815a0d76297888a56d705436d641bf0d9aaaa025e5318b15f07",
+      "model_start_hash": "0xeccc0e88c4e214367aeba963b91863105066b4429a0b4da95c0e5218eff96220",
       "dataset_hash": "0x027bcde07e148979a854b6e1d042299190f482d1ba5f4c6b2f17afc84da8e2fc",
       "commitment_grid": "q16",
       "epoch": 0,
@@ -685,7 +685,7 @@
       "share_every": 0,
       "dead_zone_patience": 5
     },
-    "lease_secs": 9537,
+    "lease_secs": 14715,
     "max_attempts": 3
   }
 ,
@@ -694,7 +694,7 @@
     "requires": "h01",
     "payload": {
       "task": "train",
-      "model_start_hash": "0x8a0408a94b3099bf6345105ece46d46fef65cac1d96c3be29e93fa0b333af822",
+      "model_start_hash": "0x2714f25fcd5d9f2a17c4a56796f0c6c4296c1721304443536b246563dbd9e622",
       "dataset_hash": "0x027bcde07e148979a854b6e1d042299190f482d1ba5f4c6b2f17afc84da8e2fc",
       "commitment_grid": "q16",
       "epoch": 0,
@@ -708,7 +708,7 @@
       "share_every": 50,
       "dead_zone_patience": 5
     },
-    "lease_secs": 75654,
+    "lease_secs": 132480,
     "max_attempts": 3
   }
 ,
@@ -717,7 +717,7 @@
     "requires": "h01",
     "payload": {
       "task": "train",
-      "model_start_hash": "0x0c2b250dad40dcd8a92fc4d16a88baea2b041c0c4b0ab4147ff376690a009b7d",
+      "model_start_hash": "0x58b148514898f9e6f22a7828cc06bc248789b0734b7851f75a1a073be47ce320",
       "dataset_hash": "0x027bcde07e148979a854b6e1d042299190f482d1ba5f4c6b2f17afc84da8e2fc",
       "commitment_grid": "q16",
       "epoch": 0,
@@ -731,7 +731,7 @@
       "share_every": 50,
       "dead_zone_patience": 5
     },
-    "lease_secs": 75654,
+    "lease_secs": 132480,
     "max_attempts": 3
   }
 ,
@@ -740,7 +740,7 @@
     "requires": "h01",
     "payload": {
       "task": "train",
-      "model_start_hash": "0x172ec5d2d5aa806d175cc30e640abc32bf30cbbf92f8d3bdfc3aa55fbfa5cf34",
+      "model_start_hash": "0xe33574d1a6f8c64c7df0bf0fe6db961041921bba3c04ac21647834a697c5a857",
       "dataset_hash": "0x027bcde07e148979a854b6e1d042299190f482d1ba5f4c6b2f17afc84da8e2fc",
       "commitment_grid": "q16",
       "epoch": 0,
@@ -754,7 +754,7 @@
       "share_every": 50,
       "dead_zone_patience": 5
     },
-    "lease_secs": 75654,
+    "lease_secs": 132480,
     "max_attempts": 3
   }
 ,
@@ -763,7 +763,7 @@
     "requires": "h01",
     "payload": {
       "task": "train",
-      "model_start_hash": "0x5015ff10b81ac89d481052fa79c43ac542c9272a3af501b26a992dde46600f87",
+      "model_start_hash": "0xc2bf307118316c3c1cde3f8bad1506aecb1cc5a06011fb299e45f1c47da0b03a",
       "dataset_hash": "0x027bcde07e148979a854b6e1d042299190f482d1ba5f4c6b2f17afc84da8e2fc",
       "commitment_grid": "q16",
       "epoch": 0,
@@ -777,7 +777,7 @@
       "share_every": 0,
       "dead_zone_patience": 5
     },
-    "lease_secs": 75654,
+    "lease_secs": 132480,
     "max_attempts": 3
   }
 ,
@@ -786,7 +786,7 @@
     "requires": "h01",
     "payload": {
       "task": "train",
-      "model_start_hash": "0x11133e062c89ce55b62b88e698738f843e77ec121df1532053249fd5ee396c1c",
+      "model_start_hash": "0xdd1061c43c51b35dc867da414d4a9688349c532e6b87c4871cf34b55e97a4dd8",
       "dataset_hash": "0x027bcde07e148979a854b6e1d042299190f482d1ba5f4c6b2f17afc84da8e2fc",
       "commitment_grid": "q16",
       "epoch": 0,
@@ -800,7 +800,7 @@
       "share_every": 0,
       "dead_zone_patience": 5
     },
-    "lease_secs": 75654,
+    "lease_secs": 132480,
     "max_attempts": 3
   }
 ,
@@ -809,7 +809,7 @@
     "requires": "h01",
     "payload": {
       "task": "train",
-      "model_start_hash": "0x4619c49f06083b849601ab3a2e97e6d60e9e5e86ce3e7118c5d0f932f136adaf",
+      "model_start_hash": "0x8b442f8a218417300fd36aefcbbe82f0c7b8351dd9f3c15ff54bba70be770d57",
       "dataset_hash": "0x027bcde07e148979a854b6e1d042299190f482d1ba5f4c6b2f17afc84da8e2fc",
       "commitment_grid": "q16",
       "epoch": 0,
@@ -823,7 +823,7 @@
       "share_every": 0,
       "dead_zone_patience": 5
     },
-    "lease_secs": 75654,
+    "lease_secs": 132480,
     "max_attempts": 3
   }
 ,
@@ -832,7 +832,7 @@
     "requires": "h01",
     "payload": {
       "task": "train",
-      "model_start_hash": "0x67529ff467a59861260885368e05c8928193e69ed0f36f46818359a39050282d",
+      "model_start_hash": "0x81242fc9697083b3a5c4697048227de5db032679ec858a767e2139a5eda36639",
       "dataset_hash": "0x027bcde07e148979a854b6e1d042299190f482d1ba5f4c6b2f17afc84da8e2fc",
       "commitment_grid": "q16",
       "epoch": 0,
@@ -846,7 +846,7 @@
       "share_every": 50,
       "dead_zone_patience": 5
     },
-    "lease_secs": 262494,
+    "lease_secs": 459396,
     "max_attempts": 3
   }
 ,
@@ -855,7 +855,7 @@
     "requires": "h01",
     "payload": {
       "task": "train",
-      "model_start_hash": "0x798c7ee905b8d595ff3e277259b69e6ea69e93d77603b5a3ad51a58f6029c0a3",
+      "model_start_hash": "0xe2aa63b8ff3575d5541d9dee3c3c47c4ba94db90900f0c8477f7a1ddfce45738",
       "dataset_hash": "0x027bcde07e148979a854b6e1d042299190f482d1ba5f4c6b2f17afc84da8e2fc",
       "commitment_grid": "q16",
       "epoch": 0,
@@ -869,7 +869,7 @@
       "share_every": 50,
       "dead_zone_patience": 5
     },
-    "lease_secs": 262494,
+    "lease_secs": 459396,
     "max_attempts": 3
   }
 ,
@@ -878,7 +878,7 @@
     "requires": "h01",
     "payload": {
       "task": "train",
-      "model_start_hash": "0xde41f420fbc02971648025b2771b6196576a0491626587da310449f8dd645edb",
+      "model_start_hash": "0x52604be68490becc680e52eb8036e3b63cd481020c086adc8bf79820c8bc1dc3",
       "dataset_hash": "0x027bcde07e148979a854b6e1d042299190f482d1ba5f4c6b2f17afc84da8e2fc",
       "commitment_grid": "q16",
       "epoch": 0,
@@ -892,7 +892,7 @@
       "share_every": 50,
       "dead_zone_patience": 5
     },
-    "lease_secs": 262494,
+    "lease_secs": 459396,
     "max_attempts": 3
   }
 ,
@@ -901,7 +901,7 @@
     "requires": "h01",
     "payload": {
       "task": "train",
-      "model_start_hash": "0x9ae4278ca5b6a5d4d096af472c962f40e9c06c077afa010e85284f3220546024",
+      "model_start_hash": "0x29b5b362725ee9401c0ee4a75ccb44dfa05dbc18df619363031b9eed6e433778",
       "dataset_hash": "0x027bcde07e148979a854b6e1d042299190f482d1ba5f4c6b2f17afc84da8e2fc",
       "commitment_grid": "q16",
       "epoch": 0,
@@ -915,7 +915,7 @@
       "share_every": 0,
       "dead_zone_patience": 5
     },
-    "lease_secs": 262494,
+    "lease_secs": 459396,
     "max_attempts": 3
   }
 ,
@@ -924,7 +924,7 @@
     "requires": "h01",
     "payload": {
       "task": "train",
-      "model_start_hash": "0x3bea33d75f8bb5a57797dba7b1b16fac7a293a4f2d8158a9a454135880a7e7e1",
+      "model_start_hash": "0x38ade444bc7e3a43da73783a8e12754554bc5bda60654de4ff6f1f20e2b02021",
       "dataset_hash": "0x027bcde07e148979a854b6e1d042299190f482d1ba5f4c6b2f17afc84da8e2fc",
       "commitment_grid": "q16",
       "epoch": 0,
@@ -938,7 +938,7 @@
       "share_every": 0,
       "dead_zone_patience": 5
     },
-    "lease_secs": 262494,
+    "lease_secs": 459396,
     "max_attempts": 3
   }
 ,
@@ -947,7 +947,7 @@
     "requires": "h01",
     "payload": {
       "task": "train",
-      "model_start_hash": "0x0a6a2566f84df1bbf80aee1957efadc1ce2c079c62a27f72b2e50ce6f62e8c74",
+      "model_start_hash": "0x3d023cc1c763538e64256db173f7a34fa39a06b114b48de5734f0c27ebe7327a",
       "dataset_hash": "0x027bcde07e148979a854b6e1d042299190f482d1ba5f4c6b2f17afc84da8e2fc",
       "commitment_grid": "q16",
       "epoch": 0,
@@ -961,7 +961,7 @@
       "share_every": 0,
       "dead_zone_patience": 5
     },
-    "lease_secs": 262494,
+    "lease_secs": 459396,
     "max_attempts": 3
   }
 ]
