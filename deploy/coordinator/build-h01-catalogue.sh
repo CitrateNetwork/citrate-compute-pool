@@ -31,16 +31,16 @@ OUT="${3:?}"
 REMOTE_ROOT=/var/lib/citrate-artifacts
 DATASET_HASH=0x027bcde07e148979a854b6e1d042299190f482d1ba5f4c6b2f17afc84da8e2fc
 
-# rung label | target params | tok/s (bf16, measured on GB10) — the tok/s column
+# rung label | target params | tok/s (f32, measured on GB10) — the tok/s column
 # is only used to size the lease, so a slow member is not timed out mid-run.
 RUNGS=(
-  "248K 250000 23859"
-  "1M   1000000 22945"
-  "2M   2000000 22149"
-  "4M   4000000 20160"
-  "8M   8000000 16147"
-  "32M  32000000 5323"
-  "64M  64000000 2963"
+  "248K 250000 21025"
+  "1M   1000000 20652"
+  "2M   2000000 18337"
+  "4M   4000000 14447"
+  "8M   8000000 8626"
+  "32M  32000000 2976"
+  "64M  64000000 1683"
 )
 SEEDS=(1 2 3)
 ARMS=(nat dense)
@@ -50,7 +50,7 @@ TOP_SEQS=1000000        # what it actually received
 EPOCHS=4
 SEQ_LEN=64
 VOCAB=16384
-DTYPE=bf16
+DTYPE=f32
 BATCH=64
 
 mkdir -p "$OUT"

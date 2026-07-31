@@ -33,11 +33,14 @@ pub use citrate_training_worker::coordinator_protocol::Attestation;
 /// Throughput floor separating accelerator-class from CPU-class on the probe's
 /// fixed job, in tokens/second.
 ///
-/// Sits between the two backends measured on the reference machine (GB10: CPU
-/// 7,786 tok/s, CUDA 71,098 tok/s). **Provisional, from a single machine** —
-/// revisit once the fleet reports a real distribution instead of an interpolated
-/// one. The alf-web compute door carries the identical constant.
-pub const ACCELERATOR_TOK_S: f64 = 15_000.0;
+/// Lowered from 15,000 once real fleet data arrived. The original was
+/// interpolated between the GB10's two backends (CPU 7,786, CUDA 71,098) and
+/// happened to exclude the first real Apple machine to report — an M2 Max at
+/// 13,472 tok/s, which is unambiguously an accelerator. 10,000 sits above every
+/// measured CPU (7,786 and 7,137) and below every measured GPU.
+///
+/// The alf-web compute door carries the identical constant.
+pub const ACCELERATOR_TOK_S: f64 = 10_000.0;
 
 pub const PROBE_SCHEMA: &str = "nat.divergence-probe/1";
 
@@ -78,20 +81,18 @@ pub fn capability_of(p: &ProbeReport) -> Capability {
         return Capability::Probe;
     }
     match (p.backend.as_str(), p.dtype.as_str()) {
-        // H-01 is measured in bf16; an f32 arm is a different experiment.
-        ("candle-cuda", "bf16") => Capability::H01,
-        // Metal is held out of the ladder as a PROTOCOL decision, not a hardware
-        // one. Candle's Metal backend does implement bf16 matmul (it dispatches
-        // to `GemmDType::BF16`), so an Apple machine is perfectly capable of the
-        // arithmetic. The reason to exclude it is continuity: every existing H-01
-        // number was measured on CUDA, and mixing backends into the re-run would
-        // confound it against the prior ladder — the same class of uncontrolled
-        // variable that ADR-0012's dead PF zone already cost us once.
+        // f32, on any accelerator that reproduces itself.
         //
-        // Revisit once a Mac has actually run `divergence_probe` and Metal-vs-CUDA
-        // divergence is measured rather than assumed. If it lands near the
-        // CPU-vs-CUDA figure (1.19e-7), holding Macs out stops being worth the
-        // capacity it wastes.
+        // The dtype requirement moved from bf16 to f32 deliberately. bf16 is
+        // ~1.8x faster on CUDA, but it is NOT run-to-run deterministic on Metal
+        // (measured, 3/3 runs differ), so a bf16 ladder is one CUDA machine's
+        // ladder by construction. f32 self-repeats on every backend measured,
+        // and it is also the only dtype our cross-backend divergence data covers
+        // — the settlement tolerance is validated for f32 and for nothing else.
+        ("candle-cuda", "f32") | ("candle-metal", "f32") => Capability::H01,
+        // Any other accelerator dtype (notably bf16) can co-train, but must not
+        // be given ladder work: unverifiable on Metal, and unmeasured for
+        // divergence everywhere.
         ("candle-cuda", _) | ("candle-metal", _) => Capability::Federated,
         _ => Capability::Probe,
     }
