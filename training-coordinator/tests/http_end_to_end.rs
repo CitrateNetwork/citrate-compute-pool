@@ -100,7 +100,7 @@ async fn a_worker_registers_leases_submits_and_the_status_reflects_it() {
     let res = router(c.clone())
         .oneshot(post(
             "/v1/register",
-            register_body(KEY_A, &probe("candle-cuda", "bf16", 71_098.0, true)),
+            register_body(KEY_A, &probe("candle-cuda", "f32", 71_098.0, true)),
         ))
         .await
         .unwrap();
@@ -190,7 +190,7 @@ async fn a_valid_signature_from_the_wrong_worker_is_refused() {
         "wrongworker",
         vec![JobSpec::new("j", Capability::Probe, serde_json::json!({}))],
     );
-    let good = probe("candle-cuda", "bf16", 71_098.0, true);
+    let good = probe("candle-cuda", "f32", 71_098.0, true);
 
     for k in [KEY_A, KEY_B] {
         let res = router(c.clone())
@@ -244,7 +244,7 @@ async fn state_survives_a_restart_and_the_lease_is_still_held() {
     first
         .add_job(JobSpec::new("j", Capability::Probe, serde_json::json!({})).with_lease_secs(9999))
         .unwrap();
-    let good = probe("candle-cuda", "bf16", 71_098.0, true);
+    let good = probe("candle-cuda", "f32", 71_098.0, true);
     router(first.clone())
         .oneshot(post("/v1/register", register_body(KEY_A, &good)))
         .await
@@ -323,7 +323,7 @@ async fn the_real_worker_client_completes_the_whole_loop_against_the_real_server
 
     // register — the capability is derived from the probe, not claimed
     let reg = client
-        .register(&probe("candle-cuda", "bf16", 71_098.0, true))
+        .register(&probe("candle-cuda", "f32", 71_098.0, true))
         .await
         .expect("register");
     assert_eq!(reg.capability, Capability::H01);
@@ -384,7 +384,7 @@ async fn the_poll_loop_drains_the_queue_unattended() {
     );
     let client = fast_client(serve(c.clone()).await, KEY_A);
     client
-        .register(&probe("candle-metal", "f32", 40_000.0, true))
+        .register(&probe("candle-cpu", "f32", 7_137.0, true))
         .await
         .unwrap();
 
