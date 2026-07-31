@@ -1,0 +1,38 @@
+[package]
+name = "citrate-training-coordinator"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Gate-4 training coordinator: hands out training jobs by measured capability, collects signed results, and persists the lease table crash-atomically. Identity is the recovered signing address, so there is no roster."
+
+[lib]
+name = "citrate_training_coordinator"
+path = "src/lib.rs"
+
+[[bin]]
+name = "citrate-training-coordinator"
+path = "src/main.rs"
+
+[dependencies]
+# The worker crate owns the wallet + recoverable-signature primitives. Depending
+# on it rather than re-deriving them keeps one implementation of the thing that
+# decides who gets paid — a coordinator that verified signatures differently from
+# how the worker produces them would reject honest work.
+citrate-training-worker = { path = "../training-worker" }
+
+tokio = { workspace = true }
+axum = "0.7"
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+parking_lot = { workspace = true }
+ethereum-types = "0.14"
+sha3 = { workspace = true }
+hex = "0.4"
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"

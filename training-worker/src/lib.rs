@@ -46,11 +46,18 @@
 //! | `Transport` | `InProcessTransport` | `LibP2pTransport` (S1) |
 //! | `ChainClient` | `MockChainClient` | `HttpChainClient` (S1) |
 
+pub mod artifact_fetch;
 pub mod attestation;
 pub mod backend;
 #[cfg(feature = "candle-gpu")]
 pub mod candle_backend;
 pub mod chain;
+// The coordinator seam. `coordinator_protocol` is the wire vocabulary shared with
+// the coordinator crate — it lives here because the coordinator already depends
+// on this crate for wallets and signatures, so this is the only placement giving
+// both sides ONE copy of the digests without a dependency cycle.
+pub mod coordinator_client;
+pub mod coordinator_protocol;
 pub mod events;
 pub mod http_chain_pipeline;
 /// The real federated signer (secp256k1 over the worker's encrypted keystore),
@@ -64,6 +71,11 @@ pub mod job_artifacts;
 /// so the honesty checks compile and test everywhere.
 #[cfg(feature = "nat")]
 pub mod nat_backend;
+/// Turns a coordinator job payload into a real NAT run. Feature-gated with the
+/// backend it drives — a build without `nat` can still register and poll, it just
+/// declines training work rather than pretending to do it.
+#[cfg(feature = "nat")]
+pub mod job_runner;
 pub mod q16_commitment;
 pub mod zone_delta;
 pub mod http_chain_training;
