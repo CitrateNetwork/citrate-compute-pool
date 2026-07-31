@@ -1,0 +1,48 @@
+[Unit]
+Description=Citrate training coordinator (Gate-4 job distribution)
+Documentation=https://github.com/CitrateNetwork/citrate-compute-pool
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=citrate
+Group=citrate
+
+# Loopback only. Caddy terminates TLS and reverse-proxies; the coordinator is
+# never directly exposed, so a Caddy misconfiguration cannot accidentally publish
+# an unproxied port.
+Environment=CITRATE_COORDINATOR_BIND=127.0.0.1:8088
+Environment=CITRATE_COORDINATOR_STATE=/var/lib/citrate-coordinator/state.json
+Environment=CITRATE_COORDINATOR_JOBS=/var/lib/citrate-coordinator/jobs.json
+Environment=RUST_LOG=info
+
+ExecStart=/usr/local/bin/citrate-training-coordinator
+
+# The lease table is the only state, and losing it means losing track of machines
+# that are mid-job. Always come back.
+Restart=always
+RestartSec=5
+
+# Hardening. The coordinator holds NO keys — worker identity is recovered from
+# each request's signature — so there is no secret here to protect. What these
+# protect is the box from the coordinator, not the coordinator from the box.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+
+# The one writable path. State is written by rename-into-place, so the directory
+# itself must be writable, not just the file.
+ReadWritePaths=/var/lib/citrate-coordinator
+
+[Install]
+WantedBy=multi-user.target

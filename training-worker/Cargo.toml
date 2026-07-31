@@ -21,6 +21,12 @@ path = "src/lib.rs"
 name = "citrate-training-worker"
 path = "src/bin/main.rs"
 
+# The member-facing daemon: register a machine with the training coordinator and
+# poll for work. Separate from the binary above, which is the chain-event daemon.
+[[bin]]
+name = "citrate-coop-worker"
+path = "src/bin/coop_worker.rs"
+
 [dependencies]
 tokio = { workspace = true }
 async-trait = { workspace = true }
@@ -41,14 +47,14 @@ citrate-fed-types = { git = "https://github.com/CitrateNetwork/citrate-fed-types
 # NAT — the model the co-op trains. Pinned by rev: the parameter NAMES are the
 # contract `zone_delta` attributes against, so an unpinned bump could silently
 # reroute a zone's delta.
-nat-candle = { git = "ssh://git@github.com/CitrateNetwork/nat.git", rev = "870863c4", optional = true }
-nat-types  = { git = "ssh://git@github.com/CitrateNetwork/nat.git", rev = "870863c4", optional = true }
-nat-data   = { git = "ssh://git@github.com/CitrateNetwork/nat.git", rev = "870863c4", optional = true }
+nat-candle = { git = "ssh://git@github.com/CitrateNetwork/nat.git", rev = "52dd6b0b", optional = true }
+nat-types  = { git = "ssh://git@github.com/CitrateNetwork/nat.git", rev = "52dd6b0b", optional = true }
+nat-data   = { git = "ssh://git@github.com/CitrateNetwork/nat.git", rev = "52dd6b0b", optional = true }
 # The federated seam (signing, gather, settlement). Deliberately a SEPARATE
 # feature from `nat`: it pulls no Candle, so a node can sign and settle
 # contributions without building the trainer.
-nat-federated = { git = "ssh://git@github.com/CitrateNetwork/nat.git", rev = "870863c4", optional = true }
-nat-train  = { git = "ssh://git@github.com/CitrateNetwork/nat.git", rev = "870863c4", optional = true }
+nat-federated = { git = "ssh://git@github.com/CitrateNetwork/nat.git", rev = "52dd6b0b", optional = true }
+nat-train  = { git = "ssh://git@github.com/CitrateNetwork/nat.git", rev = "52dd6b0b", optional = true }
 parking_lot = { workspace = true }
 ethereum-types = "0.14"
 
@@ -119,9 +125,23 @@ nat = ["dep:nat-candle", "dep:nat-types", "dep:nat-data", "dep:candle-core", "fe
 federated = ["dep:nat-federated", "dep:nat-train", "dep:nat-types"]
 # NAT on CUDA. Additive over `nat`.
 nat-cuda = ["nat", "nat-candle/cuda"]
+# Apple Silicon. Needs nat >= 52dd6b0b: earlier revisions have no `metal`
+# feature at all, and the one before that resolved a fresh Metal device per call
+# — which candle treats as a DIFFERENT device, so the first forward pass died on
+# a mismatch whose two printed ids were identical. Measured on an M2 Max: f32 is
+# run-to-run deterministic, bf16 is NOT, so Apple hardware should be pinned to
+# f32 for any work that will be verified by recomputation.
+nat-metal = ["nat", "nat-candle/metal"]
 
 [dev-dependencies]
 tokio = { workspace = true }
 # Stub JSON-RPC server for http_chain_* tests, mirroring the
 # pool-coordinator pattern (axum is dev-only for training-worker).
 axum = "0.7"
+
+# The real end-to-end run needs the trainer AND the federated seam, so it is
+# gated: without this, `cargo test --workspace` on a default build tries to
+# compile it and fails on the missing nat crates.
+[[example]]
+name = "real_training_run"
+required-features = ["nat"]

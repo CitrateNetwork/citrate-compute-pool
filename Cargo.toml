@@ -4,9 +4,10 @@
 # JSON-RPC over HTTP to talk to the chain at runtime.
 members = [
     "pool-coordinator",
+    "training-coordinator",
     "training-worker",
 ]
-default-members = ["pool-coordinator", "training-worker"]
+default-members = ["pool-coordinator", "training-coordinator", "training-worker"]
 resolver = "2"
 
 [workspace.package]

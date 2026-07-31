@@ -78,11 +78,16 @@ impl Architecture {
 /// every honest worker looks dishonest and gets slashed 10%. So the grid is a
 /// property of the JOB, read from the same verified sidecar by both sides, not a
 /// local setting either one picks.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Serde names are the SIDECAR's wire names, so a job payload and a sidecar spell
+/// the grid identically. An unknown name is a deserialization error rather than a
+/// silent fallback to the default — defaulting is precisely how a worker ends up
+/// committing on a grid the committee is not resolving on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum CommitmentGrid {
     /// The fixed Q16.16 grid from `citrate_fed_types` — the same one NAT and the
     /// chain's `0x0110` path use. Data-independent, so two workers on different
     /// hardware commit identically. **The default.**
+    #[serde(rename = "q16")]
     Q16,
     /// The legacy per-tensor f32 scale (`max|x| / 127`, scale hashed into the
     /// preimage).
@@ -92,6 +97,7 @@ pub enum CommitmentGrid {
     /// changes the commitment, and — worse — shifts OTHER coordinates' quantized
     /// values, because they all share the derived scale. Both failures are
     /// demonstrated in `q16_commitment`'s tests.
+    #[serde(rename = "legacy-f32-scale")]
     LegacyF32Scale,
 }
 
@@ -100,6 +106,42 @@ impl CommitmentGrid {
         match self {
             CommitmentGrid::Q16 => "q16",
             CommitmentGrid::LegacyF32Scale => "legacy-f32-scale",
+        }
+    }
+}
+
+/// The model's shape, read from the sidecar rather than assumed.
+///
+/// A checkpoint does not carry `seq_len` (the causal masks are constants, not
+/// parameters), and inferring `vocab`/`d` from tensor shapes would be guessing at
+/// something the job already states. Guessing wrong does not fail loudly — it
+/// fails as a shape mismatch on load, or worse, loads and trains the wrong model.
+///
+/// The real 64M NAT checkpoint is `d = 1183`, `vocab = 16384`, BF16, five learned
+/// zones — none of which is `BYTE_VOCAB`, and none of which a backend should be
+/// hardcoding.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelShape {
+    pub vocab: usize,
+    pub d: usize,
+    pub seq_len: usize,
+    /// Dense-arm FFN width. Ignored by the zone arm.
+    pub d_ff: usize,
+    /// `"bf16"` or `"f32"`. The 64M checkpoint is BF16; loading it into an F32
+    /// model is a dtype mismatch, not a silent widening.
+    pub dtype: String,
+}
+
+impl Default for ModelShape {
+    /// A small F32 byte-level model — the shape the crate's own tests use. NOT a
+    /// stand-in for a real job: a real job declares its shape in the sidecar.
+    fn default() -> Self {
+        Self {
+            vocab: 256,
+            d: 48,
+            seq_len: 64,
+            d_ff: 192,
+            dtype: "f32".into(),
         }
     }
 }
@@ -192,6 +234,8 @@ pub struct JobArtifacts {
     /// The grid this job's commitments ride. Both the worker and the challenger
     /// read it from here, so they cannot disagree.
     pub commitment_grid: CommitmentGrid,
+    /// The model's shape, from the sidecar. Never inferred.
+    pub shape: ModelShape,
     /// The verified hashes, retained so the provenance record can state exactly
     /// what was trained rather than restating what was requested.
     pub model_start_hash: B256,
@@ -216,11 +260,25 @@ impl ArtifactStore {
         self.root.join("models").join(hex_of(hash))
     }
 
-    /// `<root>/datasets/<hex>.json` — a `nat_data::manifest::ShardManifest`.
+    /// `<root>/datasets/<hex>/` — the corpus directory.
+    ///
+    /// Layout is `nat-data`'s real pipeline output, not one invented here:
+    /// `manifest.json` plus one `shard_NNNN.json` per shard. corpus-v6 is 185,475
+    /// shard files against an 80 MB manifest, which is why the shards are read
+    /// on demand rather than slurped — see `NatBackend`.
+    pub fn dataset_dir(&self, hash: &B256) -> PathBuf {
+        self.root.join("datasets").join(hex_of(hash))
+    }
+
+    /// `<root>/datasets/<hex>/manifest.json` — a `nat_data::manifest::CorpusManifest`.
+    /// This is the file `dataset_hash` commits to.
     pub fn manifest_path(&self, hash: &B256) -> PathBuf {
-        self.root
-            .join("datasets")
-            .join(format!("{}.json", hex_of(hash)))
+        self.dataset_dir(hash).join("manifest.json")
+    }
+
+    /// `<dir>/shard_NNNN.json` — one `nat_data::manifest::Shard`.
+    pub fn shard_path(&self, hash: &B256, index: u32) -> PathBuf {
+        self.dataset_dir(hash).join(format!("shard_{index:04}.json"))
     }
 
     /// `<root>/models/<hex>/sidecar.nat.json` — the zone graph. Its presence is
@@ -249,12 +307,14 @@ impl ArtifactStore {
         let sidecar = self.sidecar_path(model_start_hash);
         let architecture = read_architecture(&sidecar)?;
         let commitment_grid = read_commitment_grid(&sidecar)?;
+        let shape = read_model_shape(&sidecar)?;
 
         Ok(JobArtifacts {
             checkpoint_dir,
             manifest_path,
             architecture,
             commitment_grid,
+            shape,
             model_start_hash: *model_start_hash,
             dataset_hash: *dataset_hash,
         })
@@ -342,6 +402,38 @@ fn read_commitment_grid(sidecar: &Path) -> Result<CommitmentGrid, ArtifactError>
         Some("legacy-f32-scale") => Ok(CommitmentGrid::LegacyF32Scale),
         Some(other) => Err(ArtifactError::UnknownCommitmentGrid(other.to_string())),
     }
+}
+
+/// Read the model shape from the sidecar, falling back to the small test shape
+/// only when the sidecar is absent entirely.
+///
+/// A sidecar that IS present but omits a field gets the default for that field —
+/// deliberate, so a minimal sidecar stays writable — but a real checkpoint will
+/// simply fail to load if the declared shape is wrong, which is the loud failure
+/// we want rather than training a differently-shaped model.
+fn read_model_shape(sidecar: &Path) -> Result<ModelShape, ArtifactError> {
+    let raw = match std::fs::read_to_string(sidecar) {
+        Ok(r) => r,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(ModelShape::default()),
+        Err(e) => return Err(ArtifactError::UnreadableSidecar(e.to_string())),
+    };
+    let doc: serde_json::Value =
+        serde_json::from_str(&raw).map_err(|e| ArtifactError::UnreadableSidecar(e.to_string()))?;
+    let d = ModelShape::default();
+    let num = |k: &str, fallback: usize| -> usize {
+        doc.get(k).and_then(|v| v.as_u64()).map(|v| v as usize).unwrap_or(fallback)
+    };
+    Ok(ModelShape {
+        vocab: num("vocab", d.vocab),
+        d: num("d", d.d),
+        seq_len: num("seq_len", d.seq_len),
+        d_ff: num("d_ff", d.d_ff),
+        dtype: doc
+            .get("dtype")
+            .and_then(|v| v.as_str())
+            .unwrap_or(&d.dtype)
+            .to_string(),
+    })
 }
 
 fn keccak_of(bytes: &[u8]) -> B256 {
