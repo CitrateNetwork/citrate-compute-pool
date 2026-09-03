@@ -46,9 +46,29 @@ fn cap(backend: &str, dtype: &str, tok_s: f64, self_repeat: bool) -> Capability 
     capability_of(&p)
 }
 
+/// f32 on any self-repeating accelerator earns the ladder. The dtype moved from
+/// bf16 because bf16 is not run-to-run deterministic on Metal, so a bf16 ladder
+/// would be one CUDA machine's ladder by construction.
 #[test]
-fn bf16_cuda_that_reproduces_itself_earns_the_ladder() {
-    assert_eq!(cap("candle-cuda", "bf16", 71_098.0, true), Capability::H01);
+fn f32_on_a_self_repeating_accelerator_earns_the_ladder() {
+    assert_eq!(cap("candle-cuda", "f32", 71_098.0, true), Capability::H01);
+    assert_eq!(cap("candle-metal", "f32", 13_472.0, true), Capability::H01);
+}
+
+/// The M2 Max that actually reported in: 13,472 tok/s on Metal f32. The original
+/// 15,000 floor excluded it, which was an artifact of interpolating from one
+/// machine rather than a judgement about the hardware.
+#[test]
+fn the_first_real_apple_machine_clears_the_floor() {
+    assert!(13_472.0 >= ACCELERATOR_TOK_S);
+    assert_eq!(cap("candle-metal", "f32", 13_472.0, true), Capability::H01);
+}
+
+/// And every measured CPU stays below it.
+#[test]
+fn measured_cpus_remain_below_the_accelerator_floor() {
+    assert!(7_786.0 < ACCELERATOR_TOK_S, "GB10 CPU");
+    assert!(7_137.0 < ACCELERATOR_TOK_S, "M2 Max CPU");
 }
 
 /// The load-bearing gate. A device that cannot reproduce its own result cannot
@@ -56,18 +76,20 @@ fn bf16_cuda_that_reproduces_itself_earns_the_ladder() {
 /// settlement depends on that — however fast it is.
 #[test]
 fn a_device_that_fails_self_repeat_is_capped_at_probe_however_fast() {
-    assert_eq!(cap("candle-cuda", "bf16", 1_000_000.0, false), Capability::Probe);
+    assert_eq!(cap("candle-cuda", "f32", 1_000_000.0, false), Capability::Probe);
+}
+
+/// bf16 can co-train but must not get ladder work: unverifiable on Metal
+/// (3/3 runs differ) and unmeasured for cross-backend divergence everywhere.
+#[test]
+fn bf16_earns_co_training_but_not_the_ladder() {
+    assert_eq!(cap("candle-cuda", "bf16", 71_098.0, true), Capability::Federated);
+    assert_eq!(cap("candle-metal", "bf16", 13_649.0, true), Capability::Federated);
 }
 
 #[test]
-fn f32_cuda_earns_co_training_but_not_the_ladder() {
-    // H-01 is measured in bf16; an f32 arm is a different experiment.
-    assert_eq!(cap("candle-cuda", "f32", 71_098.0, true), Capability::Federated);
-}
-
-#[test]
-fn apple_silicon_earns_co_training() {
-    assert_eq!(cap("candle-metal", "f32", 40_000.0, true), Capability::Federated);
+fn apple_silicon_f32_now_earns_the_ladder() {
+    assert_eq!(cap("candle-metal", "f32", 40_000.0, true), Capability::H01);
 }
 
 #[test]
@@ -79,21 +101,21 @@ fn cpu_maps_divergence() {
 #[test]
 fn an_accelerator_below_the_throughput_floor_is_treated_as_cpu_class() {
     assert_eq!(
-        cap("candle-cuda", "bf16", ACCELERATOR_TOK_S - 1.0, true),
+        cap("candle-cuda", "f32", ACCELERATOR_TOK_S - 1.0, true),
         Capability::Probe
     );
 }
 
 #[test]
 fn an_unknown_backend_is_not_trusted_with_more_than_probe() {
-    assert_eq!(cap("candle-something-new", "bf16", 90_000.0, true), Capability::Probe);
+    assert_eq!(cap("candle-something-new", "f32", 90_000.0, true), Capability::Probe);
 }
 
 // ── Verification ───────────────────────────────────────────────────────
 
 #[test]
 fn a_signed_probe_registers_the_signing_address_as_the_worker() {
-    let body = probe_json("candle-cuda", "bf16", 71_098.0, true);
+    let body = probe_json("candle-cuda", "f32", 71_098.0, true);
     let w = verify(&sign(KEY_A, &body)).expect("verify");
     assert_eq!(w.id, Wallet::from_hex(KEY_A).unwrap().address());
     assert_eq!(w.capability, Capability::H01);
@@ -210,7 +232,7 @@ fn verification_uses_the_bytes_as_signed_not_a_reencoding() {
                 \"backend\" : \"candle-cuda\", \"dtype\":\"bf16\",\
                 \"perf\":{\"tokens_per_second\":71098.0} }";
     let w = verify(&sign(KEY_A, body)).expect("odd formatting must still verify");
-    assert_eq!(w.capability, Capability::H01);
+    assert_eq!(w.capability, Capability::Federated);
 }
 
 /// The real thing, not a hand-written fixture.
@@ -288,6 +310,6 @@ fn the_parser_accepts_what_nat_actually_emits() {
     assert_eq!(w.backend, "candle-cuda");
     assert_eq!(w.dtype, "f32");
     assert!((w.tokens_per_second - 71_097.88).abs() < 0.1);
-    // f32 on CUDA: fast enough to co-train, but the ladder is measured in bf16.
-    assert_eq!(w.capability, Capability::Federated);
+    // f32 on CUDA, self-repeating and fast: this is exactly ladder hardware now.
+    assert_eq!(w.capability, Capability::H01);
 }
