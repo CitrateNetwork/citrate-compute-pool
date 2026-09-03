@@ -1,0 +1,967 @@
+[
+  {
+    "id": "h01-248K-nat-seed1",
+    "requires": "h01",
+    "payload": {
+      "task": "train",
+      "model_start_hash": "0x142a2ee0400a64d5d6aba6fe7cce5b0b2c7b4c408c4c2512718395663a18a9c4",
+      "dataset_hash": "0x027bcde07e148979a854b6e1d042299190f482d1ba5f4c6b2f17afc84da8e2fc",
+      "commitment_grid": "q16",
+      "epoch": 0,
+      "steps": 243,
+      "worker_shard": 0,
+      "batch_size": 64,
+      "learning_rate": 0.003,
+      "max_windows": 64,
+      "shards_per_step": 8,
+      "seed": 1,
+      "share_every": 50,
+      "dead_zone_patience": 5
+    },
+    "lease_secs": 3741,
+    "max_attempts": 3
+  }
+,
+  {
+    "id": "h01-248K-nat-seed2",
+    "requires": "h01",
+    "payload": {
+      "task": "train",
+      "model_start_hash": "0xc2eb76f18a4af428375f9f7c9b40835022b617ba87d9939328e66d72e6776ced",
+      "dataset_hash": "0x027bcde07e148979a854b6e1d042299190f482d1ba5f4c6b2f17afc84da8e2fc",
+      "commitment_grid": "q16",
+      "epoch": 0,
+      "steps": 243,
+      "worker_shard": 0,
+      "batch_size": 64,
+      "learning_rate": 0.003,
+      "max_windows": 64,
+      "shards_per_step": 8,
+      "seed": 2,
+      "share_every": 50,
+      "dead_zone_patience": 5
+    },
+    "lease_secs": 3741,
+    "max_attempts": 3
+  }
+,
+  {
+    "id": "h01-248K-nat-seed3",
+    "requires": "h01",
+    "payload": {
+      "task": "train",
+      "model_start_hash": "0x5869e7b5a72a4faf7fe682b0bd6bea0a3ab8618c1a6e91181f2466c172862c1e",
+      "dataset_hash": "0x027bcde07e148979a854b6e1d042299190f482d1ba5f4c6b2f17afc84da8e2fc",
+      "commitment_grid": "q16",
+      "epoch": 0,
+      "steps": 243,
+      "worker_shard": 0,
+      "batch_size": 64,
+      "learning_rate": 0.003,
+      "max_windows": 64,
+      "shards_per_step": 8,
+      "seed": 3,
+      "share_every": 50,
+      "dead_zone_patience": 5
+    },
+    "lease_secs": 3741,
+    "max_attempts": 3
+  }
+,
+  {
+    "id": "h01-248K-dense-seed1",
+    "requires": "h01",
+    "payload": {
+      "task": "train",
+      "model_start_hash": "0x0cac6693289569cf7e1e152de588affa4c586f67dca00b6c344150c09863c41d",
+      "dataset_hash": "0x027bcde07e148979a854b6e1d042299190f482d1ba5f4c6b2f17afc84da8e2fc",
+      "commitment_grid": "q16",
+      "epoch": 0,
+      "steps": 243,
+      "worker_shard": 0,
+      "batch_size": 64,
+      "learning_rate": 0.003,
+      "max_windows": 64,
+      "shards_per_step": 8,
+      "seed": 1,
+      "share_every": 0,
+      "dead_zone_patience": 5
+    },
+    "lease_secs": 3741,
+    "max_attempts": 3
+  }
+,
+  {
+    "id": "h01-248K-dense-seed2",
+    "requires": "h01",
+    "payload": {
+      "task": "train",
+      "model_start_hash": "0x83c611beb38e3c670f2e7bb0f8e237abda471da0a6ae8c61ef79158ba8c7648e",
+      "dataset_hash": "0x027bcde07e148979a854b6e1d042299190f482d1ba5f4c6b2f17afc84da8e2fc",
+      "commitment_grid": "q16",
+      "epoch": 0,
+      "steps": 243,
+      "worker_shard": 0,
+      "batch_size": 64,
+      "learning_rate": 0.003,
+      "max_windows": 64,
+      "shards_per_step": 8,
+      "seed": 2,
+      "share_every": 0,
+      "dead_zone_patience": 5
+    },
+    "lease_secs": 3741,
+    "max_attempts": 3
+  }
+,
+  {
+    "id": "h01-248K-dense-seed3",
+    "requires": "h01",
+    "payload": {
+      "task": "train",
+      "model_start_hash": "0x9c6ef78bf7cbf8509ed96c24bee822183b96e0ee34006db039b33fe621054d66",
+      "dataset_hash": "0x027bcde07e148979a854b6e1d042299190f482d1ba5f4c6b2f17afc84da8e2fc",
+      "commitment_grid": "q16",
+      "epoch": 0,
+      "steps": 243,
+      "worker_shard": 0,
+      "batch_size": 64,
+      "learning_rate": 0.003,
+      "max_windows": 64,
+      "shards_per_step": 8,
+      "seed": 3,
+      "share_every": 0,
+      "dead_zone_patience": 5
+    },
+    "lease_secs": 3741,
+    "max_attempts": 3
+  }
+,
+  {
+    "id": "h01-1M-nat-seed1",
+    "requires": "h01",
+    "payload": {
+      "task": "train",
+      "model_start_hash": "0xf2f9eb7a0e5723d7a3d326c97fbebc98c16b0dfe94539cc1145019d468c8f906",
+      "dataset_hash": "0x027bcde07e148979a854b6e1d042299190f482d1ba5f4c6b2f17afc84da8e2fc",
+      "commitment_grid": "q16",
+      "epoch": 0,
+      "steps": 975,
+      "worker_shard": 0,
+      "batch_size": 64,
+      "learning_rate": 0.003,
+      "max_windows": 64,
+      "shards_per_step": 8,
+      "seed": 1,
+      "share_every": 50,
+      "dead_zone_patience": 5
+    },
+    "lease_secs": 4179,
+    "max_attempts": 3
+  }
+,
+  {
+    "id": "h01-1M-nat-seed2",
+    "requires": "h01",
+    "payload": {
+      "task": "train",
+      "model_start_hash": "0x823c45062800e829589bbf5df478811b90d76514781694a9d91f7dfeef88c6b4",
+      "dataset_hash": "0x027bcde07e148979a854b6e1d042299190f482d1ba5f4c6b2f17afc84da8e2fc",
+      "commitment_grid": "q16",
+      "epoch": 0,
+      "steps": 975,
+      "worker_shard": 0,
+      "batch_size": 64,
+      "learning_rate": 0.003,
+      "max_windows": 64,
+      "shards_per_step": 8,
+      "seed": 2,
+      "share_every": 50,
+      "dead_zone_patience": 5
+    },
+    "lease_secs": 4179,
+    "max_attempts": 3
+  }
+,
+  {
+    "id": "h01-1M-nat-seed3",
+    "requires": "h01",
+    "payload": {
+      "task": "train",
+      "model_start_hash": "0x86327a456d510b8ad57ddaa8b7464260514d92039e3a960036c773d5521fc64f",
+      "dataset_hash": "0x027bcde07e148979a854b6e1d042299190f482d1ba5f4c6b2f17afc84da8e2fc",
+      "commitment_grid": "q16",
+      "epoch": 0,
+      "steps": 975,
+      "worker_shard": 0,
+      "batch_size": 64,
+      "learning_rate": 0.003,
+      "max_windows": 64,
+      "shards_per_step": 8,
+      "seed": 3,
+      "share_every": 50,
+      "dead_zone_patience": 5
+    },
+    "lease_secs": 4179,
+    "max_attempts": 3
+  }
+,
+  {
+    "id": "h01-1M-dense-seed1",
+    "requires": "h01",
+    "payload": {
+      "task": "train",
+      "model_start_hash": "0xd0bc3ae2296102af735e0dabe3306a584aaeb2e3c24fc0e03a17ec7524c9969e",
+      "dataset_hash": "0x027bcde07e148979a854b6e1d042299190f482d1ba5f4c6b2f17afc84da8e2fc",
+      "commitment_grid": "q16",
+      "epoch": 0,
+      "steps": 975,
+      "worker_shard": 0,
+      "batch_size": 64,
+      "learning_rate": 0.003,
+      "max_windows": 64,
+      "shards_per_step": 8,
+      "seed": 1,
+      "share_every": 0,
+      "dead_zone_patience": 5
+    },
+    "lease_secs": 4179,
+    "max_attempts": 3
+  }
+,
+  {
+    "id": "h01-1M-dense-seed2",
+    "requires": "h01",
+    "payload": {
+      "task": "train",
+      "model_start_hash": "0x1163a5453abccde60d8beed54fd2eab317afd733ccb5a0cc8f1641c5ccb575b4",
+      "dataset_hash": "0x027bcde07e148979a854b6e1d042299190f482d1ba5f4c6b2f17afc84da8e2fc",
+      "commitment_grid": "q16",
+      "epoch": 0,
+      "steps": 975,
+      "worker_shard": 0,
+      "batch_size": 64,
+      "learning_rate": 0.003,
+      "max_windows": 64,
+      "shards_per_step": 8,
+      "seed": 2,
+      "share_every": 0,
+      "dead_zone_patience": 5
+    },
+    "lease_secs": 4179,
+    "max_attempts": 3
+  }
+,
+  {
+    "id": "h01-1M-dense-seed3",
+    "requires": "h01",
+    "payload": {
+      "task": "train",
+      "model_start_hash": "0x3348fb82ef3e94e4e84d664d4fd6ca3cbc850e4d30baa2cf345215fc34a01341",
+      "dataset_hash": "0x027bcde07e148979a854b6e1d042299190f482d1ba5f4c6b2f17afc84da8e2fc",
+      "commitment_grid": "q16",
+      "epoch": 0,
+      "steps": 975,
+      "worker_shard": 0,
+      "batch_size": 64,
+      "learning_rate": 0.003,
+      "max_windows": 64,
+      "shards_per_step": 8,
+      "seed": 3,
+      "share_every": 0,
+      "dead_zone_patience": 5
+    },
+    "lease_secs": 4179,
+    "max_attempts": 3
+  }
+,
+  {
+    "id": "h01-2M-nat-seed1",
+    "requires": "h01",
+    "payload": {
+      "task": "train",
+      "model_start_hash": "0x596a200d6acae5b998bf25c076256288d0e16e2a1d650377b500c5e6a8ce1eaf",
+      "dataset_hash": "0x027bcde07e148979a854b6e1d042299190f482d1ba5f4c6b2f17afc84da8e2fc",
+      "commitment_grid": "q16",
+      "epoch": 0,
+      "steps": 1950,
+      "worker_shard": 0,
+      "batch_size": 64,
+      "learning_rate": 0.003,
+      "max_windows": 64,
+      "shards_per_step": 8,
+      "seed": 1,
+      "share_every": 50,
+      "dead_zone_patience": 5
+    },
+    "lease_secs": 4905,
+    "max_attempts": 3
+  }
+,
+  {
+    "id": "h01-2M-nat-seed2",
+    "requires": "h01",
+    "payload": {
+      "task": "train",
+      "model_start_hash": "0x1f5a8484074ac89ac7275c316ffa398a7bb5070b8ce9b8fb8233165a9a42eb4a",
+      "dataset_hash": "0x027bcde07e148979a854b6e1d042299190f482d1ba5f4c6b2f17afc84da8e2fc",
+      "commitment_grid": "q16",
+      "epoch": 0,
+      "steps": 1950,
+      "worker_shard": 0,
+      "batch_size": 64,
+      "learning_rate": 0.003,
+      "max_windows": 64,
+      "shards_per_step": 8,
+      "seed": 2,
+      "share_every": 50,
+      "dead_zone_patience": 5
+    },
+    "lease_secs": 4905,
+    "max_attempts": 3
+  }
+,
+  {
+    "id": "h01-2M-nat-seed3",
+    "requires": "h01",
+    "payload": {
+      "task": "train",
+      "model_start_hash": "0xa517a55c9e49a5be5c6452e37ec59ac59b85f6904f590f7d595ec6c517816da5",
+      "dataset_hash": "0x027bcde07e148979a854b6e1d042299190f482d1ba5f4c6b2f17afc84da8e2fc",
+      "commitment_grid": "q16",
+      "epoch": 0,
+      "steps": 1950,
+      "worker_shard": 0,
+      "batch_size": 64,
+      "learning_rate": 0.003,
+      "max_windows": 64,
+      "shards_per_step": 8,
+      "seed": 3,
+      "share_every": 50,
+      "dead_zone_patience": 5
+    },
+    "lease_secs": 4905,
+    "max_attempts": 3
+  }
+,
+  {
+    "id": "h01-2M-dense-seed1",
+    "requires": "h01",
+    "payload": {
+      "task": "train",
+      "model_start_hash": "0xeb7c9e011c7a536c67d5a745aec129b47e9d286a08b7cfff8aade4a411e9601e",
+      "dataset_hash": "0x027bcde07e148979a854b6e1d042299190f482d1ba5f4c6b2f17afc84da8e2fc",
+      "commitment_grid": "q16",
+      "epoch": 0,
+      "steps": 1950,
+      "worker_shard": 0,
+      "batch_size": 64,
+      "learning_rate": 0.003,
+      "max_windows": 64,
+      "shards_per_step": 8,
+      "seed": 1,
+      "share_every": 0,
+      "dead_zone_patience": 5
+    },
+    "lease_secs": 4905,
+    "max_attempts": 3
+  }
+,
+  {
+    "id": "h01-2M-dense-seed2",
+    "requires": "h01",
+    "payload": {
+      "task": "train",
+      "model_start_hash": "0x09a809f9cbea39c9d66406fa5a96e6e9cc9c008e413360e3a3f4c7e7d1cb4202",
+      "dataset_hash": "0x027bcde07e148979a854b6e1d042299190f482d1ba5f4c6b2f17afc84da8e2fc",
+      "commitment_grid": "q16",
+      "epoch": 0,
+      "steps": 1950,
+      "worker_shard": 0,
+      "batch_size": 64,
+      "learning_rate": 0.003,
+      "max_windows": 64,
+      "shards_per_step": 8,
+      "seed": 2,
+      "share_every": 0,
+      "dead_zone_patience": 5
+    },
+    "lease_secs": 4905,
+    "max_attempts": 3
+  }
+,
+  {
+    "id": "h01-2M-dense-seed3",
+    "requires": "h01",
+    "payload": {
+      "task": "train",
+      "model_start_hash": "0x9d6dfef91b8388ec1d20eafa6fbf9373882353370167cef70d5c40a21de2eaeb",
+      "dataset_hash": "0x027bcde07e148979a854b6e1d042299190f482d1ba5f4c6b2f17afc84da8e2fc",
+      "commitment_grid": "q16",
+      "epoch": 0,
+      "steps": 1950,
+      "worker_shard": 0,
+      "batch_size": 64,
+      "learning_rate": 0.003,
+      "max_windows": 64,
+      "shards_per_step": 8,
+      "seed": 3,
+      "share_every": 0,
+      "dead_zone_patience": 5
+    },
+    "lease_secs": 4905,
+    "max_attempts": 3
+  }
+,
+  {
+    "id": "h01-4M-nat-seed1",
+    "requires": "h01",
+    "payload": {
+      "task": "train",
+      "model_start_hash": "0x107ecf74986bc3a042c9f40a66c8b78bc6e5be2c0c3c23d595cd328a64e300dc",
+      "dataset_hash": "0x027bcde07e148979a854b6e1d042299190f482d1ba5f4c6b2f17afc84da8e2fc",
+      "commitment_grid": "q16",
+      "epoch": 0,
+      "steps": 3901,
+      "worker_shard": 0,
+      "batch_size": 64,
+      "learning_rate": 0.003,
+      "max_windows": 64,
+      "shards_per_step": 8,
+      "seed": 1,
+      "share_every": 50,
+      "dead_zone_patience": 5
+    },
+    "lease_secs": 6918,
+    "max_attempts": 3
+  }
+,
+  {
+    "id": "h01-4M-nat-seed2",
+    "requires": "h01",
+    "payload": {
+      "task": "train",
+      "model_start_hash": "0x8955f802758a82931e02046897168886db255f675d94c32ec325d0b587af39e5",
+      "dataset_hash": "0x027bcde07e148979a854b6e1d042299190f482d1ba5f4c6b2f17afc84da8e2fc",
+      "commitment_grid": "q16",
+      "epoch": 0,
+      "steps": 3901,
+      "worker_shard": 0,
+      "batch_size": 64,
+      "learning_rate": 0.003,
+      "max_windows": 64,
+      "shards_per_step": 8,
+      "seed": 2,
+      "share_every": 50,
+      "dead_zone_patience": 5
+    },
+    "lease_secs": 6918,
+    "max_attempts": 3
+  }
+,
+  {
+    "id": "h01-4M-nat-seed3",
+    "requires": "h01",
+    "payload": {
+      "task": "train",
+      "model_start_hash": "0xbc472c996d669a131432731ee814037753ed2844d41a781ef7a7b377dbed754b",
+      "dataset_hash": "0x027bcde07e148979a854b6e1d042299190f482d1ba5f4c6b2f17afc84da8e2fc",
+      "commitment_grid": "q16",
+      "epoch": 0,
+      "steps": 3901,
+      "worker_shard": 0,
+      "batch_size": 64,
+      "learning_rate": 0.003,
+      "max_windows": 64,
+      "shards_per_step": 8,
+      "seed": 3,
+      "share_every": 50,
+      "dead_zone_patience": 5
+    },
+    "lease_secs": 6918,
+    "max_attempts": 3
+  }
+,
+  {
+    "id": "h01-4M-dense-seed1",
+    "requires": "h01",
+    "payload": {
+      "task": "train",
+      "model_start_hash": "0x76ee93066b2827beb41ea7b39b1a4be0de17a7bede5ace1142caa6c9fe8a9ded",
+      "dataset_hash": "0x027bcde07e148979a854b6e1d042299190f482d1ba5f4c6b2f17afc84da8e2fc",
+      "commitment_grid": "q16",
+      "epoch": 0,
+      "steps": 3901,
+      "worker_shard": 0,
+      "batch_size": 64,
+      "learning_rate": 0.003,
+      "max_windows": 64,
+      "shards_per_step": 8,
+      "seed": 1,
+      "share_every": 0,
+      "dead_zone_patience": 5
+    },
+    "lease_secs": 6918,
+    "max_attempts": 3
+  }
+,
+  {
+    "id": "h01-4M-dense-seed2",
+    "requires": "h01",
+    "payload": {
+      "task": "train",
+      "model_start_hash": "0x82e9e974de673654244773202efeeea8b423a4987c6745cb2524bda3682b2e09",
+      "dataset_hash": "0x027bcde07e148979a854b6e1d042299190f482d1ba5f4c6b2f17afc84da8e2fc",
+      "commitment_grid": "q16",
+      "epoch": 0,
+      "steps": 3901,
+      "worker_shard": 0,
+      "batch_size": 64,
+      "learning_rate": 0.003,
+      "max_windows": 64,
+      "shards_per_step": 8,
+      "seed": 2,
+      "share_every": 0,
+      "dead_zone_patience": 5
+    },
+    "lease_secs": 6918,
+    "max_attempts": 3
+  }
+,
+  {
+    "id": "h01-4M-dense-seed3",
+    "requires": "h01",
+    "payload": {
+      "task": "train",
+      "model_start_hash": "0x31df9a2dc2f71556a3edc533dea60bcc59faa1784e23bec422f3c12cba7fdf38",
+      "dataset_hash": "0x027bcde07e148979a854b6e1d042299190f482d1ba5f4c6b2f17afc84da8e2fc",
+      "commitment_grid": "q16",
+      "epoch": 0,
+      "steps": 3901,
+      "worker_shard": 0,
+      "batch_size": 64,
+      "learning_rate": 0.003,
+      "max_windows": 64,
+      "shards_per_step": 8,
+      "seed": 3,
+      "share_every": 0,
+      "dead_zone_patience": 5
+    },
+    "lease_secs": 6918,
+    "max_attempts": 3
+  }
+,
+  {
+    "id": "h01-8M-nat-seed1",
+    "requires": "h01",
+    "payload": {
+      "task": "train",
+      "model_start_hash": "0x745ed15730d115f00ce27abd2849b28bf86846163a884a45ab0d8a21e8640c96",
+      "dataset_hash": "0x027bcde07e148979a854b6e1d042299190f482d1ba5f4c6b2f17afc84da8e2fc",
+      "commitment_grid": "q16",
+      "epoch": 0,
+      "steps": 7803,
+      "worker_shard": 0,
+      "batch_size": 64,
+      "learning_rate": 0.003,
+      "max_windows": 64,
+      "shards_per_step": 8,
+      "seed": 1,
+      "share_every": 50,
+      "dead_zone_patience": 5
+    },
+    "lease_secs": 14715,
+    "max_attempts": 3
+  }
+,
+  {
+    "id": "h01-8M-nat-seed2",
+    "requires": "h01",
+    "payload": {
+      "task": "train",
+      "model_start_hash": "0xe1042098410cd7ec3201b8e4f96bf2b8b11038c741657ca2e987a6b198b536b1",
+      "dataset_hash": "0x027bcde07e148979a854b6e1d042299190f482d1ba5f4c6b2f17afc84da8e2fc",
+      "commitment_grid": "q16",
+      "epoch": 0,
+      "steps": 7803,
+      "worker_shard": 0,
+      "batch_size": 64,
+      "learning_rate": 0.003,
+      "max_windows": 64,
+      "shards_per_step": 8,
+      "seed": 2,
+      "share_every": 50,
+      "dead_zone_patience": 5
+    },
+    "lease_secs": 14715,
+    "max_attempts": 3
+  }
+,
+  {
+    "id": "h01-8M-nat-seed3",
+    "requires": "h01",
+    "payload": {
+      "task": "train",
+      "model_start_hash": "0xe0614906a3415610831578b1c9b2146230d859204e7d4c4443ad341520aa00ac",
+      "dataset_hash": "0x027bcde07e148979a854b6e1d042299190f482d1ba5f4c6b2f17afc84da8e2fc",
+      "commitment_grid": "q16",
+      "epoch": 0,
+      "steps": 7803,
+      "worker_shard": 0,
+      "batch_size": 64,
+      "learning_rate": 0.003,
+      "max_windows": 64,
+      "shards_per_step": 8,
+      "seed": 3,
+      "share_every": 50,
+      "dead_zone_patience": 5
+    },
+    "lease_secs": 14715,
+    "max_attempts": 3
+  }
+,
+  {
+    "id": "h01-8M-dense-seed1",
+    "requires": "h01",
+    "payload": {
+      "task": "train",
+      "model_start_hash": "0x9355f2bd41fa0e8d96278de0d3f4496e3403278150534453a72b4749c36d8417",
+      "dataset_hash": "0x027bcde07e148979a854b6e1d042299190f482d1ba5f4c6b2f17afc84da8e2fc",
+      "commitment_grid": "q16",
+      "epoch": 0,
+      "steps": 7803,
+      "worker_shard": 0,
+      "batch_size": 64,
+      "learning_rate": 0.003,
+      "max_windows": 64,
+      "shards_per_step": 8,
+      "seed": 1,
+      "share_every": 0,
+      "dead_zone_patience": 5
+    },
+    "lease_secs": 14715,
+    "max_attempts": 3
+  }
+,
+  {
+    "id": "h01-8M-dense-seed2",
+    "requires": "h01",
+    "payload": {
+      "task": "train",
+      "model_start_hash": "0x20722363d04a2baa6a08371292028b814f71e8d5bfb7c6b7254aa4f4384c686f",
+      "dataset_hash": "0x027bcde07e148979a854b6e1d042299190f482d1ba5f4c6b2f17afc84da8e2fc",
+      "commitment_grid": "q16",
+      "epoch": 0,
+      "steps": 7803,
+      "worker_shard": 0,
+      "batch_size": 64,
+      "learning_rate": 0.003,
+      "max_windows": 64,
+      "shards_per_step": 8,
+      "seed": 2,
+      "share_every": 0,
+      "dead_zone_patience": 5
+    },
+    "lease_secs": 14715,
+    "max_attempts": 3
+  }
+,
+  {
+    "id": "h01-8M-dense-seed3",
+    "requires": "h01",
+    "payload": {
+      "task": "train",
+      "model_start_hash": "0xeccc0e88c4e214367aeba963b91863105066b4429a0b4da95c0e5218eff96220",
+      "dataset_hash": "0x027bcde07e148979a854b6e1d042299190f482d1ba5f4c6b2f17afc84da8e2fc",
+      "commitment_grid": "q16",
+      "epoch": 0,
+      "steps": 7803,
+      "worker_shard": 0,
+      "batch_size": 64,
+      "learning_rate": 0.003,
+      "max_windows": 64,
+      "shards_per_step": 8,
+      "seed": 3,
+      "share_every": 0,
+      "dead_zone_patience": 5
+    },
+    "lease_secs": 14715,
+    "max_attempts": 3
+  }
+,
+  {
+    "id": "h01-32M-nat-seed1",
+    "requires": "h01",
+    "payload": {
+      "task": "train",
+      "model_start_hash": "0x2714f25fcd5d9f2a17c4a56796f0c6c4296c1721304443536b246563dbd9e622",
+      "dataset_hash": "0x027bcde07e148979a854b6e1d042299190f482d1ba5f4c6b2f17afc84da8e2fc",
+      "commitment_grid": "q16",
+      "epoch": 0,
+      "steps": 31213,
+      "worker_shard": 0,
+      "batch_size": 64,
+      "learning_rate": 0.003,
+      "max_windows": 64,
+      "shards_per_step": 8,
+      "seed": 1,
+      "share_every": 50,
+      "dead_zone_patience": 5
+    },
+    "lease_secs": 132480,
+    "max_attempts": 3
+  }
+,
+  {
+    "id": "h01-32M-nat-seed2",
+    "requires": "h01",
+    "payload": {
+      "task": "train",
+      "model_start_hash": "0x58b148514898f9e6f22a7828cc06bc248789b0734b7851f75a1a073be47ce320",
+      "dataset_hash": "0x027bcde07e148979a854b6e1d042299190f482d1ba5f4c6b2f17afc84da8e2fc",
+      "commitment_grid": "q16",
+      "epoch": 0,
+      "steps": 31213,
+      "worker_shard": 0,
+      "batch_size": 64,
+      "learning_rate": 0.003,
+      "max_windows": 64,
+      "shards_per_step": 8,
+      "seed": 2,
+      "share_every": 50,
+      "dead_zone_patience": 5
+    },
+    "lease_secs": 132480,
+    "max_attempts": 3
+  }
+,
+  {
+    "id": "h01-32M-nat-seed3",
+    "requires": "h01",
+    "payload": {
+      "task": "train",
+      "model_start_hash": "0xe33574d1a6f8c64c7df0bf0fe6db961041921bba3c04ac21647834a697c5a857",
+      "dataset_hash": "0x027bcde07e148979a854b6e1d042299190f482d1ba5f4c6b2f17afc84da8e2fc",
+      "commitment_grid": "q16",
+      "epoch": 0,
+      "steps": 31213,
+      "worker_shard": 0,
+      "batch_size": 64,
+      "learning_rate": 0.003,
+      "max_windows": 64,
+      "shards_per_step": 8,
+      "seed": 3,
+      "share_every": 50,
+      "dead_zone_patience": 5
+    },
+    "lease_secs": 132480,
+    "max_attempts": 3
+  }
+,
+  {
+    "id": "h01-32M-dense-seed1",
+    "requires": "h01",
+    "payload": {
+      "task": "train",
+      "model_start_hash": "0xc2bf307118316c3c1cde3f8bad1506aecb1cc5a06011fb299e45f1c47da0b03a",
+      "dataset_hash": "0x027bcde07e148979a854b6e1d042299190f482d1ba5f4c6b2f17afc84da8e2fc",
+      "commitment_grid": "q16",
+      "epoch": 0,
+      "steps": 31213,
+      "worker_shard": 0,
+      "batch_size": 64,
+      "learning_rate": 0.003,
+      "max_windows": 64,
+      "shards_per_step": 8,
+      "seed": 1,
+      "share_every": 0,
+      "dead_zone_patience": 5
+    },
+    "lease_secs": 132480,
+    "max_attempts": 3
+  }
+,
+  {
+    "id": "h01-32M-dense-seed2",
+    "requires": "h01",
+    "payload": {
+      "task": "train",
+      "model_start_hash": "0xdd1061c43c51b35dc867da414d4a9688349c532e6b87c4871cf34b55e97a4dd8",
+      "dataset_hash": "0x027bcde07e148979a854b6e1d042299190f482d1ba5f4c6b2f17afc84da8e2fc",
+      "commitment_grid": "q16",
+      "epoch": 0,
+      "steps": 31213,
+      "worker_shard": 0,
+      "batch_size": 64,
+      "learning_rate": 0.003,
+      "max_windows": 64,
+      "shards_per_step": 8,
+      "seed": 2,
+      "share_every": 0,
+      "dead_zone_patience": 5
+    },
+    "lease_secs": 132480,
+    "max_attempts": 3
+  }
+,
+  {
+    "id": "h01-32M-dense-seed3",
+    "requires": "h01",
+    "payload": {
+      "task": "train",
+      "model_start_hash": "0x8b442f8a218417300fd36aefcbbe82f0c7b8351dd9f3c15ff54bba70be770d57",
+      "dataset_hash": "0x027bcde07e148979a854b6e1d042299190f482d1ba5f4c6b2f17afc84da8e2fc",
+      "commitment_grid": "q16",
+      "epoch": 0,
+      "steps": 31213,
+      "worker_shard": 0,
+      "batch_size": 64,
+      "learning_rate": 0.003,
+      "max_windows": 64,
+      "shards_per_step": 8,
+      "seed": 3,
+      "share_every": 0,
+      "dead_zone_patience": 5
+    },
+    "lease_secs": 132480,
+    "max_attempts": 3
+  }
+,
+  {
+    "id": "h01-64M-nat-seed1",
+    "requires": "h01",
+    "payload": {
+      "task": "train",
+      "model_start_hash": "0x81242fc9697083b3a5c4697048227de5db032679ec858a767e2139a5eda36639",
+      "dataset_hash": "0x027bcde07e148979a854b6e1d042299190f482d1ba5f4c6b2f17afc84da8e2fc",
+      "commitment_grid": "q16",
+      "epoch": 0,
+      "steps": 62427,
+      "worker_shard": 0,
+      "batch_size": 64,
+      "learning_rate": 0.003,
+      "max_windows": 64,
+      "shards_per_step": 8,
+      "seed": 1,
+      "share_every": 50,
+      "dead_zone_patience": 5
+    },
+    "lease_secs": 459396,
+    "max_attempts": 3
+  }
+,
+  {
+    "id": "h01-64M-nat-seed2",
+    "requires": "h01",
+    "payload": {
+      "task": "train",
+      "model_start_hash": "0xe2aa63b8ff3575d5541d9dee3c3c47c4ba94db90900f0c8477f7a1ddfce45738",
+      "dataset_hash": "0x027bcde07e148979a854b6e1d042299190f482d1ba5f4c6b2f17afc84da8e2fc",
+      "commitment_grid": "q16",
+      "epoch": 0,
+      "steps": 62427,
+      "worker_shard": 0,
+      "batch_size": 64,
+      "learning_rate": 0.003,
+      "max_windows": 64,
+      "shards_per_step": 8,
+      "seed": 2,
+      "share_every": 50,
+      "dead_zone_patience": 5
+    },
+    "lease_secs": 459396,
+    "max_attempts": 3
+  }
+,
+  {
+    "id": "h01-64M-nat-seed3",
+    "requires": "h01",
+    "payload": {
+      "task": "train",
+      "model_start_hash": "0x52604be68490becc680e52eb8036e3b63cd481020c086adc8bf79820c8bc1dc3",
+      "dataset_hash": "0x027bcde07e148979a854b6e1d042299190f482d1ba5f4c6b2f17afc84da8e2fc",
+      "commitment_grid": "q16",
+      "epoch": 0,
+      "steps": 62427,
+      "worker_shard": 0,
+      "batch_size": 64,
+      "learning_rate": 0.003,
+      "max_windows": 64,
+      "shards_per_step": 8,
+      "seed": 3,
+      "share_every": 50,
+      "dead_zone_patience": 5
+    },
+    "lease_secs": 459396,
+    "max_attempts": 3
+  }
+,
+  {
+    "id": "h01-64M-dense-seed1",
+    "requires": "h01",
+    "payload": {
+      "task": "train",
+      "model_start_hash": "0x29b5b362725ee9401c0ee4a75ccb44dfa05dbc18df619363031b9eed6e433778",
+      "dataset_hash": "0x027bcde07e148979a854b6e1d042299190f482d1ba5f4c6b2f17afc84da8e2fc",
+      "commitment_grid": "q16",
+      "epoch": 0,
+      "steps": 62427,
+      "worker_shard": 0,
+      "batch_size": 64,
+      "learning_rate": 0.003,
+      "max_windows": 64,
+      "shards_per_step": 8,
+      "seed": 1,
+      "share_every": 0,
+      "dead_zone_patience": 5
+    },
+    "lease_secs": 459396,
+    "max_attempts": 3
+  }
+,
+  {
+    "id": "h01-64M-dense-seed2",
+    "requires": "h01",
+    "payload": {
+      "task": "train",
+      "model_start_hash": "0x38ade444bc7e3a43da73783a8e12754554bc5bda60654de4ff6f1f20e2b02021",
+      "dataset_hash": "0x027bcde07e148979a854b6e1d042299190f482d1ba5f4c6b2f17afc84da8e2fc",
+      "commitment_grid": "q16",
+      "epoch": 0,
+      "steps": 62427,
+      "worker_shard": 0,
+      "batch_size": 64,
+      "learning_rate": 0.003,
+      "max_windows": 64,
+      "shards_per_step": 8,
+      "seed": 2,
+      "share_every": 0,
+      "dead_zone_patience": 5
+    },
+    "lease_secs": 459396,
+    "max_attempts": 3
+  }
+,
+  {
+    "id": "h01-64M-dense-seed3",
+    "requires": "h01",
+    "payload": {
+      "task": "train",
+      "model_start_hash": "0x3d023cc1c763538e64256db173f7a34fa39a06b114b48de5734f0c27ebe7327a",
+      "dataset_hash": "0x027bcde07e148979a854b6e1d042299190f482d1ba5f4c6b2f17afc84da8e2fc",
+      "commitment_grid": "q16",
+      "epoch": 0,
+      "steps": 62427,
+      "worker_shard": 0,
+      "batch_size": 64,
+      "learning_rate": 0.003,
+      "max_windows": 64,
+      "shards_per_step": 8,
+      "seed": 3,
+      "share_every": 0,
+      "dead_zone_patience": 5
+    },
+    "lease_secs": 459396,
+    "max_attempts": 3
+  }
+]
