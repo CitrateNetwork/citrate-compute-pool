@@ -19,6 +19,7 @@ fmt_changed(){ local base; base="$(git merge-base HEAD origin/main 2>/dev/null |
   while IFS= read -r f; do [ -f "$f" ] || continue; rustfmt --edition 2021 --check "$f" >/dev/null 2>&1 || { echo "needs fmt: $f"; bad=1; }; done <<< "$files"
   [ "$bad" -eq 0 ] || { echo "run: cargo fmt"; return 1; }; }
 gate "fmt-changed" fmt_changed
+gate "hosted-workflow-fail-closed" scripts/ci/check-workflow-fail-closed.sh
 gate "clippy" cargo clippy --workspace --all-targets --quiet -- -D warnings
 if [ "$FAST" -eq 0 ]; then gate "test" cargo test --workspace --quiet; else N+=("test"); S+=("SKIP"); fi
 echo; echo "──── local CI summary ────"
