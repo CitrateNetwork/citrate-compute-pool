@@ -16,7 +16,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use thiserror::Error;
 
-use crate::types::{B256, EpochIndex, JobId, TrainingJobSpec, WorkerAddress};
+use crate::types::{EpochIndex, JobId, TrainingJobSpec, WorkerAddress, B256};
 
 #[derive(Error, Debug)]
 pub enum ChainError {
@@ -35,7 +35,10 @@ pub enum ChainError {
     #[error("coordinator is not a joined worker")]
     CoordinatorNotJoined,
     #[error("wrong epoch; expected {expected}, got {got}")]
-    WrongEpoch { expected: EpochIndex, got: EpochIndex },
+    WrongEpoch {
+        expected: EpochIndex,
+        got: EpochIndex,
+    },
     #[error("epoch already committed")]
     EpochAlreadyCommitted,
     #[error("challenge window still open")]
@@ -179,6 +182,9 @@ pub trait ChainClient: Send + Sync {
     /// Open a challenge against a worker's step commitment. The
     /// caller proves the disputed leaf is actually in the on-chain
     /// epoch root via `merkle_proof`. Bond is held until resolution.
+    // The arguments intentionally mirror the challengeStep ABI fields;
+    // changing this trait to a wrapper struct would alter the client API.
+    #[allow(clippy::too_many_arguments)]
     async fn challenge_step(
         &self,
         job_id: JobId,
@@ -669,16 +675,20 @@ impl ChainClient for MockChainClient {
             // Slash target: SLASH_BPS of posted stake, bounded by
             // what remains held. Track cumulative challenge slash.
             let prior_slash = *job.challenge_slashed.get(&target).unwrap_or(&0);
-            let liveness_slash_count = if job.liveness_slashed.contains(&target) { 1 } else { 0 };
+            let liveness_slash_count = if job.liveness_slashed.contains(&target) {
+                1
+            } else {
+                0
+            };
             let nominal_slash = spec_stake * SLASH_BPS / BPS;
             // Held = posted - (liveness-slash portion) - (prior challenge slashes).
             // Liveness slash in the Solidity side is also SLASH_BPS? No —
             // the mock models liveness as a boolean; to match contract
             // accounting we treat each liveness-slash event as SLASH_BPS
             // too. Kept conservative: don't over-slash.
-            let held_lower_bound = spec_stake.saturating_sub(prior_slash).saturating_sub(
-                (liveness_slash_count as u128) * (spec_stake * 10 / BPS),
-            );
+            let held_lower_bound = spec_stake
+                .saturating_sub(prior_slash)
+                .saturating_sub((liveness_slash_count as u128) * (spec_stake * 10 / BPS));
             let slash = nominal_slash.min(held_lower_bound);
             *job.challenge_slashed.entry(target).or_insert(0) += slash;
 
@@ -704,7 +714,9 @@ impl ChainClient for MockChainClient {
 
     async fn worker_total_slashed(&self, job_id: JobId, worker: WorkerAddress) -> u128 {
         let state = self.inner.lock();
-        let Some(job) = state.jobs.get(&job_id) else { return 0 };
+        let Some(job) = state.jobs.get(&job_id) else {
+            return 0;
+        };
         let challenge_portion = *job.challenge_slashed.get(&worker).unwrap_or(&0);
         let liveness_portion = if job.liveness_slashed.contains(&worker) {
             // Match contract: LIVENESS_SLASH_BPS = 10 (0.1%)
@@ -884,7 +896,10 @@ mod tests {
 
         // Too early.
         chain.advance_blocks(50).await;
-        let err = chain.reassign_coordinator(job_id, w2, w3).await.unwrap_err();
+        let err = chain
+            .reassign_coordinator(job_id, w2, w3)
+            .await
+            .unwrap_err();
         assert!(matches!(err, ChainError::CoordinatorStillActive));
 
         // Past timeout.
