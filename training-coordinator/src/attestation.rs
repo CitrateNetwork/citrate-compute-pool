@@ -42,6 +42,23 @@ pub use citrate_training_worker::coordinator_protocol::Attestation;
 /// The alf-web compute door carries the identical constant.
 pub const ACCELERATOR_TOK_S: f64 = 10_000.0;
 
+/// Upper plausibility bound on a probe's self-declared throughput, in
+/// tokens/second on the fixed divergence-probe job.
+///
+/// `tokens_per_second` is a field the registering worker writes itself. The
+/// fastest hardware measured on this job is the GB10 at ~71,098 tok/s; this bound
+/// sits well above that and above any accelerator we realistically expect on so
+/// small a model. A claim above it is not a measurement, it is a fabrication
+/// aimed at minting the top tier, so [`capability_of`] treats it as unverified
+/// (`Probe`) — revised upward only when real hardware actually reports there, the
+/// same evidence-driven policy `ACCELERATOR_TOK_S` follows.
+///
+/// This bounds the *implausible* end of self-declaration; it does not make the
+/// self-reported capability sound on its own (a value inside the envelope is
+/// still unverified). Closing that fully needs a coordinator-issued challenge —
+/// see CP-B-001.
+pub const MAX_PLAUSIBLE_TOK_S: f64 = 250_000.0;
+
 pub const PROBE_SCHEMA: &str = "nat.divergence-probe/1";
 
 /// The fields of a `nat.divergence-probe/1` document this crate reads.
@@ -78,6 +95,14 @@ pub fn capability_of(p: &ProbeReport) -> Capability {
     }
     let fast = p.perf.tokens_per_second >= ACCELERATOR_TOK_S;
     if !fast {
+        return Capability::Probe;
+    }
+    // CP-B-001: `tokens_per_second` is attacker-written. A value above any
+    // measured or realistically-expected result on the fixed probe job is a
+    // fabrication, not a measurement — cap such a claim at `Probe` so it cannot be
+    // used to mint the top tier. (This bounds only the implausible end; a value
+    // inside the envelope is still self-declared, which a challenge must close.)
+    if p.perf.tokens_per_second > MAX_PLAUSIBLE_TOK_S {
         return Capability::Probe;
     }
     match (p.backend.as_str(), p.dtype.as_str()) {

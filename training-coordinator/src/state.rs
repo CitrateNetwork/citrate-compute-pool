@@ -147,14 +147,18 @@ impl State {
             if expires_at > now {
                 continue;
             }
+            // CP-B-001: an expired lease is a no-show — the worker leased and
+            // never submitted. That is not evidence the job itself is bad, and it
+            // must not permanently remove the job from circulation. Registration
+            // is unauthenticated, so a handful of throwaway keys could otherwise
+            // lease-and-expire a job into a terminal `Quarantined` state with no
+            // recovery path (each fresh key evades `failed_by`, so `attempts`
+            // marched to `max_attempts`). Always return the job to the pool,
+            // recording `failed_by` so the same key is not re-offered it. Terminal
+            // quarantine is reserved for a genuine failure signal, which the
+            // unauthenticated no-show path cannot forge.
             rec.failed_by.insert(worker);
-            rec.status = if rec.attempts >= rec.spec.max_attempts {
-                JobStatus::Quarantined {
-                    reason: format!("{} attempts expired without a submission", rec.attempts),
-                }
-            } else {
-                JobStatus::Pending
-            };
+            rec.status = JobStatus::Pending;
             freed.push(id.clone());
         }
         freed
