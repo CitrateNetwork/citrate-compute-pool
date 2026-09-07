@@ -240,6 +240,34 @@ fn re_registering_updates_the_capability_and_keeps_the_join_date() {
     assert_eq!(w.last_seen, 500);
 }
 
+/// CP-B-003: `/v1/register` is unauthenticated and free, and each distinct key
+/// became a permanent `WorkerRecord` that was never evicted — a script could grow
+/// `state.json` without bound and turn every request into an O(state) fsync. The
+/// worker map must be capped: N distinct registrations leave at most
+/// `MAX_WORKERS` records, not N.
+#[test]
+fn the_worker_map_is_bounded_regardless_of_how_many_keys_register() {
+    let mut s = State::default();
+    let n = MAX_WORKERS + 500;
+    for i in 0..n as u64 {
+        s.register(
+            &RegisteredWorker {
+                id: H160::from_low_u64_be(i + 1),
+                capability: Capability::Probe,
+                backend: "candle-cpu".into(),
+                dtype: "f32".into(),
+                tokens_per_second: 1.0,
+            },
+            i, // last_seen advances, so LRU eviction is well-defined
+        );
+    }
+    assert!(
+        s.workers.len() <= MAX_WORKERS,
+        "worker map grew to {} for {n} registrations; must be capped at {MAX_WORKERS}",
+        s.workers.len(),
+    );
+}
+
 #[test]
 fn counts_report_the_whole_fleet() {
     let mut s = with(
