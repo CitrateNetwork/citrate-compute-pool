@@ -211,3 +211,49 @@ async fn the_capability_defaults_fail_safe() {
         "a mock chain must not claim live settlement"
     );
 }
+
+/// CP-B-010: a chain client that reports LIVE settlement while its
+/// snapshot carries an EMPTY worker set must be refused before the
+/// training loop. `HttpChainClient::snapshot()` currently hard-codes
+/// `workers: Vec::new()` (the S1.5 TODO) while `is_live_settlement()`
+/// returns true — composing them would commit an all-zero epoch Merkle
+/// root via `commitEpoch`, discarding every real commitment and leaving
+/// honest work indistinguishable from no work at settlement time. An
+/// HONEST backend is used so the run clears the honesty gate and reaches
+/// the new zero-workers guard.
+///
+/// RED (pre-fix): `run()` proceeds, aggregates zero commits, and posts
+/// `compute_epoch_root(&[]) == B256::zero()` — returning Ok.
+/// GREEN (post-fix): `run()` refuses with a "zero workers" error.
+#[tokio::test]
+async fn refuses_live_settlement_when_the_chain_snapshot_has_zero_workers() {
+    let chain = MockChainClient::new_live_settlement();
+    let transport = InProcessTransport::new();
+    let me = Address::repeat_byte(0xB1);
+    // Create a job but deliberately DO NOT recruit — the snapshot's worker
+    // set stays empty, exactly the partial-snapshot trap.
+    let job_id = chain.create_job(make_spec());
+    transport.register(me).await;
+
+    let worker = Worker::new(
+        WorkerConfig {
+            job_id,
+            self_address: me,
+            shard_index: 0,
+            is_coordinator: true,
+        },
+        Arc::new(HonestBackend(DeterministicTinyModel::new())),
+        transport.scoped(me),
+        Arc::clone(&chain),
+    );
+
+    let err = worker
+        .run()
+        .await
+        .expect_err("live settlement with zero workers must be refused (CP-B-010)");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("zero workers"),
+        "the refusal must name the zero-worker snapshot; got: {msg}"
+    );
+}

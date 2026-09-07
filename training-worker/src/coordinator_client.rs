@@ -92,7 +92,11 @@ impl CoordinatorClient {
             // Trailing slash would produce `//v1/...`, which some proxies treat
             // as a different path.
             base: base_url.into().trim_end_matches('/').to_string(),
-            http: reqwest::Client::new(),
+            // CP-B-006: a bare `Client::new()` has NO timeout (a wedged
+            // coordinator hangs the poll loop forever) and follows
+            // redirects (a 3xx could re-POST a signed body off-gate).
+            // Use the redirect-safe, timeout-bounded builder.
+            http: crate::outbound::redirect_safe_client(Duration::from_secs(30)),
             wallet,
             backoff: Backoff::default(),
         }

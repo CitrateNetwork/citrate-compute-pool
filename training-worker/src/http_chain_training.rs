@@ -132,10 +132,11 @@ impl HttpChainClient {
         contract_addr: H160,
         wallet: Wallet,
     ) -> Self {
-        let http = reqwest::Client::builder()
-            .timeout(HTTP_TIMEOUT)
-            .build()
-            .unwrap_or_else(|_| reqwest::Client::new());
+        // CP-B-006 / CP-B-012: redirect-follow disabled (a 3xx must not
+        // re-POST the signed JSON-RPC body to an off-gate host) + fail
+        // CLOSED on a builder error rather than `Client::new()`, which
+        // follows redirects and has no timeout.
+        let http = crate::outbound::redirect_safe_client(HTTP_TIMEOUT);
         Self {
             rpc_url,
             chain_id,
@@ -144,6 +145,25 @@ impl HttpChainClient {
             http,
             selectors: Selectors::compute(),
         }
+    }
+
+    /// CP-B-006: verify the RPC endpoint's advertised chain id matches
+    /// the configured one before signing any money transaction. Mirrors
+    /// `pool-coordinator::HttpChainAdapter::verify_rpc_chain_id` (F-5).
+    pub async fn verify_chain_id(&self) -> Result<(), ChainError> {
+        let result = self.rpc("eth_chainId", serde_json::json!([])).await?;
+        let hex_str = result
+            .as_str()
+            .ok_or_else(|| ChainError::WrongState("eth_chainId result not a string".into()))?;
+        let observed = parse_hex_u64(hex_str)
+            .map_err(|e| ChainError::WrongState(format!("eth_chainId decode: {e}")))?;
+        if observed != self.chain_id {
+            return Err(ChainError::WrongState(format!(
+                "RPC chain_id mismatch — configured {} vs observed {} ({})",
+                self.chain_id, observed, self.rpc_url
+            )));
+        }
+        Ok(())
     }
 
     /// POST a JSON-RPC request and return the `result` field.

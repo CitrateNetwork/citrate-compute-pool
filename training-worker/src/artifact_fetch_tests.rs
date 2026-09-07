@@ -225,3 +225,68 @@ fn a_hash_mismatch_error_names_both_hashes_so_it_can_be_diagnosed() {
     assert!(s.contains("nothing was written"));
     assert!(s.contains("model.safetensors"));
 }
+
+// ── CP-B-011: streaming byte cap on the untrusted mirror ────────────────
+
+/// Serve a `Transfer-Encoding: chunked` HTTP/1.1 response with NO
+/// `Content-Length`, streaming `total` bytes in small chunks. This is
+/// the shape an untrusted mirror controls to defeat a pre-read length
+/// check — the exact case CP-B-011 is about. Returns the bound address.
+async fn spawn_chunked_oversize_server(total: usize) -> std::net::SocketAddr {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        if let Ok((mut sock, _)) = listener.accept().await {
+            // Drain the request headers (best-effort).
+            let mut scratch = [0u8; 1024];
+            let _ = sock.read(&mut scratch).await;
+            let _ = sock
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nTransfer-Encoding: chunked\r\n\r\n",
+                )
+                .await;
+            let chunk = [b'x'; 64];
+            let mut sent = 0usize;
+            while sent < total {
+                let n = chunk.len().min(total - sent);
+                let _ = sock
+                    .write_all(format!("{:x}\r\n", n).as_bytes())
+                    .await;
+                let _ = sock.write_all(&chunk[..n]).await;
+                let _ = sock.write_all(b"\r\n").await;
+                sent += n;
+            }
+            let _ = sock.write_all(b"0\r\n\r\n").await;
+            let _ = sock.flush().await;
+        }
+    });
+    addr
+}
+
+// CP-B-011 RED→GREEN: a chunked mirror response with no Content-Length
+// that exceeds the cap must be refused as TooLarge from the STREAMING
+// counter, never buffered whole. Pre-fix `get` did `res.bytes().await`
+// (buffering the entire body) before the size check, so an unbounded
+// chunked body OOM'd the process. Post-fix `fetch_capped` aborts mid-
+// stream the instant the running total crosses the cap.
+#[tokio::test]
+async fn a_chunked_oversize_mirror_response_is_refused_by_the_streaming_cap() {
+    // Cap of 256 bytes; server streams 4 KiB with no Content-Length.
+    let addr = spawn_chunked_oversize_server(4096).await;
+    let mirror = HttpMirror::new(format!("http://{addr}"));
+    let out = mirror.fetch_capped("anything", 256).await;
+    assert!(
+        matches!(out, Err(FetchError::TooLarge)),
+        "an over-cap chunked body must be refused as TooLarge, got {out:?}"
+    );
+}
+
+// The same path must still SERVE a body that fits under the cap.
+#[tokio::test]
+async fn a_chunked_response_under_the_cap_is_served() {
+    let addr = spawn_chunked_oversize_server(100).await;
+    let mirror = HttpMirror::new(format!("http://{addr}"));
+    let out = mirror.fetch_capped("anything", 256).await.expect("under cap serves");
+    assert_eq!(out.len(), 100);
+}

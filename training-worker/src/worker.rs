@@ -37,6 +37,11 @@ const DRAIN_RECV_TIMEOUT: Duration = Duration::from_secs(60);
 /// deadline we log + move on to waiting for the on-chain root.
 const ARCHIVE_DRAIN_DEADLINE: Duration = Duration::from_secs(120);
 
+/// CP-B-010: upper bound on how long a non-coordinator waits for the
+/// coordinator's epoch root to appear in the chain snapshot before
+/// bailing, so a never-populated `epoch_roots` cannot spin forever.
+const EPOCH_ROOT_WAIT_DEADLINE: Duration = Duration::from_secs(600);
+
 /// RM-E.3 / COMPUTE_POOL-001 — authenticated epoch-commit aggregation.
 ///
 /// The coordinator's Merkle root drives reward/slash distribution, so the
@@ -191,6 +196,28 @@ where
         // Load starting weights. For S0 this is a no-op that just
         // returns the hash; S2 backends fetch from IPFS.
         let snap = self.chain.snapshot(job_id).await?;
+
+        // CP-B-010: refuse to run against a live-settlement chain whose
+        // snapshot reports zero workers. The HTTP chain client's
+        // `snapshot()` currently hard-codes an empty worker set + empty
+        // epoch-root map (the S1.5 TODO). Composing it with a live
+        // `is_live_settlement()` would (a) commit an all-zero epoch
+        // Merkle root via `commitEpoch` — discarding every worker's real
+        // commitment and making `challengeStep`'s inclusion proof
+        // structurally impossible — (b) underflow `worker_count - 1` on
+        // the non-coordinator path, and (c) spin an unbounded epoch-root
+        // poll loop because `epoch_roots` is always empty. Fail closed.
+        if self.chain.is_live_settlement() && snap.workers.is_empty() {
+            return Err(anyhow::anyhow!(
+                "refusing to run job {job_id}: the chain reports live settlement but the \
+                 chain snapshot contains zero workers. Committing epochs from this snapshot \
+                 would post an all-zero Merkle root and discard every real commitment, \
+                 leaving honest work indistinguishable from no work at settlement time. \
+                 This is the partial-snapshot trap: populate workers/epoch_roots (or return \
+                 is_live_settlement() == false) before settling."
+            ));
+        }
+
         let mut prev_weights = self
             .backend
             .load_starting_weights(snap.spec.model_start_hash)
@@ -321,8 +348,11 @@ where
                 // counts only unique accepted commits, and is bounded
                 // by a per-message timeout + an overall deadline so a
                 // flooder or silent mesh can't wedge the worker.
+                // CP-B-010: `saturating_sub` so a zero/one worker_count
+                // can never underflow `usize` (panic in debug, wrap to
+                // usize::MAX in release) on this non-coordinator path.
                 let expected =
-                    ((worker_count as usize) - 1) * (spec.steps_per_epoch as usize);
+                    (worker_count as usize).saturating_sub(1) * (spec.steps_per_epoch as usize);
                 let mut archive_gate =
                     EpochAggregator::new(epoch, snap.workers.iter().copied());
                 let deadline = tokio::time::Instant::now() + ARCHIVE_DRAIN_DEADLINE;
@@ -362,12 +392,25 @@ where
                 // Wait for the coordinator to post the epoch root on
                 // chain — poll the chain snapshot. On S0 the mock
                 // responds immediately so this loop exits in O(1).
+                //
+                // CP-B-010: bound the wait with a deadline so a chain
+                // client whose snapshot never populates `epoch_roots`
+                // (the S1.5 partial-snapshot trap) cannot spin this loop
+                // forever issuing eth_calls. On a live chain the epoch
+                // root should appear within the coordination timeout.
+                let root_deadline = tokio::time::Instant::now() + EPOCH_ROOT_WAIT_DEADLINE;
                 loop {
                     let snap = self.chain.snapshot(job_id).await?;
                     if snap.epoch_roots.contains_key(&epoch) {
                         break;
                     }
-                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                    if tokio::time::Instant::now() >= root_deadline {
+                        anyhow::bail!(
+                            "epoch {epoch}: coordinator epoch root did not appear within \
+                             the wait deadline (chain snapshot never populated epoch_roots)"
+                        );
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                 }
             }
         }

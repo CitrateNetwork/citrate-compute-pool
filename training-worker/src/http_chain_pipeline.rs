@@ -90,10 +90,8 @@ impl HttpPipelineChainClient {
         contract_addr: H160,
         wallet: Wallet,
     ) -> Self {
-        let http = reqwest::Client::builder()
-            .timeout(HTTP_TIMEOUT)
-            .build()
-            .unwrap_or_else(|_| reqwest::Client::new());
+        // CP-B-006 / CP-B-012: redirect-safe, timeout-bounded, fail-closed.
+        let http = crate::outbound::redirect_safe_client(HTTP_TIMEOUT);
         Self {
             rpc_url,
             chain_id,

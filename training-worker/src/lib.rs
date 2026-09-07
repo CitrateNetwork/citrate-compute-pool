@@ -66,6 +66,9 @@ pub mod http_chain_pipeline;
 #[cfg(feature = "federated")]
 pub mod federated_signer;
 pub mod job_artifacts;
+/// CP-B-006: outbound TLS/redirect enforcement for the worker's HTTP
+/// legs (RPC, coordinator, mirror). Mirrors `pool-coordinator::outbound`.
+pub mod outbound;
 /// The real NAT-backed training backend. Feature-gated because it pulls Candle;
 /// the artifact-verification and commitment layers it depends on are NOT gated,
 /// so the honesty checks compile and test everywhere.

@@ -111,6 +111,15 @@ async fn main() -> ExitCode {
         .unwrap_or(40204);
     let rpc_url = env::var("CITRATE_WORKER_RPC_URL")
         .unwrap_or_else(|_| "https://rpc.citrate.ai".to_string());
+    // CP-B-006: the RPC leg reads chain truth AND carries signed money
+    // transactions. A plaintext remote RPC is MITM-able (false chain
+    // truth to a daemon that signs). Refuse fail-closed at startup —
+    // mirrors pool-coordinator's config-load gate. Default is https, so
+    // deployments using the default are unaffected.
+    if let Err(e) = citrate_training_worker::outbound::validate_outbound_url(&rpc_url) {
+        eprintln!("CITRATE_WORKER_RPC_URL: {}", e);
+        return ExitCode::from(4);
+    }
 
     let job_id_filter: Option<u64> = env::var("CITRATE_WORKER_JOB_ID")
         .ok()
@@ -161,6 +170,12 @@ async fn main() -> ExitCode {
                 contract,
                 wallet,
             );
+            // CP-B-006 (F-5 parity): fail-fast if the RPC's advertised
+            // chain id doesn't match the configured one, before signing.
+            if let Err(e) = client.verify_chain_id().await {
+                tracing::error!(error = %e, "RPC chain_id verification failed");
+                return ExitCode::from(12);
+            }
             if let Err(e) = training_event_loop(
                 &client,
                 job_id_filter,
