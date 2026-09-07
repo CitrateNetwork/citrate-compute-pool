@@ -59,44 +59,47 @@ pub mod chain;
 pub mod coordinator_client;
 pub mod coordinator_protocol;
 pub mod events;
-pub mod http_chain_pipeline;
 /// The real federated signer (secp256k1 over the worker's encrypted keystore),
 /// replacing NAT's `ToyKeyedSigner`. Behind the light `federated` feature — no
 /// Candle, so a node can sign and settle without building the trainer.
 #[cfg(feature = "federated")]
 pub mod federated_signer;
+pub mod http_chain_pipeline;
+pub mod http_chain_training;
 pub mod job_artifacts;
-/// The real NAT-backed training backend. Feature-gated because it pulls Candle;
-/// the artifact-verification and commitment layers it depends on are NOT gated,
-/// so the honesty checks compile and test everywhere.
-#[cfg(feature = "nat")]
-pub mod nat_backend;
 /// Turns a coordinator job payload into a real NAT run. Feature-gated with the
 /// backend it drives — a build without `nat` can still register and poll, it just
 /// declines training work rather than pretending to do it.
 #[cfg(feature = "nat")]
 pub mod job_runner;
-pub mod q16_commitment;
-pub mod zone_delta;
-pub mod http_chain_training;
 pub mod libp2p_transport;
 pub mod merkle;
+/// The real NAT-backed training backend. Feature-gated because it pulls Candle;
+/// the artifact-verification and commitment layers it depends on are NOT gated,
+/// so the honesty checks compile and test everywhere.
+#[cfg(feature = "nat")]
+pub mod nat_backend;
+/// CP-B-006: outbound TLS/redirect enforcement for the worker's HTTP
+/// legs (RPC, coordinator, mirror). Mirrors `pool-coordinator::outbound`.
+pub mod outbound;
 pub mod pipeline;
+pub mod q16_commitment;
 pub mod quantize;
 pub mod transport;
 pub mod types;
 pub mod wallet;
 pub mod worker;
+pub mod zone_delta;
 
 pub use backend::{DeterministicTinyModel, MaliciousTinyModel, ModelBackend, Tensor};
 pub use chain::{ChainClient, ChainError, JobChainSnapshot, MockChainClient};
+pub use libp2p_transport::{LibP2pTransport, LibP2pTransportError};
 pub use merkle::{compute_epoch_root, compute_leaf};
 pub use quantize::{quantize_tensor, QuantizedGradient};
-pub use libp2p_transport::{LibP2pTransport, LibP2pTransportError};
 pub use transport::{InProcessTransport, Transport, WorkerMessage};
 pub use types::{
-    B256, CommitmentHash, EpochIndex, JobId, PrevWeightsHash, StepCommit, StepIndex,
-    TrainingJobSpec, WeightsHash, WorkerAddress,
+    CommitmentHash, EpochIndex, JobId, PrevWeightsHash, StepCommit, StepIndex, TrainingJobSpec,
+    WeightsHash, WorkerAddress, B256,
 };
 pub use worker::{Worker, WorkerConfig, WorkerOutcome};
 
@@ -106,12 +109,12 @@ pub use attestation::{
     ParsedJwt,
 };
 pub use events::{classify, EventKind, RawLog};
-pub use job_artifacts::{Architecture, ArtifactError, ArtifactStore, CommitmentGrid, JobArtifacts};
-pub use q16_commitment::{q16_step_commitment, q16_tensor_commitment, to_q16, Q16Tensor, Q16_ONE};
-pub use zone_delta::{zone_deltas, zone_of, DeltaError, ZoneDelta, SHARED};
 pub use http_chain_pipeline::HttpPipelineChainClient;
 pub use http_chain_training::HttpChainClient;
+pub use job_artifacts::{Architecture, ArtifactError, ArtifactStore, CommitmentGrid, JobArtifacts};
+pub use q16_commitment::{q16_step_commitment, q16_tensor_commitment, to_q16, Q16Tensor, Q16_ONE};
 pub use wallet::{tx_hash_of_signed, Eip1559Tx, Wallet, WalletError};
+pub use zone_delta::{zone_deltas, zone_of, DeltaError, ZoneDelta, SHARED};
 
 pub use pipeline::{
     pipeline_stage_forward, MockPipelineChainClient, PipelineChainClient, PipelineChainError,

@@ -198,11 +198,19 @@ pub struct StatusResponse {
 }
 
 async fn status(AxumState(c): AxumState<Arc<Coordinator>>) -> Json<StatusResponse> {
-    let mut s = c.state.lock();
-    // Expire on read so a status page never shows a lease that is already dead.
-    s.expire_leases(unix_now());
+    // CP-B-009: expire on a CLONE, not on the shared state. Calling
+    // `expire_leases` on the live state here mutates it (rewrites
+    // JobStatus, inserts into `failed_by`, can quarantine a job) while
+    // bypassing `Coordinator::mutate`, so the mutation was never
+    // persisted — an unauthenticated GET silently diverged in-memory
+    // state from the crash-atomic store, and a restart in that window
+    // resurrected dead leases. Computing the display counts on a
+    // snapshot keeps `/v1/status` a true read: shared state (and thus
+    // the store) is never touched, so memory and disk stay in agreement.
+    let mut view = c.snapshot();
+    view.expire_leases(unix_now());
     Json(StatusResponse {
-        counts: s.counts(),
+        counts: view.counts(),
         settlement: "shadow",
     })
 }

@@ -50,15 +50,17 @@ async fn spawn_sink() -> (SocketAddr, Arc<AtomicUsize>) {
     let app = axum::Router::new()
         .route(
             "/sink",
-            post(|State(h): State<Arc<AtomicUsize>>, _body: String| async move {
-                // Any body delivered here is a prompt leak past the gate.
-                h.fetch_add(1, Ordering::SeqCst);
-                axum::Json(serde_json::json!({
-                    "output": "LEAKED-TO-SINK",
-                    "input_tokens": 1,
-                    "output_tokens": 1,
-                }))
-            }),
+            post(
+                |State(h): State<Arc<AtomicUsize>>, _body: String| async move {
+                    // Any body delivered here is a prompt leak past the gate.
+                    h.fetch_add(1, Ordering::SeqCst);
+                    axum::Json(serde_json::json!({
+                        "output": "LEAKED-TO-SINK",
+                        "input_tokens": 1,
+                        "output_tokens": 1,
+                    }))
+                },
+            ),
         )
         .with_state(hits.clone());
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind sink");
@@ -86,7 +88,9 @@ async fn spawn_redirector(sink: SocketAddr) -> SocketAddr {
             }
         }),
     );
-    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind redirector");
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind redirector");
     let addr = listener.local_addr().expect("redirector addr");
     tokio::spawn(async move {
         axum::serve(listener, app).await.expect("redirector serve");
@@ -167,6 +171,9 @@ async fn dispatch_does_not_follow_redirect_to_off_gate_sink() {
             .into_iter()
             .collect(),
         provider_timeout_secs: 30,
+        min_payment_grains: ethereum_types::U256::from(1u64),
+        max_prompt_bytes: 128 * 1024,
+        max_tokens_cap: 8192,
     };
 
     let event = ComputeRequestedEvent {

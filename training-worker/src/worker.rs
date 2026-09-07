@@ -23,7 +23,7 @@ use crate::backend::ModelBackend;
 use crate::chain::{ChainClient, JobChainState};
 use crate::merkle::compute_epoch_root;
 use crate::transport::{Transport, WorkerMessage};
-use crate::types::{B256, EpochIndex, JobId, StepCommit, StepIndex, WorkerAddress};
+use crate::types::{EpochIndex, JobId, StepCommit, StepIndex, WorkerAddress, B256};
 
 /// SECREM-02 6.3 (CITRATE_COMPUTE_POOL-2026-05-31-005): per-message
 /// timeout on the epoch drain loops. A peer that stops sending (or a
@@ -36,6 +36,11 @@ const DRAIN_RECV_TIMEOUT: Duration = Duration::from_secs(60);
 /// cache); a stalled mesh must not block epoch progression, so on
 /// deadline we log + move on to waiting for the on-chain root.
 const ARCHIVE_DRAIN_DEADLINE: Duration = Duration::from_secs(120);
+
+/// CP-B-010: upper bound on how long a non-coordinator waits for the
+/// coordinator's epoch root to appear in the chain snapshot before
+/// bailing, so a never-populated `epoch_roots` cannot spin forever.
+const EPOCH_ROOT_WAIT_DEADLINE: Duration = Duration::from_secs(600);
 
 /// RM-E.3 / COMPUTE_POOL-001 — authenticated epoch-commit aggregation.
 ///
@@ -61,10 +66,7 @@ pub(crate) struct EpochAggregator {
 }
 
 impl EpochAggregator {
-    pub(crate) fn new(
-        epoch: EpochIndex,
-        members: impl IntoIterator<Item = WorkerAddress>,
-    ) -> Self {
+    pub(crate) fn new(epoch: EpochIndex, members: impl IntoIterator<Item = WorkerAddress>) -> Self {
         Self {
             epoch,
             members: members.into_iter().collect(),
@@ -191,6 +193,28 @@ where
         // Load starting weights. For S0 this is a no-op that just
         // returns the hash; S2 backends fetch from IPFS.
         let snap = self.chain.snapshot(job_id).await?;
+
+        // CP-B-010: refuse to run against a live-settlement chain whose
+        // snapshot reports zero workers. The HTTP chain client's
+        // `snapshot()` currently hard-codes an empty worker set + empty
+        // epoch-root map (the S1.5 TODO). Composing it with a live
+        // `is_live_settlement()` would (a) commit an all-zero epoch
+        // Merkle root via `commitEpoch` — discarding every worker's real
+        // commitment and making `challengeStep`'s inclusion proof
+        // structurally impossible — (b) underflow `worker_count - 1` on
+        // the non-coordinator path, and (c) spin an unbounded epoch-root
+        // poll loop because `epoch_roots` is always empty. Fail closed.
+        if self.chain.is_live_settlement() && snap.workers.is_empty() {
+            return Err(anyhow::anyhow!(
+                "refusing to run job {job_id}: the chain reports live settlement but the \
+                 chain snapshot contains zero workers. Committing epochs from this snapshot \
+                 would post an all-zero Merkle root and discard every real commitment, \
+                 leaving honest work indistinguishable from no work at settlement time. \
+                 This is the partial-snapshot trap: populate workers/epoch_roots (or return \
+                 is_live_settlement() == false) before settling."
+            ));
+        }
+
         let mut prev_weights = self
             .backend
             .load_starting_weights(snap.spec.model_start_hash)
@@ -253,8 +277,7 @@ where
             // seen every other worker's (steps-per-epoch) commits for
             // this epoch, then compute + post the Merkle root.
             if self.config.is_coordinator {
-                let expected_total =
-                    (worker_count as usize) * (spec.steps_per_epoch as usize);
+                let expected_total = (worker_count as usize) * (spec.steps_per_epoch as usize);
 
                 // RM-E.3 / COMPUTE_POOL-001: aggregate through a
                 // membership + (worker, step) dedup gate so a flooder
@@ -321,16 +344,16 @@ where
                 // counts only unique accepted commits, and is bounded
                 // by a per-message timeout + an overall deadline so a
                 // flooder or silent mesh can't wedge the worker.
+                // CP-B-010: `saturating_sub` so a zero/one worker_count
+                // can never underflow `usize` (panic in debug, wrap to
+                // usize::MAX in release) on this non-coordinator path.
                 let expected =
-                    ((worker_count as usize) - 1) * (spec.steps_per_epoch as usize);
-                let mut archive_gate =
-                    EpochAggregator::new(epoch, snap.workers.iter().copied());
+                    (worker_count as usize).saturating_sub(1) * (spec.steps_per_epoch as usize);
+                let mut archive_gate = EpochAggregator::new(epoch, snap.workers.iter().copied());
                 let deadline = tokio::time::Instant::now() + ARCHIVE_DRAIN_DEADLINE;
                 while archive_gate.len() < expected {
-                    let per_msg_deadline = std::cmp::min(
-                        deadline,
-                        tokio::time::Instant::now() + DRAIN_RECV_TIMEOUT,
-                    );
+                    let per_msg_deadline =
+                        std::cmp::min(deadline, tokio::time::Instant::now() + DRAIN_RECV_TIMEOUT);
                     let recv =
                         tokio::time::timeout_at(per_msg_deadline, self.transport.recv(me)).await;
                     let msg = match recv {
@@ -362,12 +385,25 @@ where
                 // Wait for the coordinator to post the epoch root on
                 // chain — poll the chain snapshot. On S0 the mock
                 // responds immediately so this loop exits in O(1).
+                //
+                // CP-B-010: bound the wait with a deadline so a chain
+                // client whose snapshot never populates `epoch_roots`
+                // (the S1.5 partial-snapshot trap) cannot spin this loop
+                // forever issuing eth_calls. On a live chain the epoch
+                // root should appear within the coordination timeout.
+                let root_deadline = tokio::time::Instant::now() + EPOCH_ROOT_WAIT_DEADLINE;
                 loop {
                     let snap = self.chain.snapshot(job_id).await?;
                     if snap.epoch_roots.contains_key(&epoch) {
                         break;
                     }
-                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                    if tokio::time::Instant::now() >= root_deadline {
+                        anyhow::bail!(
+                            "epoch {epoch}: coordinator epoch root did not appear within \
+                             the wait deadline (chain snapshot never populated epoch_roots)"
+                        );
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                 }
             }
         }
@@ -377,7 +413,9 @@ where
         if self.config.is_coordinator {
             // Roll blocks forward to simulate the challenge window
             // elapsing. Real worker waits for the real block clock.
-            self.chain.advance_blocks(spec.challenge_window_blocks as u64 + 1).await;
+            self.chain
+                .advance_blocks(spec.challenge_window_blocks as u64 + 1)
+                .await;
             self.chain.finalize(job_id).await?;
             info!(worker = %me, "finalized job");
         } else {
@@ -453,7 +491,10 @@ mod compute_pool_001_tests {
 
         // Hostile stream interleaved with the honest commits.
         let mut agg = EpochAggregator::new(epoch, members);
-        assert!(agg.try_accept(commit(w1, epoch, 0, 0x11)), "honest w1 accepted");
+        assert!(
+            agg.try_accept(commit(w1, epoch, 0, 0x11)),
+            "honest w1 accepted"
+        );
         assert!(
             !agg.try_accept(commit(evil, epoch, 0, 0xEE)),
             "forged non-member commit must be rejected"
@@ -466,7 +507,10 @@ mod compute_pool_001_tests {
             !agg.try_accept(commit(w2, epoch + 1, 0, 0x22)),
             "wrong-epoch commit must be rejected"
         );
-        assert!(agg.try_accept(commit(w2, epoch, 0, 0x22)), "honest w2 accepted");
+        assert!(
+            agg.try_accept(commit(w2, epoch, 0, 0x22)),
+            "honest w2 accepted"
+        );
 
         assert_eq!(agg.len(), 2, "only the two honest commits are counted");
         let (got_root, _) = compute_epoch_root(&agg.into_commits());

@@ -477,3 +477,60 @@ async fn the_poll_loop_drains_the_queue_unattended() {
     assert_eq!(counts.done, 2, "both jobs completed unattended");
     assert_eq!(counts.pending, 0);
 }
+
+/// CP-B-009: `GET /v1/status` must be a true READ — it must never mutate
+/// shared coordinator state without persisting it. Pre-fix, `status`
+/// called `expire_leases` on the live state (rewriting JobStatus,
+/// inserting into `failed_by`) while bypassing `Coordinator::mutate`, so
+/// an unauthenticated GET silently diverged in-memory state from the
+/// crash-atomic store; a restart in that window resurrected dead leases.
+/// Post-fix, `status` expires on a snapshot, so after the GET the on-disk
+/// state still equals the in-memory state.
+#[tokio::test]
+async fn status_get_does_not_diverge_memory_from_disk() {
+    let path = tmp("status-readonly");
+    let c = Arc::new(Coordinator::open(Store::new(path.clone())).unwrap());
+    // A job whose lease expires immediately, so the very next status read
+    // sees an expirable lease.
+    c.add_job(
+        JobSpec::new("probe-job", Capability::Probe, serde_json::json!({})).with_lease_secs(0),
+    )
+    .unwrap();
+
+    // Register a probe-tier worker and lease the job.
+    let res = router(c.clone())
+        .oneshot(post(
+            "/v1/register",
+            register_body(KEY_A, &probe("candle-cpu", "f32", 7_786.0, true)),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let res = router(c.clone())
+        .oneshot(post("/v1/lease", lease_body(KEY_A)))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+
+    // Hit the read-only status route (the lease is now expired).
+    let res = router(c.clone())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/status")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+
+    // The store on disk must equal the in-memory state — status must not
+    // have mutated shared state behind the store's back.
+    let on_disk = Store::new(path).load().unwrap();
+    let in_memory = c.snapshot();
+    assert_eq!(
+        serde_json::to_string(&on_disk).unwrap(),
+        serde_json::to_string(&in_memory).unwrap(),
+        "GET /v1/status diverged in-memory state from the persisted store (CP-B-009)"
+    );
+}

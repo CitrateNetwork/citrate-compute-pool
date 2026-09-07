@@ -118,11 +118,7 @@ impl ChainAdapter for MockChain {
         self.self_address
     }
 
-    async fn coordinator_for(
-        &self,
-        pool_id: u64,
-        epoch: u64,
-    ) -> Result<H160, CoordinatorError> {
+    async fn coordinator_for(&self, pool_id: u64, epoch: u64) -> Result<H160, CoordinatorError> {
         self.calls
             .lock()
             .expect("mutex")
@@ -132,10 +128,7 @@ impl ChainAdapter for MockChain {
             .ok_or_else(|| CoordinatorError::Chain("no coordinator".into()))
     }
 
-    async fn pool_members(
-        &self,
-        _pool_id: u64,
-    ) -> Result<Vec<PoolMemberInfo>, CoordinatorError> {
+    async fn pool_members(&self, _pool_id: u64) -> Result<Vec<PoolMemberInfo>, CoordinatorError> {
         Ok(self.members.clone())
     }
 
@@ -181,6 +174,9 @@ fn config(provider_addrs: &[(H160, SocketAddr)]) -> CoordinatorConfig {
         wallet_address: H160::from([0xaa; 20]),
         member_endpoints: endpoints,
         provider_timeout_secs: 30,
+        min_payment_grains: ethereum_types::U256::from(1u64),
+        max_prompt_bytes: 128 * 1024,
+        max_tokens_cap: 8192,
     }
 }
 
@@ -252,7 +248,10 @@ async fn skips_event_when_not_coordinator() {
     let outcome = handle_event(&chain, &cfg, &event).await;
     assert!(matches!(outcome, Err(CoordinatorError::NotCoordinator)));
     let calls = calls.lock().expect("mutex").clone();
-    assert!(calls.record_dispatch.is_empty(), "no dispatch when not coord");
+    assert!(
+        calls.record_dispatch.is_empty(),
+        "no dispatch when not coord"
+    );
     assert!(calls.complete_job.is_empty());
 }
 
@@ -287,7 +286,10 @@ async fn provider_failure_marks_job_failed() {
     assert!(matches!(outcome, Err(CoordinatorError::ProviderFailed(_))));
     let calls = calls.lock().expect("mutex").clone();
     assert_eq!(calls.record_dispatch, vec![(7, member_addr)]);
-    assert!(calls.complete_job.is_empty(), "no complete on provider fail");
+    assert!(
+        calls.complete_job.is_empty(),
+        "no complete on provider fail"
+    );
     assert_eq!(calls.fail_job, vec![7]);
 }
 
@@ -389,7 +391,11 @@ async fn empty_provider_output_fails_job_instead_of_completing() {
         calls.complete_job.is_empty(),
         "must NOT complete (pay) a job with empty output"
     );
-    assert_eq!(calls.fail_job, vec![11], "job must be failed → buyer refunded");
+    assert_eq!(
+        calls.fail_job,
+        vec![11],
+        "job must be failed → buyer refunded"
+    );
 }
 
 // ── Stateless round-robin ───────────────────────────────────────
@@ -421,7 +427,11 @@ async fn select_member_distributes_uniformly_across_jobs() {
     // With 900 jobs across 3 members, expect ~300 each. Allow ±20%
     // for hash dispersion.
     for count in hits.values() {
-        assert!(*count > 240 && *count < 360, "skewed distribution: {}", count);
+        assert!(
+            *count > 240 && *count < 360,
+            "skewed distribution: {}",
+            count
+        );
     }
     assert_eq!(hits.len(), 3, "all members got at least one job");
 }

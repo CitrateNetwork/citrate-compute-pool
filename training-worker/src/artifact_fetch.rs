@@ -95,13 +95,29 @@ impl HttpMirror {
     pub fn new(base: impl Into<String>) -> Self {
         Self {
             base: base.into().trim_end_matches('/').to_string(),
-            http: reqwest::Client::new(),
+            // CP-B-006: redirect-safe + timeout-bounded (a bare
+            // `Client::new()` follows redirects and never times out).
+            http: crate::outbound::redirect_safe_client(std::time::Duration::from_secs(120)),
         }
     }
 }
 
-impl ArtifactSource for HttpMirror {
-    async fn get(&self, path: &str) -> Result<Vec<u8>, FetchError> {
+impl HttpMirror {
+    /// Fetch `path`, refusing anything larger than `max_bytes`.
+    ///
+    /// CP-B-011: the cap is enforced by STREAMING the body with a running
+    /// byte counter and aborting the instant it is exceeded — not by
+    /// buffering the whole response and checking its length afterwards. A
+    /// chunked response with no `Content-Length` (which the untrusted
+    /// mirror fully controls) could otherwise stream unboundedly into RAM
+    /// and OOM the volunteer's process before a post-`bytes()` check could
+    /// ever fire. `Response::chunk()` is available without reqwest's
+    /// `stream` feature.
+    pub(crate) async fn fetch_capped(
+        &self,
+        path: &str,
+        max_bytes: u64,
+    ) -> Result<Vec<u8>, FetchError> {
         let res = self
             .http
             .get(format!("{}/{path}", self.base))
@@ -116,21 +132,32 @@ impl ArtifactSource for HttpMirror {
             });
         }
         // Refuse on the advertised length before reading a byte where possible;
-        // the post-read check below is what actually enforces it, since
+        // the streaming check below is what actually enforces it, since
         // Content-Length is a claim and not a promise.
         if let Some(len) = res.content_length() {
-            if len > MAX_ARTIFACT_BYTES {
+            if len > max_bytes {
                 return Err(FetchError::TooLarge);
             }
         }
-        let bytes = res
-            .bytes()
+        let mut buf: Vec<u8> = Vec::new();
+        let mut res = res;
+        while let Some(chunk) = res
+            .chunk()
             .await
-            .map_err(|e| FetchError::Transport(e.to_string()))?;
-        if bytes.len() as u64 > MAX_ARTIFACT_BYTES {
-            return Err(FetchError::TooLarge);
+            .map_err(|e| FetchError::Transport(e.to_string()))?
+        {
+            if buf.len() as u64 + chunk.len() as u64 > max_bytes {
+                return Err(FetchError::TooLarge);
+            }
+            buf.extend_from_slice(&chunk);
         }
-        Ok(bytes.to_vec())
+        Ok(buf)
+    }
+}
+
+impl ArtifactSource for HttpMirror {
+    async fn get(&self, path: &str) -> Result<Vec<u8>, FetchError> {
+        self.fetch_capped(path, MAX_ARTIFACT_BYTES).await
     }
 }
 

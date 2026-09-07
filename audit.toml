@@ -34,7 +34,29 @@ ignore = [
     # path as 0119 (libp2p-mdns transitive). Re-evaluate when
     # hickory-proto ships a fix; remove this ignore entry then.
     "RUSTSEC-2026-0118",
+
+    # ─────────────────────────────────────────────────────────────────
+    # CCP-06 (federation graded audit 2026-09-02) — lockfile-only,
+    # not-in-binary. Documented here (mirroring the hickory rationale)
+    # so the tripwire is GREEN rather than RED on an un-triaged advisory.
+    # ─────────────────────────────────────────────────────────────────
+    # RUSTSEC-2026-0185 — quinn-proto remote memory exhaustion (HIGH).
+    # quinn is pulled ONLY by libp2p-quic, and the compute-pool libp2p
+    # feature list excludes `quic` (see training-worker/Cargo.toml:
+    # [tokio, tcp, noise, yamux, gossipsub, identify, ping, macros,
+    # ed25519, secp256k1]). `cargo tree -i quinn-proto -e normal` prints
+    # nothing — present-in-lockfile, NOT present-in-binary. Re-evaluate
+    # (and prefer a bump) the moment a `quic` transport is enabled.
+    "RUSTSEC-2026-0185",
 ]
+
+# NOTE (CCP-06): the two OTHER advisories the 2026-09-02 audit flagged
+# have been CLOSED by dep bumps rather than ignored, so they carry no
+# entry here:
+#   - RUSTSEC-2026-0204 (crossbeam-epoch invalid pointer deref, was
+#     in-binary) — bumped 0.9.18 -> 0.9.20.
+#   - RUSTSEC-2026-0258 (h2 unbounded empty DATA frames) — bumped
+#     0.4.14 -> 0.4.19.
 
 # ─── Unmaintained-warning ignores (REM-21) ─────────────────────────
 # These are NOT in the `ignore` array above because `cargo audit`'s

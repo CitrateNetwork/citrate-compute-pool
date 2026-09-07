@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::env;
 
-use ethereum_types::H160;
+use ethereum_types::{H160, U256};
 
 use crate::outbound::validate_outbound_url;
 
@@ -25,6 +25,21 @@ pub struct CoordinatorConfig {
     pub member_endpoints: HashMap<H160, String>,
     /// Per-request HTTPS timeout against pool members.
     pub provider_timeout_secs: u64,
+    /// CP-B-008 admission floor: refuse a `ComputeRequested` whose
+    /// escrowed `payment_grains` is below this, BEFORE `recordDispatch`.
+    /// The dispatch decision never reads escrow otherwise, so a
+    /// zero-payment job would be recorded on-chain against a
+    /// deterministically-selected honest member and then `failJob`'d
+    /// against it. Default 1 (refuse zero-payment). `0` disables.
+    pub min_payment_grains: U256,
+    /// CP-B-008 admission cap: refuse a job whose decoded prompt exceeds
+    /// this many bytes before dispatch. Bounds the multi-megabyte-prompt
+    /// grief vector. Default 128 KiB.
+    pub max_prompt_bytes: usize,
+    /// CP-B-008 admission cap: refuse a job whose `max_tokens` exceeds
+    /// this before dispatch. The decoder clamps only at `u32::MAX`;
+    /// this is the real serviceable ceiling. Default 8192.
+    pub max_tokens_cap: u32,
 }
 
 impl CoordinatorConfig {
@@ -42,25 +57,39 @@ impl CoordinatorConfig {
         // writes — a MITM on a plaintext remote RPC can feed false
         // chain-truth. Fail closed at config load. Default is loopback,
         // so production deployments using the default are unaffected.
-        validate_outbound_url(&rpc_url)
-            .map_err(|e| format!("CITRATE_POOL_RPC_URL: {}", e))?;
+        validate_outbound_url(&rpc_url).map_err(|e| format!("CITRATE_POOL_RPC_URL: {}", e))?;
         let wallet_hex = env::var("CITRATE_POOL_WALLET_ADDRESS")
             .map_err(|_| "CITRATE_POOL_WALLET_ADDRESS unset".to_string())?;
-        let wallet_address = parse_addr(&wallet_hex)
-            .map_err(|e| format!("CITRATE_POOL_WALLET_ADDRESS: {}", e))?;
-        let endpoints_raw = env::var("CITRATE_POOL_MEMBER_ENDPOINTS")
-            .unwrap_or_default();
+        let wallet_address =
+            parse_addr(&wallet_hex).map_err(|e| format!("CITRATE_POOL_WALLET_ADDRESS: {}", e))?;
+        let endpoints_raw = env::var("CITRATE_POOL_MEMBER_ENDPOINTS").unwrap_or_default();
         let member_endpoints = parse_endpoints(&endpoints_raw)?;
         let provider_timeout_secs = env::var("CITRATE_POOL_PROVIDER_TIMEOUT_SECS")
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or(30);
+        // CP-B-008 admission gate thresholds (env-overridable).
+        let min_payment_grains = env::var("CITRATE_POOL_MIN_PAYMENT_GRAINS")
+            .ok()
+            .and_then(|s| U256::from_dec_str(s.trim()).ok())
+            .unwrap_or_else(|| U256::from(1u64));
+        let max_prompt_bytes = env::var("CITRATE_POOL_MAX_PROMPT_BYTES")
+            .ok()
+            .and_then(|s| s.trim().parse().ok())
+            .unwrap_or(128 * 1024);
+        let max_tokens_cap = env::var("CITRATE_POOL_MAX_TOKENS")
+            .ok()
+            .and_then(|s| s.trim().parse().ok())
+            .unwrap_or(8192);
         Ok(Self {
             chain_id,
             rpc_url,
             wallet_address,
             member_endpoints,
             provider_timeout_secs,
+            min_payment_grains,
+            max_prompt_bytes,
+            max_tokens_cap,
         })
     }
 }
@@ -168,8 +197,14 @@ mod tests {
             .lock()
             .unwrap_or_else(|p| p.into_inner());
         let https = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa=https://m1.pool.example/infer";
-        assert!(parse_endpoints(https).is_ok(), "https endpoint must be accepted");
+        assert!(
+            parse_endpoints(https).is_ok(),
+            "https endpoint must be accepted"
+        );
         let loop_http = "0xb2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2=http://127.0.0.1:8080/infer";
-        assert!(parse_endpoints(loop_http).is_ok(), "loopback http must be accepted");
+        assert!(
+            parse_endpoints(loop_http).is_ok(),
+            "loopback http must be accepted"
+        );
     }
 }

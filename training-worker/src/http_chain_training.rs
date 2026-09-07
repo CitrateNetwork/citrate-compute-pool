@@ -50,10 +50,8 @@ use ethereum_types::{H160, H256, U256};
 use serde_json::{json, Value};
 use sha3::{Digest, Keccak256};
 
-use crate::chain::{
-    ChainClient, ChainError, JobChainSnapshot, JobChainState,
-};
-use crate::types::{B256, EpochIndex, JobId, TrainingJobSpec, WorkerAddress};
+use crate::chain::{ChainClient, ChainError, JobChainSnapshot, JobChainState};
+use crate::types::{EpochIndex, JobId, TrainingJobSpec, WorkerAddress, B256};
 use crate::wallet::{tx_hash_of_signed, Eip1559Tx, Wallet};
 
 /// Conservative gas limit for ComputePoolTraining writes. The heaviest
@@ -126,16 +124,12 @@ pub struct HttpChainClient {
 impl HttpChainClient {
     /// Construct a client pointed at `rpc_url`, signing writes to
     /// `contract_addr` with `wallet` on chain `chain_id`.
-    pub fn new(
-        rpc_url: String,
-        chain_id: u64,
-        contract_addr: H160,
-        wallet: Wallet,
-    ) -> Self {
-        let http = reqwest::Client::builder()
-            .timeout(HTTP_TIMEOUT)
-            .build()
-            .unwrap_or_else(|_| reqwest::Client::new());
+    pub fn new(rpc_url: String, chain_id: u64, contract_addr: H160, wallet: Wallet) -> Self {
+        // CP-B-006 / CP-B-012: redirect-follow disabled (a 3xx must not
+        // re-POST the signed JSON-RPC body to an off-gate host) + fail
+        // CLOSED on a builder error rather than `Client::new()`, which
+        // follows redirects and has no timeout.
+        let http = crate::outbound::redirect_safe_client(HTTP_TIMEOUT);
         Self {
             rpc_url,
             chain_id,
@@ -144,6 +138,25 @@ impl HttpChainClient {
             http,
             selectors: Selectors::compute(),
         }
+    }
+
+    /// CP-B-006: verify the RPC endpoint's advertised chain id matches
+    /// the configured one before signing any money transaction. Mirrors
+    /// `pool-coordinator::HttpChainAdapter::verify_rpc_chain_id` (F-5).
+    pub async fn verify_chain_id(&self) -> Result<(), ChainError> {
+        let result = self.rpc("eth_chainId", serde_json::json!([])).await?;
+        let hex_str = result
+            .as_str()
+            .ok_or_else(|| ChainError::WrongState("eth_chainId result not a string".into()))?;
+        let observed = parse_hex_u64(hex_str)
+            .map_err(|e| ChainError::WrongState(format!("eth_chainId decode: {e}")))?;
+        if observed != self.chain_id {
+            return Err(ChainError::WrongState(format!(
+                "RPC chain_id mismatch — configured {} vs observed {} ({})",
+                self.chain_id, observed, self.rpc_url
+            )));
+        }
+        Ok(())
     }
 
     /// POST a JSON-RPC request and return the `result` field.
@@ -160,9 +173,7 @@ impl HttpChainClient {
             .json(&body)
             .send()
             .await
-            .map_err(|e| {
-                ChainError::WrongState(format!("{} transport: {}", method, e))
-            })?;
+            .map_err(|e| ChainError::WrongState(format!("{} transport: {}", method, e)))?;
         let value: Value = resp
             .json()
             .await
@@ -189,9 +200,9 @@ impl HttpChainClient {
             "latest",
         ]);
         let result = self.rpc("eth_call", params).await?;
-        let hex_str = result.as_str().ok_or_else(|| {
-            ChainError::WrongState("eth_call result not a string".into())
-        })?;
+        let hex_str = result
+            .as_str()
+            .ok_or_else(|| ChainError::WrongState("eth_call result not a string".into()))?;
         hex::decode(hex_str.trim_start_matches("0x"))
             .map_err(|e| ChainError::WrongState(format!("eth_call bad hex: {}", e)))
     }
@@ -201,11 +212,10 @@ impl HttpChainClient {
         let result = self
             .rpc("eth_getTransactionCount", json!([addr, "pending"]))
             .await?;
-        let hex_str = result.as_str().ok_or_else(|| {
-            ChainError::WrongState("eth_getTransactionCount not a string".into())
-        })?;
-        parse_hex_u64(hex_str)
-            .map_err(|e| ChainError::WrongState(format!("nonce decode: {}", e)))
+        let hex_str = result
+            .as_str()
+            .ok_or_else(|| ChainError::WrongState("eth_getTransactionCount not a string".into()))?;
+        parse_hex_u64(hex_str).map_err(|e| ChainError::WrongState(format!("nonce decode: {}", e)))
     }
 
     async fn fetch_gas_price(&self) -> Result<U256, ChainError> {
@@ -220,15 +230,13 @@ impl HttpChainClient {
     /// Build, sign, and submit an EIP-1559 write to
     /// `self.contract_addr` with the given calldata + value. Returns
     /// the transaction hash on success.
-    async fn send_write(
-        &self,
-        calldata: Vec<u8>,
-        value: U256,
-    ) -> Result<H256, ChainError> {
+    async fn send_write(&self, calldata: Vec<u8>, value: U256) -> Result<H256, ChainError> {
         let nonce = self.fetch_nonce().await?;
         let gas_price = self.fetch_gas_price().await?;
         let priority = U256::from(DEFAULT_PRIORITY_FEE_WEI);
-        let max_fee = gas_price.saturating_mul(U256::from(2u64)).saturating_add(priority);
+        let max_fee = gas_price
+            .saturating_mul(U256::from(2u64))
+            .saturating_add(priority);
 
         let tx = Eip1559Tx {
             chain_id: self.chain_id,
@@ -273,10 +281,7 @@ impl HttpChainClient {
                     .and_then(|v| v.as_str())
                     .unwrap_or("0x1");
                 if parse_hex_u64(status).unwrap_or(1) == 0 {
-                    return Err(ChainError::WrongState(format!(
-                        "tx {:?} reverted",
-                        tx_hash
-                    )));
+                    return Err(ChainError::WrongState(format!("tx {:?} reverted", tx_hash)));
                 }
                 let bn = result
                     .get("blockNumber")
@@ -387,12 +392,11 @@ impl HttpChainClient {
     /// event-loop to bound each poll's `to_block`.
     pub async fn latest_block(&self) -> Result<u64, ChainError> {
         let result = self.rpc("eth_blockNumber", serde_json::json!([])).await?;
-        let hex_str = result.as_str().ok_or_else(|| {
-            ChainError::WrongState("eth_blockNumber not a string".into())
-        })?;
-        parse_hex_u64(hex_str).map_err(|e| {
-            ChainError::WrongState(format!("blockNumber decode: {}", e))
-        })
+        let hex_str = result
+            .as_str()
+            .ok_or_else(|| ChainError::WrongState("eth_blockNumber not a string".into()))?;
+        parse_hex_u64(hex_str)
+            .map_err(|e| ChainError::WrongState(format!("blockNumber decode: {}", e)))
     }
 
     /// Poll all ComputePoolTraining events in `[from_block, to_block]`
@@ -419,9 +423,9 @@ impl HttpChainClient {
             }]),
         };
         let result = self.rpc("eth_getLogs", params).await?;
-        let arr = result.as_array().ok_or_else(|| {
-            ChainError::WrongState("eth_getLogs not array".into())
-        })?;
+        let arr = result
+            .as_array()
+            .ok_or_else(|| ChainError::WrongState("eth_getLogs not array".into()))?;
         let mut out = Vec::with_capacity(arr.len());
         for entry in arr {
             if let Some(log) = crate::events::decode_log_entry(entry) {
@@ -503,9 +507,7 @@ impl ChainClient for HttpChainClient {
         // advance_blocks is a mock-only concept — the live chain's
         // clock is driven by real block production. Left as a no-op
         // so tests sharing the trait can call it harmlessly.
-        tracing::warn!(
-            "HttpChainClient::advance_blocks called; no-op on live chain"
-        );
+        tracing::warn!("HttpChainClient::advance_blocks called; no-op on live chain");
     }
 
     async fn finalize(&self, job_id: JobId) -> Result<(), ChainError> {
@@ -574,11 +576,7 @@ impl ChainClient for HttpChainClient {
         );
     }
 
-    async fn worker_total_slashed(
-        &self,
-        _job_id: JobId,
-        _worker: WorkerAddress,
-    ) -> u128 {
+    async fn worker_total_slashed(&self, _job_id: JobId, _worker: WorkerAddress) -> u128 {
         // S1.5 follow-up — requires getWorker(jobId, worker) decode
         // of WorkerInfo. Not on the critical-path for the training
         // loop; workers discover slashes via events in the real
@@ -698,8 +696,7 @@ mod tests {
     use tokio::net::TcpListener;
 
     /// Well-known key; derives 0x7e5f4552091a69125d5dfcb7b8c2659029395bdf.
-    const TEST_HEX: &str =
-        "0000000000000000000000000000000000000000000000000000000000000001";
+    const TEST_HEX: &str = "0000000000000000000000000000000000000000000000000000000000000001";
 
     /// Records every JSON-RPC request the stub server saw so tests
     /// can assert on method + params.
@@ -776,10 +773,7 @@ mod tests {
         }
     }
 
-    async fn rpc_handler(
-        State(state): State<StubState>,
-        Json(body): Json<Value>,
-    ) -> Json<Value> {
+    async fn rpc_handler(State(state): State<StubState>, Json(body): Json<Value>) -> Json<Value> {
         let method = body
             .get("method")
             .and_then(|v| v.as_str())
@@ -911,12 +905,8 @@ mod tests {
             .log
             .last_params("eth_sendRawTransaction")
             .expect("saw send");
-        let raw_hex = params[0]
-            .as_str()
-            .expect("raw tx is string")
-            .to_string();
-        let raw = hex::decode(raw_hex.trim_start_matches("0x"))
-            .expect("decode raw");
+        let raw_hex = params[0].as_str().expect("raw tx is string").to_string();
+        let raw = hex::decode(raw_hex.trim_start_matches("0x")).expect("decode raw");
         assert_eq!(raw[0], 0x02, "EIP-1559 type prefix");
 
         // Method sequence is nonce → gas price → send → receipt.
@@ -954,8 +944,7 @@ mod tests {
             .last_params("eth_sendRawTransaction")
             .expect("saw send");
         let raw_hex = params[0].as_str().expect("string").to_string();
-        let raw =
-            hex::decode(raw_hex.trim_start_matches("0x")).expect("decode");
+        let raw = hex::decode(raw_hex.trim_start_matches("0x")).expect("decode");
         let sel = Selectors::compute().commit_epoch;
         assert!(
             raw.windows(4).any(|w| w == sel),
@@ -987,8 +976,7 @@ mod tests {
             .last_params("eth_sendRawTransaction")
             .expect("saw send");
         let raw_hex = params[0].as_str().expect("string").to_string();
-        let raw =
-            hex::decode(raw_hex.trim_start_matches("0x")).expect("decode");
+        let raw = hex::decode(raw_hex.trim_start_matches("0x")).expect("decode");
         let sel = Selectors::compute().reassign_coordinator;
         assert!(
             raw.windows(4).any(|w| w == sel),
@@ -1012,17 +1000,17 @@ mod tests {
             "eth_call",
             json!(encode_training_job(
                 requester,
-                [0x11u8; 32],             // modelStartHash
-                [0x22u8; 32],             // datasetHash
-                3,                         // epochCount
-                10,                        // stepsPerEpoch
-                2,                         // minWorkers
-                5,                         // maxWorkers
-                20,                        // challengeWindowBlocks
+                [0x11u8; 32],                // modelStartHash
+                [0x22u8; 32],                // datasetHash
+                3,                           // epochCount
+                10,                          // stepsPerEpoch
+                2,                           // minWorkers
+                5,                           // maxWorkers
+                20,                          // challengeWindowBlocks
                 100_000_000_000_000_000u128, // perEpochBudget (0.1 ether)
                 50_000_000_000_000_000u128,  // perWorkerStake (0.05 ether)
-                1,                         // state = Training
-                1,                         // currentEpoch
+                1,                           // state = Training
+                1,                           // currentEpoch
                 coordinator,
             )),
         );
@@ -1035,14 +1023,8 @@ mod tests {
         assert_eq!(snap.spec.min_workers, 2);
         assert_eq!(snap.spec.max_workers, 5);
         assert_eq!(snap.spec.challenge_window_blocks, 20);
-        assert_eq!(
-            snap.spec.per_epoch_budget,
-            100_000_000_000_000_000u128
-        );
-        assert_eq!(
-            snap.spec.per_worker_stake,
-            50_000_000_000_000_000u128
-        );
+        assert_eq!(snap.spec.per_epoch_budget, 100_000_000_000_000_000u128);
+        assert_eq!(snap.spec.per_worker_stake, 50_000_000_000_000_000u128);
         assert_eq!(snap.spec.model_start_hash, B256::repeat_byte(0x11));
         assert_eq!(snap.spec.dataset_hash, B256::repeat_byte(0x22));
         assert_eq!(snap.state, JobChainState::Training);
@@ -1058,7 +1040,10 @@ mod tests {
         let state = StubState::new();
         // All-zero return = contract signals unknown job (pre-revert
         // shape some stubs return).
-        state.queue("eth_call", json!(format!("0x{}", hex::encode(vec![0u8; 544]))));
+        state.queue(
+            "eth_call",
+            json!(format!("0x{}", hex::encode(vec![0u8; 544]))),
+        );
         let addr = spawn_stub_rpc(state).await;
         let client = make_client(format!("http://{}", addr));
 
@@ -1083,22 +1068,10 @@ mod tests {
             job_state_from_byte(0).expect("0"),
             JobChainState::Recruiting
         );
-        assert_eq!(
-            job_state_from_byte(1).expect("1"),
-            JobChainState::Training
-        );
-        assert_eq!(
-            job_state_from_byte(2).expect("2"),
-            JobChainState::Awaiting
-        );
-        assert_eq!(
-            job_state_from_byte(3).expect("3"),
-            JobChainState::Finalized
-        );
-        assert_eq!(
-            job_state_from_byte(4).expect("4"),
-            JobChainState::Aborted
-        );
+        assert_eq!(job_state_from_byte(1).expect("1"), JobChainState::Training);
+        assert_eq!(job_state_from_byte(2).expect("2"), JobChainState::Awaiting);
+        assert_eq!(job_state_from_byte(3).expect("3"), JobChainState::Finalized);
+        assert_eq!(job_state_from_byte(4).expect("4"), JobChainState::Aborted);
         assert!(job_state_from_byte(5).is_err());
     }
 }
