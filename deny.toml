@@ -93,4 +93,18 @@ highlight = "all"
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
-allow-git = []
+# CCP-06: the lockfile carries two first-party federation git sources
+# (one non-optional). With an empty allow-git list and
+# `unknown-git = "deny"`, `cargo deny check sources` fails on every run,
+# so the gate was effectively broken rather than enforcing. Allow-list
+# exactly the two CitrateNetwork repos the workspace depends on — no
+# third-party git sources are permitted, so a PR substituting a fork of a
+# critical dep is still refused.
+allow-git = [
+    # citrate-fed-types — the shared Q16 kernel + settlement types
+    # (non-optional; used by pool-coordinator + training-worker).
+    "https://github.com/CitrateNetwork/citrate-fed-types",
+    # nat.git — the real training backend + federated seam. Only pulled
+    # under the optional `nat` / `federated` features.
+    "ssh://git@github.com/CitrateNetwork/nat",
+]

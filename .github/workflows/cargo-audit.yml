@@ -58,11 +58,24 @@ jobs:
         # exclude it); the hickory path is in-lockfile but not
         # in-binary. See audit.toml for full reasoning.
         #
-        # When either advisory closes upstream, REMOVE its --ignore
-        # flag here + the entry in audit.toml. Failure is the
+        # CCP-06 (federation graded audit 2026-09-02):
+        #   - RUSTSEC-2026-0185 quinn-proto memory exhaustion —
+        #     lockfile-only, NOT in-binary (compute-pool's libp2p
+        #     feature list excludes `quic`; `cargo tree -i quinn-proto
+        #     -e normal` prints nothing). Ignored with the same
+        #     in-lockfile-not-in-binary rationale as hickory; prefer a
+        #     bump the moment a quic transport is enabled.
+        #   The two other CCP-06 advisories were CLOSED by dep bumps,
+        #   so they carry no --ignore:
+        #   - RUSTSEC-2026-0204 crossbeam-epoch (was in-binary) → 0.9.20
+        #   - RUSTSEC-2026-0258 h2 → 0.4.19
+        #
+        # When any ignored advisory closes upstream, REMOVE its
+        # --ignore flag here + the entry in audit.toml. Failure is the
         # tripwire.
         run: |
           cargo audit \
             --color always \
             --ignore RUSTSEC-2026-0118 \
-            --ignore RUSTSEC-2026-0119
+            --ignore RUSTSEC-2026-0119 \
+            --ignore RUSTSEC-2026-0185
