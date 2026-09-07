@@ -154,8 +154,15 @@ impl CoordinatorClient {
     /// Ask for work. `Ok(None)` means there is none — which is a normal answer,
     /// not a failure.
     pub async fn lease(&self) -> Result<Option<JobSpec>, ClientError> {
+        // CP-B-002: bind the request to the current time so a captured lease body
+        // is not a forever-replayable bearer credential.
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0);
         let req = LeaseRequest {
-            signature: self.sign(&lease_digest())?,
+            timestamp,
+            signature: self.sign(&lease_digest(timestamp))?,
         };
         let res = self.post("/v1/lease", &req).await?;
         let status = res.status();

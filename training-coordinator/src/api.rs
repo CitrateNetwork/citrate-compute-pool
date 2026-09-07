@@ -12,14 +12,21 @@
 //! `GET  /v1/status`    — fleet counts. This is what alf-gateway polls to fill
 //!                        the round/training panels the portal already renders.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use axum::extract::State as AxumState;
 use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use ethereum_types::H160;
 use parking_lot::Mutex;
 use serde::Serialize;
+
+/// Bound on the lease-replay set, mirroring the pool-coordinator's dedup cap. A
+/// captured lease request is only usable inside the freshness window, so the set
+/// only needs to remember that window's worth of (signer, timestamp) pairs.
+const LEASE_SEEN_CAP: usize = 10_000;
 
 use crate::attestation::{self, Attestation};
 use crate::job::JobSpec;
@@ -30,6 +37,10 @@ use crate::submission::{recover_submitter, SignedSubmission};
 pub struct Coordinator {
     state: Mutex<State>,
     store: Store,
+    /// Recently-seen (signer, timestamp) lease requests, to refuse an exact
+    /// replay within the freshness window (CP-B-002). In-memory only: the
+    /// freshness window bounds replay across a restart, so this need not persist.
+    lease_seen: Mutex<HashSet<(H160, u64)>>,
 }
 
 impl Coordinator {
@@ -41,7 +52,24 @@ impl Coordinator {
         Ok(Self {
             state: Mutex::new(state),
             store,
+            lease_seen: Mutex::new(HashSet::new()),
         })
+    }
+
+    /// Record that `(who, timestamp)` has asked for a lease. Returns `false` if it
+    /// was already recorded — an exact replay of a captured request, which must be
+    /// refused. Bounded like the pool-coordinator's dedup set: when full, drop the
+    /// oldest-observed half (a brute-force but deterministic eviction).
+    fn note_lease_seen(&self, who: H160, timestamp: u64) -> bool {
+        let mut set = self.lease_seen.lock();
+        if set.len() >= LEASE_SEEN_CAP {
+            let drop_count = set.len() / 2;
+            let to_remove: Vec<_> = set.iter().take(drop_count).cloned().collect();
+            for k in to_remove {
+                set.remove(&k);
+            }
+        }
+        set.insert((who, timestamp))
     }
 
     /// Run `f`, then persist. If persisting fails the change is still live in
@@ -66,7 +94,7 @@ impl Coordinator {
 
 // The lease request and its digest come from the shared protocol.
 pub use citrate_training_worker::coordinator_protocol::{
-    lease_digest, LeaseRequest, LEASE_MESSAGE,
+    lease_digest, LeaseRequest, LEASE_FRESHNESS_NANOS, LEASE_MESSAGE,
 };
 
 #[derive(Debug, Serialize)]
@@ -108,9 +136,26 @@ async fn lease(
     AxumState(c): AxumState<Arc<Coordinator>>,
     Json(req): Json<LeaseRequest>,
 ) -> Result<(StatusCode, Json<Option<JobSpec>>), ApiError> {
-    let who =
-        citrate_training_worker::wallet::Wallet::recover_address(&lease_digest(), &req.signature)
-            .map_err(|_| err(StatusCode::UNAUTHORIZED, "signature does not recover"))?;
+    // CP-B-002: reject a stale or far-future timestamp so a captured request is
+    // usable only inside a short window, then recover the signer over the SAME
+    // timestamp it signed, then refuse an exact replay within that window.
+    if unix_now_nanos().abs_diff(req.timestamp) > LEASE_FRESHNESS_NANOS {
+        return Err(err(
+            StatusCode::UNAUTHORIZED,
+            "lease request timestamp is outside the freshness window",
+        ));
+    }
+    let who = citrate_training_worker::wallet::Wallet::recover_address(
+        &lease_digest(req.timestamp),
+        &req.signature,
+    )
+    .map_err(|_| err(StatusCode::UNAUTHORIZED, "signature does not recover"))?;
+    if !c.note_lease_seen(who, req.timestamp) {
+        return Err(err(
+            StatusCode::UNAUTHORIZED,
+            "lease request already used (replay)",
+        ));
+    }
     let now = unix_now();
     let got = c.mutate(|s| s.lease(who, now)).map_err(|e| {
         err(
@@ -175,5 +220,12 @@ fn unix_now() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+fn unix_now_nanos() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
         .unwrap_or(0)
 }
