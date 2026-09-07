@@ -85,6 +85,23 @@ fn register_body(key: &str, body: &str) -> serde_json::Value {
     })
 }
 
+fn unix_nanos() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0)
+}
+
+/// A fresh, timestamp-bound lease request (CP-B-002). Each call signs a distinct
+/// preimage, the way the real worker client does.
+fn lease_body(key: &str) -> serde_json::Value {
+    let ts = unix_nanos();
+    serde_json::json!({
+        "timestamp": ts,
+        "signature": hex_sig(key, &lease_digest(ts)),
+    })
+}
+
 #[tokio::test]
 async fn a_worker_registers_leases_submits_and_the_status_reflects_it() {
     let c = coordinator(
@@ -109,10 +126,7 @@ async fn a_worker_registers_leases_submits_and_the_status_reflects_it() {
 
     // lease
     let res = router(c.clone())
-        .oneshot(post(
-            "/v1/lease",
-            serde_json::json!({ "signature": hex_sig(KEY_A, &lease_digest()) }),
-        ))
+        .oneshot(post("/v1/lease", lease_body(KEY_A)))
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::OK);
@@ -171,10 +185,7 @@ async fn a_cpu_machine_is_told_there_is_no_work_rather_than_given_the_ladder() {
     assert_eq!(json_of(res).await["capability"], "probe");
 
     let res = router(c.clone())
-        .oneshot(post(
-            "/v1/lease",
-            serde_json::json!({ "signature": hex_sig(KEY_A, &lease_digest()) }),
-        ))
+        .oneshot(post("/v1/lease", lease_body(KEY_A)))
         .await
         .unwrap();
     // 204, not an error: having nothing to do is the steady state of a fleet
@@ -201,10 +212,7 @@ async fn a_valid_signature_from_the_wrong_worker_is_refused() {
     }
     // A takes the job.
     let res = router(c.clone())
-        .oneshot(post(
-            "/v1/lease",
-            serde_json::json!({ "signature": hex_sig(KEY_A, &lease_digest()) }),
-        ))
+        .oneshot(post("/v1/lease", lease_body(KEY_A)))
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::OK);
@@ -250,10 +258,7 @@ async fn state_survives_a_restart_and_the_lease_is_still_held() {
         .await
         .unwrap();
     let res = router(first.clone())
-        .oneshot(post(
-            "/v1/lease",
-            serde_json::json!({ "signature": hex_sig(KEY_A, &lease_digest()) }),
-        ))
+        .oneshot(post("/v1/lease", lease_body(KEY_A)))
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::OK);
@@ -270,13 +275,74 @@ async fn state_survives_a_restart_and_the_lease_is_still_held() {
         .await
         .unwrap();
     let res = router(second.clone())
-        .oneshot(post(
-            "/v1/lease",
-            serde_json::json!({ "signature": hex_sig(KEY_B, &lease_digest()) }),
-        ))
+        .oneshot(post("/v1/lease", lease_body(KEY_B)))
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::NO_CONTENT);
+}
+
+/// CP-B-002: a captured lease request must not be a forever-replayable bearer
+/// credential. Queue two jobs, capture ONE signed lease body, and replay the
+/// exact bytes: the coordinator leases at most one job and the replay is refused.
+/// A stale timestamp is refused outright.
+#[tokio::test]
+async fn a_captured_lease_request_cannot_be_replayed() {
+    let c = coordinator(
+        "replay",
+        vec![
+            JobSpec::new("a", Capability::Probe, serde_json::json!({})),
+            JobSpec::new("b", Capability::Probe, serde_json::json!({})),
+        ],
+    );
+    let res = router(c.clone())
+        .oneshot(post(
+            "/v1/register",
+            register_body(KEY_A, &probe("candle-cpu", "f32", 7_137.0, true)),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+
+    // Capture exactly one signed lease body.
+    let captured = lease_body(KEY_A);
+
+    // First use: leases a job.
+    let res = router(c.clone())
+        .oneshot(post("/v1/lease", captured.clone()))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+
+    // Replay of the identical bytes: refused, and no second job is leased.
+    let res = router(c.clone())
+        .oneshot(post("/v1/lease", captured.clone()))
+        .await
+        .unwrap();
+    assert_eq!(
+        res.status(),
+        StatusCode::UNAUTHORIZED,
+        "a replayed lease request must be refused"
+    );
+
+    let counts = c.snapshot().counts();
+    assert_eq!(counts.leased, 1, "replay must not lease a second job");
+    assert_eq!(counts.pending, 1);
+
+    // A stale timestamp (far outside the freshness window) is refused outright.
+    let stale_ts = 1_000_000_000u64; // ~1s after the unix epoch — ancient
+    let stale = serde_json::json!({
+        "timestamp": stale_ts,
+        "signature": hex_sig(KEY_A, &lease_digest(stale_ts)),
+    });
+    let res = router(c.clone())
+        .oneshot(post("/v1/lease", stale))
+        .await
+        .unwrap();
+    assert_eq!(
+        res.status(),
+        StatusCode::UNAUTHORIZED,
+        "a stale lease request must be refused"
+    );
 }
 
 // ── The real client against the real server ────────────────────────────

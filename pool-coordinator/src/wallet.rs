@@ -23,6 +23,7 @@ use rlp::RlpStream;
 use serde::Deserialize;
 use sha3::{Digest, Keccak256};
 use thiserror::Error;
+use zeroize::Zeroizing;
 
 // ── Web3 SSv3 keystore JSON shape ───────────────────────────────
 
@@ -223,12 +224,16 @@ impl Wallet {
         }
 
         // 1. Derive 32-byte key via PBKDF2-HMAC-SHA256.
-        let mut derived = [0u8; 32];
+        // CP-B-005: the derived key, the decrypted plaintext and the hex round-
+        // trip below are all secp256k1 key material; wrap each in `Zeroizing` so
+        // the copies are wiped on drop rather than left in freed heap/stack for a
+        // core dump / `/proc/<pid>/mem` reader to recover.
+        let mut derived = Zeroizing::new([0u8; 32]);
         pbkdf2::pbkdf2_hmac::<sha2::Sha256>(
             passphrase.as_bytes(),
             &salt,
             crypto.kdfparams.c,
-            &mut derived,
+            &mut derived[..],
         );
 
         // 2. MAC check (keccak256 of dkey[16..32] || ciphertext).
@@ -253,9 +258,9 @@ impl Wallet {
         // 3. AES-128-CTR decrypt. Key = dkey[0..16].
         use aes::cipher::{KeyIvInit, StreamCipher};
         type Aes128Ctr = ctr::Ctr128BE<aes::Aes128>;
-        let mut plaintext = ciphertext.clone();
+        let mut plaintext = Zeroizing::new(ciphertext.clone());
         let mut cipher = Aes128Ctr::new((&derived[0..16]).into(), iv.as_slice().into());
-        cipher.apply_keystream(&mut plaintext);
+        cipher.apply_keystream(&mut plaintext[..]);
 
         if plaintext.len() != 32 {
             return Err(WalletError::KeystoreParse(format!(
@@ -265,7 +270,7 @@ impl Wallet {
         }
 
         // 4. Construct wallet + verify keystore-declared address.
-        let hex_key = hex::encode(&plaintext);
+        let hex_key = Zeroizing::new(hex::encode(&plaintext[..]));
         let wallet = Self::from_hex(&hex_key)?;
         if let Some(declared) = file.address.as_deref() {
             let cleaned = declared.trim().trim_start_matches("0x");
@@ -284,11 +289,15 @@ impl Wallet {
         if trimmed.len() != 64 {
             return Err(WalletError::BadHexLength(trimmed.len()));
         }
-        let bytes = hex::decode(trimmed).map_err(|e| WalletError::BadHex(e.to_string()))?;
-        let mut sk_bytes = [0u8; 32];
+        // CP-B-005: the decoded key bytes are the raw private key; wipe them on
+        // drop. `SigningKey` zeroizes its own copy, so only these intermediates
+        // needed wrapping.
+        let bytes =
+            Zeroizing::new(hex::decode(trimmed).map_err(|e| WalletError::BadHex(e.to_string()))?);
+        let mut sk_bytes = Zeroizing::new([0u8; 32]);
         sk_bytes.copy_from_slice(&bytes);
         let signing_key =
-            SigningKey::from_bytes(&sk_bytes.into()).map_err(|_| WalletError::BadSecret)?;
+            SigningKey::from_bytes(&(*sk_bytes).into()).map_err(|_| WalletError::BadSecret)?;
         let address = address_from_signing_key(&signing_key);
         Ok(Self {
             signing_key,

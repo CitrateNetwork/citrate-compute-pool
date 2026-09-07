@@ -116,6 +116,19 @@ fn an_accelerator_below_the_throughput_floor_is_treated_as_cpu_class() {
     );
 }
 
+/// CP-B-001: `tokens_per_second` is attacker-written. A claim of impossible
+/// throughput on the fixed probe job must not mint the top `H01` tier — it is a
+/// fabrication, not a measurement, and is treated as unverified.
+#[test]
+fn an_impossible_throughput_claim_does_not_mint_the_top_tier() {
+    assert_eq!(
+        cap("candle-cuda", "f32", 999_999.0, true),
+        Capability::Probe
+    );
+    // The real fleet's fastest measurement stays a valid ladder machine.
+    assert_eq!(cap("candle-cuda", "f32", 71_098.0, true), Capability::H01);
+}
+
 #[test]
 fn an_unknown_backend_is_not_trusted_with_more_than_probe() {
     assert_eq!(

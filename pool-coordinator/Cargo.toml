@@ -58,6 +58,8 @@ ctr = "0.9"
 # SECREM-02 6.3 (CITRATE_COMPUTE_POOL-2026-05-31-007): constant-time
 # keystore MAC comparison (already in the tree via k256/aes).
 subtle = "2.5"
+# CP-B-005: wipe decrypted key material on drop (keystore decrypt path).
+zeroize = "1.8"
 
 # Prometheus metrics
 metrics = "0.22"

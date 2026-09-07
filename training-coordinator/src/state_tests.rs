@@ -127,9 +127,13 @@ fn a_worker_is_not_offered_a_job_its_lease_already_expired_on() {
     assert_eq!(s.lease(addr(1), 102), Err(LeaseError::NothingAvailable));
 }
 
-/// Three machines failing the same job is a bug report, not a scheduling problem.
+/// CP-B-001 (RC-8 inversion of `a_job_that_keeps_expiring_is_quarantined_...`):
+/// a job that keeps being leased and expired must NOT be driven terminal.
+/// Registration is unauthenticated, so terminal quarantine on no-shows is a
+/// permanent, unrecoverable DoS lever; an expired lease returns the job to the
+/// pool instead. A distinct worker that never failed it is still offered it.
 #[test]
-fn a_job_that_keeps_expiring_is_quarantined_rather_than_circulated_forever() {
+fn a_job_that_keeps_expiring_returns_to_the_pool_rather_than_quarantining() {
     let mut s = State::default();
     s.add_job(job("bad", Capability::Probe).with_max_attempts(2));
     for b in 1..=3u8 {
@@ -141,12 +145,58 @@ fn a_job_that_keeps_expiring_is_quarantined_rather_than_circulated_forever() {
         t += 101;
         s.expire_leases(t);
     }
-    assert!(matches!(
+    assert_eq!(
         s.jobs[&JobId("bad".into())].status,
-        JobStatus::Quarantined { .. }
-    ));
-    // And a fresh, capable, never-failed worker is still not given it.
-    assert_eq!(s.lease(addr(3), t + 1), Err(LeaseError::NothingAvailable));
+        JobStatus::Pending,
+        "no-shows must requeue, not permanently quarantine"
+    );
+    // A fresh, capable worker that never failed it IS still offered it.
+    assert_eq!(s.lease(addr(3), t + 1).unwrap().id.0, "bad");
+}
+
+/// CP-B-001: registration is unauthenticated, so an attacker can lease a job
+/// with a fresh throwaway key and let the lease expire, over and over. No number
+/// of such no-shows may drive a job into a terminal `Quarantined` state — that
+/// would be a permanent, unrecoverable denial of service on the catalogue by
+/// anyone who can reach the coordinator. An expired lease returns the job to the
+/// pool.
+#[test]
+fn distinct_fresh_keys_cannot_quarantine_a_job_by_leasing_and_expiring() {
+    let mut s = State::default();
+    s.add_job(job("target", Capability::Probe).with_max_attempts(3));
+
+    let mut t = 0u64;
+    for i in 0..20u64 {
+        // A fresh, never-seen key each round — `failed_by` never bites. job()
+        // sets lease_secs to 100, so +200 then expire is always past expiry.
+        let fresh = H160::from_low_u64_be(0xF000 + i);
+        s.register(&worker_probe(fresh), t);
+        s.lease(fresh, t).unwrap();
+        t += 200;
+        s.expire_leases(t);
+    }
+
+    // The job must never become terminal, and must still be leasable.
+    assert!(
+        !matches!(
+            s.jobs[&JobId("target".into())].status,
+            JobStatus::Quarantined { .. }
+        ),
+        "unauthenticated no-shows must not permanently quarantine a job"
+    );
+    let honest = H160::from_low_u64_be(1);
+    s.register(&worker_probe(honest), t + 1);
+    assert_eq!(s.lease(honest, t + 1).unwrap().id.0, "target");
+}
+
+fn worker_probe(id: H160) -> RegisteredWorker {
+    RegisteredWorker {
+        id,
+        capability: Capability::Probe,
+        backend: "candle-cpu".into(),
+        dtype: "f32".into(),
+        tokens_per_second: 1.0,
+    }
 }
 
 // ── Submission ─────────────────────────────────────────────────────────
@@ -238,6 +288,34 @@ fn re_registering_updates_the_capability_and_keeps_the_join_date() {
     assert_eq!(w.capability, Capability::H01);
     assert_eq!(w.registered_at, 100);
     assert_eq!(w.last_seen, 500);
+}
+
+/// CP-B-003: `/v1/register` is unauthenticated and free, and each distinct key
+/// became a permanent `WorkerRecord` that was never evicted — a script could grow
+/// `state.json` without bound and turn every request into an O(state) fsync. The
+/// worker map must be capped: N distinct registrations leave at most
+/// `MAX_WORKERS` records, not N.
+#[test]
+fn the_worker_map_is_bounded_regardless_of_how_many_keys_register() {
+    let mut s = State::default();
+    let n = MAX_WORKERS + 500;
+    for i in 0..n as u64 {
+        s.register(
+            &RegisteredWorker {
+                id: H160::from_low_u64_be(i + 1),
+                capability: Capability::Probe,
+                backend: "candle-cpu".into(),
+                dtype: "f32".into(),
+                tokens_per_second: 1.0,
+            },
+            i, // last_seen advances, so LRU eviction is well-defined
+        );
+    }
+    assert!(
+        s.workers.len() <= MAX_WORKERS,
+        "worker map grew to {} for {n} registrations; must be capped at {MAX_WORKERS}",
+        s.workers.len(),
+    );
 }
 
 #[test]

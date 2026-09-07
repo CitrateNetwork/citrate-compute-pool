@@ -58,6 +58,15 @@ pub struct State {
     pub workers: BTreeMap<H160, WorkerRecord>,
 }
 
+/// Upper bound on the worker map. `/v1/register` is unauthenticated and free, so
+/// without a cap every distinct key becomes a permanent `WorkerRecord` and each
+/// subsequent request re-serialises and fsyncs the whole growing state file — an
+/// unauthenticated party can degrade then kill the coordinator (CP-B-003). A
+/// volunteer fleet is tens of machines; this is generously above that and bounds
+/// `state.json` at roughly a megabyte. When full, the least-recently-seen worker
+/// is evicted (see [`State::register`]).
+pub const MAX_WORKERS: usize = 4096;
+
 #[derive(Debug, thiserror::Error, PartialEq)]
 pub enum LeaseError {
     #[error("worker is not registered")]
@@ -100,6 +109,20 @@ impl State {
             .get(&w.id)
             .map(|e| e.registered_at)
             .unwrap_or(now);
+        // CP-B-003: only a brand-new id grows the map (a refresh is free). When
+        // full, evict the least-recently-seen worker so an unauthenticated flood
+        // of fresh keys cannot grow `state.json` without bound. An active honest
+        // worker refreshes `last_seen` on every lease, so it is never the victim.
+        if !self.workers.contains_key(&w.id) && self.workers.len() >= MAX_WORKERS {
+            if let Some(evict) = self
+                .workers
+                .iter()
+                .min_by_key(|(_, r)| r.last_seen)
+                .map(|(id, _)| *id)
+            {
+                self.workers.remove(&evict);
+            }
+        }
         self.workers.insert(
             w.id,
             WorkerRecord {
@@ -124,14 +147,18 @@ impl State {
             if expires_at > now {
                 continue;
             }
+            // CP-B-001: an expired lease is a no-show — the worker leased and
+            // never submitted. That is not evidence the job itself is bad, and it
+            // must not permanently remove the job from circulation. Registration
+            // is unauthenticated, so a handful of throwaway keys could otherwise
+            // lease-and-expire a job into a terminal `Quarantined` state with no
+            // recovery path (each fresh key evades `failed_by`, so `attempts`
+            // marched to `max_attempts`). Always return the job to the pool,
+            // recording `failed_by` so the same key is not re-offered it. Terminal
+            // quarantine is reserved for a genuine failure signal, which the
+            // unauthenticated no-show path cannot forge.
             rec.failed_by.insert(worker);
-            rec.status = if rec.attempts >= rec.spec.max_attempts {
-                JobStatus::Quarantined {
-                    reason: format!("{} attempts expired without a submission", rec.attempts),
-                }
-            } else {
-                JobStatus::Pending
-            };
+            rec.status = JobStatus::Pending;
             freed.push(id.clone());
         }
         freed

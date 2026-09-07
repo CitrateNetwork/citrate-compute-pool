@@ -127,12 +127,23 @@ pub fn attestation_digest(probe_json: &str) -> [u8; 32] {
     keccak(&[probe_json.as_bytes()])
 }
 
-/// What a worker signs to ask for work. Fixed and domain-separated: it proves key
-/// possession and nothing else, and cannot be replayed as any other message.
+/// What a worker signs to ask for work. Domain-separated by `LEASE_MESSAGE`, and
+/// bound to the moment it was signed so it is not a permanently-replayable bearer
+/// credential (CP-B-002): the coordinator rejects a `timestamp` outside
+/// [`LEASE_FRESHNESS_NANOS`] of its own clock and remembers recent
+/// (signer, timestamp) pairs to refuse an exact replay inside that window.
 pub const LEASE_MESSAGE: &[u8] = b"citrate-training-lease/1";
 
-pub fn lease_digest() -> [u8; 32] {
-    keccak(&[LEASE_MESSAGE])
+/// Freshness window for a lease request, in nanoseconds. A captured request is
+/// usable only inside this window of the coordinator's clock, not forever. Coarse
+/// enough (2 minutes) to tolerate ordinary NTP skew between volunteer machines.
+pub const LEASE_FRESHNESS_NANOS: u64 = 120 * 1_000_000_000;
+
+/// Bind the request to `timestamp` (unix nanoseconds). Nanosecond granularity
+/// means two honest polls, however close, sign distinct preimages, so the
+/// coordinator's replay set never rejects a worker's own next request.
+pub fn lease_digest(timestamp: u64) -> [u8; 32] {
+    keccak(&[LEASE_MESSAGE, b"\n", &timestamp.to_be_bytes()])
 }
 
 /// `keccak256("citrate-training-submission/1\n" || job_id || "\n" || payload)`.
@@ -158,9 +169,16 @@ pub struct Attestation {
     pub signature: Vec<u8>,
 }
 
-/// A request that carries only a signature, proving who is asking.
+/// A request that proves who is asking and when. The signature covers the
+/// `timestamp` via [`lease_digest`], so the timestamp cannot be altered without
+/// invalidating it.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct LeaseRequest {
+    /// Unix time in nanoseconds when the request was signed. Defaults to 0 — which
+    /// always fails the freshness check — so a body that omits it is refused, not
+    /// silently accepted.
+    #[serde(default)]
+    pub timestamp: u64,
     #[serde(with = "hex_bytes")]
     pub signature: Vec<u8>,
 }
@@ -221,7 +239,7 @@ mod tests {
     fn the_three_digests_are_domain_separated_from_each_other() {
         let job = JobId("x".into());
         let a = attestation_digest("x");
-        let l = lease_digest();
+        let l = lease_digest(0);
         let s = submission_digest(&job, "");
         assert_ne!(a, l);
         assert_ne!(a, s);
