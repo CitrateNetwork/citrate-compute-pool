@@ -211,9 +211,7 @@ fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     if needle.is_empty() || needle.len() > haystack.len() {
         return if needle.is_empty() { Some(0) } else { None };
     }
-    haystack
-        .windows(needle.len())
-        .position(|w| w == needle)
+    haystack.windows(needle.len()).position(|w| w == needle)
 }
 
 /// Parse a JWT (compact serialization) into its components.
@@ -283,7 +281,7 @@ fn base64_standard_decode(s: &str) -> Result<Vec<u8>, AttestationError> {
     // Tiny base64 decoder (RFC 4648 alphabet).
     static TABLE: [i8; 256] = build_b64_table();
     let bytes = s.as_bytes();
-    if bytes.len() % 4 != 0 {
+    if !bytes.len().is_multiple_of(4) {
         return Err(AttestationError::Base64Decode("non-mod-4 length".into()));
     }
     let mut out = Vec::with_capacity(bytes.len() / 4 * 3);
@@ -414,10 +412,7 @@ pub fn encode_submit_strict_bound_calldata(
     let offset_vm_claim = offset_jwt_sig + 32 + jwt_sig_padded as u64;
 
     let mut out = Vec::with_capacity(
-        4 + head_size
-            + 32 + signed_jwt_padded
-            + 32 + jwt_sig_padded
-            + 32 + vm_claim_padded,
+        4 + head_size + 32 + signed_jwt_padded + 32 + jwt_sig_padded + 32 + vm_claim_padded,
     );
     out.extend_from_slice(&selector);
 
@@ -433,19 +428,19 @@ pub fn encode_submit_strict_bound_calldata(
     out.extend_from_slice(&u256_be(signed_jwt_payload.len() as u128));
     out.extend_from_slice(signed_jwt_payload);
     let pad1 = signed_jwt_padded - signed_jwt_payload.len();
-    out.extend(std::iter::repeat(0u8).take(pad1));
+    out.extend(std::iter::repeat_n(0u8, pad1));
 
     // Tail: jwt_signature
     out.extend_from_slice(&u256_be(jwt_signature.len() as u128));
     out.extend_from_slice(jwt_signature);
     let pad2 = jwt_sig_padded - jwt_signature.len();
-    out.extend(std::iter::repeat(0u8).take(pad2));
+    out.extend(std::iter::repeat_n(0u8, pad2));
 
     // Tail: vm_measurement_claim
     out.extend_from_slice(&u256_be(vm_measurement_claim.len() as u128));
     out.extend_from_slice(vm_measurement_claim);
     let pad3 = vm_claim_padded - vm_measurement_claim.len();
-    out.extend(std::iter::repeat(0u8).take(pad3));
+    out.extend(std::iter::repeat_n(0u8, pad3));
 
     out
 }
@@ -545,10 +540,7 @@ impl FixtureAttestationSource {
 /// RM-J3: replaces the prior `build_submit_strict_call`, which
 /// targeted the now-deleted `submitAttestationStrict`. The Bound
 /// variant is the only on-chain attestation entry point post-RM-J3.
-pub fn build_submit_strict_bound_call(
-    bundle: &AttestationBundle,
-    model_hash: H256,
-) -> Vec<u8> {
+pub fn build_submit_strict_bound_call(bundle: &AttestationBundle, model_hash: H256) -> Vec<u8> {
     encode_submit_strict_bound_calldata(
         &bundle.signed_jwt_payload,
         &bundle.jwt_signature,
@@ -588,8 +580,7 @@ mod tests {
 
     fn base64url_encode(data: &[u8]) -> String {
         // Simple b64 standard then URL-safe substitution + strip padding.
-        const ALPHABET: &[u8] =
-            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
         let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
         let mut i = 0;
         while i + 3 <= data.len() {
@@ -622,7 +613,8 @@ mod tests {
 
     #[test]
     fn parse_jwt_extracts_header_payload_signature() {
-        let header = serde_json::json!({"alg": "RS256", "kid": "azure-prod-kid-2026q2", "typ": "JWT"});
+        let header =
+            serde_json::json!({"alg": "RS256", "kid": "azure-prod-kid-2026q2", "typ": "JWT"});
         let payload = serde_json::json!({"vm_measurement": "0x1c53ce710a3ace81a619dc3de781355f9ef63657b156d2b25e2206695b0e5f65", "iat": 1729785600u64});
         let sig = vec![0xde, 0xad, 0xbe, 0xef, 0xca, 0xfe, 0xba, 0xbe];
         let jwt = make_jwt(&header, &payload, &sig);
@@ -657,7 +649,8 @@ mod tests {
             claim_str
         );
         assert!(
-            claim_str.contains("0x1c53ce710a3ace81a619dc3de781355f9ef63657b156d2b25e2206695b0e5f65"),
+            claim_str
+                .contains("0x1c53ce710a3ace81a619dc3de781355f9ef63657b156d2b25e2206695b0e5f65"),
             "claim must contain the hex value; got: {}",
             claim_str
         );
@@ -693,7 +686,8 @@ mod tests {
             claim_str
         );
         assert!(
-            claim_str.contains("0xaaaaaaaabbbbbbbbccccccccddddddddeeeeeeeeffffffff0000000011111111"),
+            claim_str
+                .contains("0xaaaaaaaabbbbbbbbccccccccddddddddeeeeeeeeffffffff0000000011111111"),
             "claim must contain the production hex value; got: {}",
             claim_str
         );
@@ -756,7 +750,8 @@ mod tests {
             claim_str
         );
         assert!(
-            claim_str.contains("0x1c53ce710a3ace81a619dc3de781355f9ef63657b156d2b25e2206695b0e5f65"),
+            claim_str
+                .contains("0x1c53ce710a3ace81a619dc3de781355f9ef63657b156d2b25e2206695b0e5f65"),
             "claim must contain hex value"
         );
         assert_eq!(bundle.gpu_measurement, keccak(b"gpu-attestation-payload"));
@@ -793,7 +788,13 @@ mod tests {
         let nras = keccak(b"nras-x");
 
         let cd = encode_submit_strict_bound_calldata(
-            &signed_jwt, &sig, kid_hash, &vm_claim, gpu, model, nras,
+            &signed_jwt,
+            &sig,
+            kid_hash,
+            &vm_claim,
+            gpu,
+            model,
+            nras,
         );
 
         // Verify head layout (skip 4-byte selector).
@@ -819,7 +820,10 @@ mod tests {
         // Tail: signed_jwt length + bytes
         let len_signed = u128::from_be_bytes(cd[4 + 224 + 16..4 + 224 + 32].try_into().unwrap());
         assert_eq!(len_signed as usize, signed_jwt.len());
-        assert_eq!(&cd[4 + 224 + 32..4 + 224 + 32 + signed_jwt.len()], signed_jwt);
+        assert_eq!(
+            &cd[4 + 224 + 32..4 + 224 + 32 + signed_jwt.len()],
+            signed_jwt
+        );
 
         // Tail: vmClaim length + bytes (after sig block).
         // sig tail starts at 4 + 288 (selector + offset_sig); len at +0,
@@ -827,7 +831,10 @@ mod tests {
         // 4 + 384 (offset_claim).
         let len_claim = u128::from_be_bytes(cd[4 + 384 + 16..4 + 384 + 32].try_into().unwrap());
         assert_eq!(len_claim as usize, vm_claim.len());
-        assert_eq!(&cd[4 + 384 + 32..4 + 384 + 32 + vm_claim.len()], vm_claim.as_slice());
+        assert_eq!(
+            &cd[4 + 384 + 32..4 + 384 + 32 + vm_claim.len()],
+            vm_claim.as_slice()
+        );
 
         // Total: 4 (sel) + 224 (head) + 32+32 (signed_jwt) + 32+64 (sig) + 32+32 (vm_claim padded)
         // = 4 + 224 + 32 + 32 + 32 + 64 + 32 + 32 = 452

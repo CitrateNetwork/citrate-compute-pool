@@ -42,7 +42,8 @@ fn sign(key: &str, body: &str) -> Attestation {
 // ── Capability derivation ──────────────────────────────────────────────
 
 fn cap(backend: &str, dtype: &str, tok_s: f64, self_repeat: bool) -> Capability {
-    let p: ProbeReport = serde_json::from_str(&probe_json(backend, dtype, tok_s, self_repeat)).unwrap();
+    let p: ProbeReport =
+        serde_json::from_str(&probe_json(backend, dtype, tok_s, self_repeat)).unwrap();
     capability_of(&p)
 }
 
@@ -60,15 +61,15 @@ fn f32_on_a_self_repeating_accelerator_earns_the_ladder() {
 /// machine rather than a judgement about the hardware.
 #[test]
 fn the_first_real_apple_machine_clears_the_floor() {
-    assert!(13_472.0 >= ACCELERATOR_TOK_S);
+    const { assert!(13_472.0 >= ACCELERATOR_TOK_S) };
     assert_eq!(cap("candle-metal", "f32", 13_472.0, true), Capability::H01);
 }
 
 /// And every measured CPU stays below it.
 #[test]
 fn measured_cpus_remain_below_the_accelerator_floor() {
-    assert!(7_786.0 < ACCELERATOR_TOK_S, "GB10 CPU");
-    assert!(7_137.0 < ACCELERATOR_TOK_S, "M2 Max CPU");
+    const { assert!(7_786.0 < ACCELERATOR_TOK_S, "GB10 CPU") };
+    const { assert!(7_137.0 < ACCELERATOR_TOK_S, "M2 Max CPU") };
 }
 
 /// The load-bearing gate. A device that cannot reproduce its own result cannot
@@ -76,15 +77,24 @@ fn measured_cpus_remain_below_the_accelerator_floor() {
 /// settlement depends on that — however fast it is.
 #[test]
 fn a_device_that_fails_self_repeat_is_capped_at_probe_however_fast() {
-    assert_eq!(cap("candle-cuda", "f32", 1_000_000.0, false), Capability::Probe);
+    assert_eq!(
+        cap("candle-cuda", "f32", 1_000_000.0, false),
+        Capability::Probe
+    );
 }
 
 /// bf16 can co-train but must not get ladder work: unverifiable on Metal
 /// (3/3 runs differ) and unmeasured for cross-backend divergence everywhere.
 #[test]
 fn bf16_earns_co_training_but_not_the_ladder() {
-    assert_eq!(cap("candle-cuda", "bf16", 71_098.0, true), Capability::Federated);
-    assert_eq!(cap("candle-metal", "bf16", 13_649.0, true), Capability::Federated);
+    assert_eq!(
+        cap("candle-cuda", "bf16", 71_098.0, true),
+        Capability::Federated
+    );
+    assert_eq!(
+        cap("candle-metal", "bf16", 13_649.0, true),
+        Capability::Federated
+    );
 }
 
 #[test]
@@ -108,7 +118,10 @@ fn an_accelerator_below_the_throughput_floor_is_treated_as_cpu_class() {
 
 #[test]
 fn an_unknown_backend_is_not_trusted_with_more_than_probe() {
-    assert_eq!(cap("candle-something-new", "f32", 90_000.0, true), Capability::Probe);
+    assert_eq!(
+        cap("candle-something-new", "f32", 90_000.0, true),
+        Capability::Probe
+    );
 }
 
 // ── Verification ───────────────────────────────────────────────────────
@@ -165,7 +178,11 @@ fn flipping_the_self_repeat_flag_changes_the_identity_it_registers() {
     let honest = probe_json("candle-cuda", "bf16", 71_098.0, false);
     let mut att = sign(KEY_A, &honest);
     let real = verify(&att).unwrap();
-    assert_eq!(real.capability, Capability::Probe, "self-repeat false caps at probe");
+    assert_eq!(
+        real.capability,
+        Capability::Probe,
+        "self-repeat false caps at probe"
+    );
 
     att.probe_json = probe_json("candle-cuda", "bf16", 71_098.0, true);
     assert_ne!(verify(&att).unwrap().id, real.id);
@@ -173,7 +190,10 @@ fn flipping_the_self_repeat_flag_changes_the_identity_it_registers() {
 
 #[test]
 fn a_document_from_another_schema_is_refused() {
-    let att = sign(KEY_A, &serde_json::json!({ "schema": "some/other" }).to_string());
+    let att = sign(
+        KEY_A,
+        &serde_json::json!({ "schema": "some/other" }).to_string(),
+    );
     assert!(matches!(verify(&att), Err(AttestError::WrongSchema(_))));
 }
 

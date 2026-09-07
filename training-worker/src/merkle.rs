@@ -12,7 +12,7 @@
 
 use sha3::{Digest, Keccak256};
 
-use crate::types::{B256, StepCommit};
+use crate::types::{StepCommit, B256};
 
 /// Compute the Merkle leaf for a step commit per ADR-008:
 ///
@@ -135,7 +135,7 @@ pub fn compute_epoch_root(commits: &[StepCommit]) -> (B256, Vec<B256>) {
     // which adds `0x01` prefix on each internal node.
     let mut level: Vec<B256> = leaves.iter().map(|l| promote_leaf(*l)).collect();
     while level.len() > 1 {
-        let mut next = Vec::with_capacity((level.len() + 1) / 2);
+        let mut next = Vec::with_capacity(level.len().div_ceil(2));
         let mut i = 0;
         while i < level.len() {
             let left = level[i];
@@ -179,7 +179,11 @@ pub fn compute_proof(leaves: &[B256], target: usize) -> Vec<B256> {
     let mut level: Vec<B256> = leaves.iter().map(|l| promote_leaf(*l)).collect();
     let mut idx = target;
     while level.len() > 1 {
-        let sibling_idx = if idx % 2 == 0 { idx + 1 } else { idx - 1 };
+        let sibling_idx = if idx.is_multiple_of(2) {
+            idx + 1
+        } else {
+            idx - 1
+        };
         let sibling = if sibling_idx < level.len() {
             level[sibling_idx]
         } else {
@@ -187,7 +191,7 @@ pub fn compute_proof(leaves: &[B256], target: usize) -> Vec<B256> {
         };
         proof.push(sibling);
 
-        let mut next = Vec::with_capacity((level.len() + 1) / 2);
+        let mut next = Vec::with_capacity(level.len().div_ceil(2));
         let mut i = 0;
         while i < level.len() {
             let left = level[i];
@@ -257,7 +261,7 @@ mod tests {
         // empty proof against this root and the unprefixed leaf
         // verifies correctly.
         let c = mk_commit(0, addr(1), 0x11);
-        let (root, leaves) = compute_epoch_root(&[c.clone()]);
+        let (root, leaves) = compute_epoch_root(std::slice::from_ref(&c));
         assert_eq!(leaves.len(), 1);
         assert_eq!(root, promote_leaf(compute_leaf(&c)));
         // Round-trip check: empty proof + unprefixed leaf verifies.
@@ -288,9 +292,7 @@ mod tests {
 
     #[test]
     fn proof_rejects_tampered_leaf() {
-        let commits: Vec<StepCommit> = (0..3)
-            .map(|i| mk_commit(i, addr(1), i as u8))
-            .collect();
+        let commits: Vec<StepCommit> = (0..3).map(|i| mk_commit(i, addr(1), i as u8)).collect();
         let (root, leaves) = compute_epoch_root(&commits);
         let proof = compute_proof(&leaves, 0);
         let tampered = B256::repeat_byte(0xFF);
