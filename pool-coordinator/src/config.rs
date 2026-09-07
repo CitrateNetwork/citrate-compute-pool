@@ -57,14 +57,12 @@ impl CoordinatorConfig {
         // writes — a MITM on a plaintext remote RPC can feed false
         // chain-truth. Fail closed at config load. Default is loopback,
         // so production deployments using the default are unaffected.
-        validate_outbound_url(&rpc_url)
-            .map_err(|e| format!("CITRATE_POOL_RPC_URL: {}", e))?;
+        validate_outbound_url(&rpc_url).map_err(|e| format!("CITRATE_POOL_RPC_URL: {}", e))?;
         let wallet_hex = env::var("CITRATE_POOL_WALLET_ADDRESS")
             .map_err(|_| "CITRATE_POOL_WALLET_ADDRESS unset".to_string())?;
-        let wallet_address = parse_addr(&wallet_hex)
-            .map_err(|e| format!("CITRATE_POOL_WALLET_ADDRESS: {}", e))?;
-        let endpoints_raw = env::var("CITRATE_POOL_MEMBER_ENDPOINTS")
-            .unwrap_or_default();
+        let wallet_address =
+            parse_addr(&wallet_hex).map_err(|e| format!("CITRATE_POOL_WALLET_ADDRESS: {}", e))?;
+        let endpoints_raw = env::var("CITRATE_POOL_MEMBER_ENDPOINTS").unwrap_or_default();
         let member_endpoints = parse_endpoints(&endpoints_raw)?;
         let provider_timeout_secs = env::var("CITRATE_POOL_PROVIDER_TIMEOUT_SECS")
             .ok()
@@ -199,8 +197,14 @@ mod tests {
             .lock()
             .unwrap_or_else(|p| p.into_inner());
         let https = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa=https://m1.pool.example/infer";
-        assert!(parse_endpoints(https).is_ok(), "https endpoint must be accepted");
+        assert!(
+            parse_endpoints(https).is_ok(),
+            "https endpoint must be accepted"
+        );
         let loop_http = "0xb2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2=http://127.0.0.1:8080/infer";
-        assert!(parse_endpoints(loop_http).is_ok(), "loopback http must be accepted");
+        assert!(
+            parse_endpoints(loop_http).is_ok(),
+            "loopback http must be accepted"
+        );
     }
 }

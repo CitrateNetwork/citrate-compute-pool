@@ -118,12 +118,7 @@ pub struct HttpChainAdapter {
 impl HttpChainAdapter {
     /// Construct an adapter pointed at `rpc_url`, signing writes to
     /// `pool_contract` with `wallet` on chain `chain_id`.
-    pub fn new(
-        rpc_url: String,
-        chain_id: u64,
-        pool_contract: H160,
-        wallet: Wallet,
-    ) -> Self {
+    pub fn new(rpc_url: String, chain_id: u64, pool_contract: H160, wallet: Wallet) -> Self {
         // FWA-BV-CP-01: disable redirect-follow. reqwest's default policy
         // follows up to 10 redirects and re-POSTs the (signed) JSON-RPC
         // body on a 307/308 — a 3xx with `Location: http://<off-gate>`
@@ -182,12 +177,11 @@ impl HttpChainAdapter {
     /// fail-fast (exit non-zero before entering the decision loop).
     pub async fn verify_rpc_chain_id(&self) -> Result<(), CoordinatorError> {
         let result = self.rpc("eth_chainId", json!([])).await?;
-        let hex_str = result.as_str().ok_or_else(|| {
-            CoordinatorError::Chain("eth_chainId result not a string".into())
-        })?;
-        let observed = parse_hex_u64(hex_str).map_err(|e| {
-            CoordinatorError::Chain(format!("eth_chainId decode: {}", e))
-        })?;
+        let hex_str = result
+            .as_str()
+            .ok_or_else(|| CoordinatorError::Chain("eth_chainId result not a string".into()))?;
+        let observed = parse_hex_u64(hex_str)
+            .map_err(|e| CoordinatorError::Chain(format!("eth_chainId decode: {}", e)))?;
         if observed != self.chain_id {
             return Err(CoordinatorError::Chain(format!(
                 "F-5: RPC chain_id mismatch — configured {} vs observed {} ({})",
@@ -256,8 +250,7 @@ impl HttpChainAdapter {
         let hex_str = result.as_str().ok_or_else(|| {
             CoordinatorError::Chain("eth_getTransactionCount not a string".into())
         })?;
-        parse_hex_u64(hex_str)
-            .map_err(|e| CoordinatorError::Chain(format!("nonce decode: {}", e)))
+        parse_hex_u64(hex_str).map_err(|e| CoordinatorError::Chain(format!("nonce decode: {}", e)))
     }
 
     /// Fetch the current gas price (legacy field — the Citrate node
@@ -275,17 +268,16 @@ impl HttpChainAdapter {
     /// `self.pool_contract` with the given calldata. Returns the
     /// transaction hash AND — if the tx confirmed within
     /// [`RECEIPT_WAIT_TIMEOUT`] — the mining block number.
-    async fn send_write(
-        &self,
-        calldata: Vec<u8>,
-    ) -> Result<(H256, Option<u64>), CoordinatorError> {
+    async fn send_write(&self, calldata: Vec<u8>) -> Result<(H256, Option<u64>), CoordinatorError> {
         let nonce = self.fetch_nonce().await?;
         let gas_price = self.fetch_gas_price().await?;
         let priority = U256::from(DEFAULT_PRIORITY_FEE_WEI);
         // Cap: EIP-1559 rule is max_fee ≥ max_priority_fee. We set
         // max_fee = 2 × base (gas_price) + priority as a generous
         // upper bound — the protocol refunds unused fees.
-        let max_fee = gas_price.saturating_mul(U256::from(2u64)).saturating_add(priority);
+        let max_fee = gas_price
+            .saturating_mul(U256::from(2u64))
+            .saturating_add(priority);
 
         let tx = Eip1559Tx {
             chain_id: self.chain_id,
@@ -436,9 +428,8 @@ impl HttpChainAdapter {
                 .get("logIndex")
                 .and_then(|v| v.as_str())
                 .and_then(|s| parse_hex_u64(s).ok())
-                .ok_or_else(|| {
-                    CoordinatorError::Chain("log missing/malformed logIndex".into())
-                })? as u32;
+                .ok_or_else(|| CoordinatorError::Chain("log missing/malformed logIndex".into()))?
+                as u32;
             let block_number = entry
                 .get("blockNumber")
                 .and_then(|v| v.as_str())
@@ -491,10 +482,7 @@ impl HttpChainAdapter {
     /// Returns defaults (empty prompt, DEFAULT_MAX_TOKENS) if the
     /// job has no jobSpec bytes stored (legacy callers using the
     /// opaque `requestPoolCompute(bytes)` path may not populate it).
-    pub async fn fetch_job_spec(
-        &self,
-        job_id: u64,
-    ) -> Result<(String, u32), CoordinatorError> {
+    pub async fn fetch_job_spec(&self, job_id: u64) -> Result<(String, u32), CoordinatorError> {
         // Step 1: getJob(jobId) → PoolJob memory.
         let mut data = Vec::with_capacity(4 + 32);
         data.extend_from_slice(&self.selectors.get_job);
@@ -545,7 +533,11 @@ impl HttpChainAdapter {
             u32::MAX
         } else {
             let v = max_tokens_u256.as_u32();
-            if v == 0 { DEFAULT_MAX_TOKENS } else { v }
+            if v == 0 {
+                DEFAULT_MAX_TOKENS
+            } else {
+                v
+            }
         };
         let input_bytes = decode_dynamic_bytes_at_offset(&jobspec_bytes, 96)?;
 
@@ -617,11 +609,7 @@ impl ChainAdapter for HttpChainAdapter {
         self.wallet.address()
     }
 
-    async fn coordinator_for(
-        &self,
-        pool_id: u64,
-        epoch: u64,
-    ) -> Result<H160, CoordinatorError> {
+    async fn coordinator_for(&self, pool_id: u64, epoch: u64) -> Result<H160, CoordinatorError> {
         // coordinatorFor(uint256 poolId, uint256 epoch) → (address)
         let mut data = Vec::with_capacity(4 + 64);
         data.extend_from_slice(&self.selectors.coordinator_for);
@@ -638,10 +626,7 @@ impl ChainAdapter for HttpChainAdapter {
         Ok(H160::from_slice(&ret[12..32]))
     }
 
-    async fn pool_members(
-        &self,
-        pool_id: u64,
-    ) -> Result<Vec<PoolMemberInfo>, CoordinatorError> {
+    async fn pool_members(&self, pool_id: u64) -> Result<Vec<PoolMemberInfo>, CoordinatorError> {
         // Step 1: getPoolMembers(uint256) → address[]
         let mut data = Vec::with_capacity(4 + 32);
         data.extend_from_slice(&self.selectors.get_pool_members);
@@ -762,8 +747,8 @@ fn topic_as_u64(topic: Option<&str>) -> Result<u64, CoordinatorError> {
             stripped.len()
         )));
     }
-    let bytes = hex::decode(stripped)
-        .map_err(|e| CoordinatorError::Chain(format!("topic hex: {}", e)))?;
+    let bytes =
+        hex::decode(stripped).map_err(|e| CoordinatorError::Chain(format!("topic hex: {}", e)))?;
     u256_to_u64(U256::from_big_endian(&bytes))
 }
 
@@ -812,7 +797,9 @@ fn decode_address_array(bytes: &[u8]) -> Result<Vec<H160>, CoordinatorError> {
         .checked_mul(32)
         .and_then(|n| n.checked_add(64))
         .ok_or_else(|| {
-            CoordinatorError::Chain(format!("address[] length {len} overflows buffer arithmetic"))
+            CoordinatorError::Chain(format!(
+                "address[] length {len} overflows buffer arithmetic"
+            ))
         })?;
     if bytes.len() < expected {
         return Err(CoordinatorError::Chain(format!(
@@ -881,9 +868,9 @@ fn decode_dynamic_bytes_at_offset(
     let offset = u256_to_usize(U256::from_big_endian(
         &buf[offset_word_pos..offset_word_pos + 32],
     ))?;
-    let offset_end = offset
-        .checked_add(32)
-        .ok_or_else(|| CoordinatorError::Chain(format!("dynamic bytes offset {offset} overflow")))?;
+    let offset_end = offset.checked_add(32).ok_or_else(|| {
+        CoordinatorError::Chain(format!("dynamic bytes offset {offset} overflow"))
+    })?;
     if buf.len() < offset_end {
         return Err(CoordinatorError::Chain(format!(
             "dynamic bytes length word at {} out of range (buf={})",
@@ -984,8 +971,7 @@ mod tests {
     }
 
     /// Well-known key; derives 0x7e5f4552091a69125d5dfcb7b8c2659029395bdf.
-    const TEST_HEX: &str =
-        "0000000000000000000000000000000000000000000000000000000000000001";
+    const TEST_HEX: &str = "0000000000000000000000000000000000000000000000000000000000000001";
 
     /// Records every JSON-RPC request the stub server saw so tests can
     /// assert on method + params.
@@ -1050,10 +1036,7 @@ mod tests {
         }
     }
 
-    async fn rpc_handler(
-        State(state): State<StubState>,
-        Json(body): Json<Value>,
-    ) -> Json<Value> {
+    async fn rpc_handler(State(state): State<StubState>, Json(body): Json<Value>) -> Json<Value> {
         let method = body
             .get("method")
             .and_then(|v| v.as_str())
@@ -1217,7 +1200,10 @@ mod tests {
         let addr = spawn_stub_rpc(state).await;
 
         let adapter = make_adapter(format!("http://{}", addr));
-        let err = adapter.coordinator_for(1, 0).await.expect_err("should fail");
+        let err = adapter
+            .coordinator_for(1, 0)
+            .await
+            .expect_err("should fail");
         assert!(matches!(err, CoordinatorError::Chain(_)));
     }
 
@@ -1275,10 +1261,7 @@ mod tests {
             .log
             .last_params("eth_sendRawTransaction")
             .expect("saw send");
-        let raw_hex = params[0]
-            .as_str()
-            .expect("raw tx is string")
-            .to_string();
+        let raw_hex = params[0].as_str().expect("raw tx is string").to_string();
         let raw = hex::decode(raw_hex.trim_start_matches("0x")).expect("decode raw");
         assert_eq!(
             raw[0], 0x02,
@@ -1449,7 +1432,9 @@ mod tests {
         let sink_listener = TcpListener::bind("127.0.0.1:0").await.expect("bind sink");
         let sink_addr = sink_listener.local_addr().expect("sink addr");
         tokio::spawn(async move {
-            axum::serve(sink_listener, sink_app).await.expect("sink serve");
+            axum::serve(sink_listener, sink_app)
+                .await
+                .expect("sink serve");
         });
 
         // Redirector: every RPC POST gets a 307 → http://<sink>/sink.
@@ -1469,7 +1454,9 @@ mod tests {
         let redir_listener = TcpListener::bind("127.0.0.1:0").await.expect("bind redir");
         let redir_addr = redir_listener.local_addr().expect("redir addr");
         tokio::spawn(async move {
-            axum::serve(redir_listener, redir_app).await.expect("redir serve");
+            axum::serve(redir_listener, redir_app)
+                .await
+                .expect("redir serve");
         });
 
         let adapter = make_adapter(format!("http://{}", redir_addr));
@@ -1492,12 +1479,7 @@ mod tests {
     fn self_address_returns_wallet_address() {
         let wallet = Wallet::from_hex(TEST_HEX).expect("wallet");
         let expected = wallet.address();
-        let adapter = HttpChainAdapter::new(
-            "http://unused".into(),
-            40204,
-            pool_contract(),
-            wallet,
-        );
+        let adapter = HttpChainAdapter::new("http://unused".into(), 40204, pool_contract(), wallet);
         assert_eq!(adapter.self_address(), expected);
     }
 
@@ -1516,8 +1498,7 @@ mod tests {
     }
 
     fn compute_requested_sig_hex() -> String {
-        let sig =
-            selector_full("ComputeRequested(uint256,uint256,address,uint256)");
+        let sig = selector_full("ComputeRequested(uint256,uint256,address,uint256)");
         format!("0x{}", hex::encode(sig))
     }
 
@@ -1745,20 +1726,19 @@ mod tests {
         let state = StubState::new();
         let prompt_bytes = b"Explain pipeline parallelism.";
         let inner = encode_poolJobSpec_bytes(
-            1,                      // version
-            0,                      // mode = InferencePool
-            [0xAB; 32],             // modelHash
-            prompt_bytes,           // inputData
-            256,                    // maxTokens
-            0,                      // verificationTier
-            1,                      // batchSize
+            1,            // version
+            0,            // mode = InferencePool
+            [0xAB; 32],   // modelHash
+            prompt_bytes, // inputData
+            256,          // maxTokens
+            0,            // verificationTier
+            1,            // batchSize
         );
         state.queue("eth_call", json!(encode_poolJob_return(&inner)));
 
         let addr = spawn_stub_rpc(state).await;
         let adapter = make_adapter(format!("http://{}", addr));
-        let (prompt, max_tokens) =
-            adapter.fetch_job_spec(42).await.expect("fetch");
+        let (prompt, max_tokens) = adapter.fetch_job_spec(42).await.expect("fetch");
         assert_eq!(prompt, "Explain pipeline parallelism.");
         assert_eq!(max_tokens, 256);
     }
@@ -1771,8 +1751,7 @@ mod tests {
 
         let addr = spawn_stub_rpc(state).await;
         let adapter = make_adapter(format!("http://{}", addr));
-        let (prompt, max_tokens) =
-            adapter.fetch_job_spec(1).await.expect("fetch");
+        let (prompt, max_tokens) = adapter.fetch_job_spec(1).await.expect("fetch");
         assert_eq!(prompt, "");
         assert_eq!(max_tokens, DEFAULT_MAX_TOKENS);
     }

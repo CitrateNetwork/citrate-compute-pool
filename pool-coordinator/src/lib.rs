@@ -158,8 +158,8 @@ pub async fn handle_event<C: ChainAdapter + ?Sized>(
         .filter(|m| m.active && m.gpu_count > 0)
         .map(|m| MemberId(m.address))
         .collect();
-    let chosen = select_member(event.job_id, &active)
-        .ok_or(CoordinatorError::NoMembers(event.pool_id))?;
+    let chosen =
+        select_member(event.job_id, &active).ok_or(CoordinatorError::NoMembers(event.pool_id))?;
 
     // 3. Resolve the chosen member to its HTTPS endpoint via config.
     let endpoint = cfg
@@ -318,21 +318,44 @@ mod admission_tests {
 
     #[tokio::test]
     async fn zero_payment_event_is_rejected_before_dispatch() {
-        let out = handle_event(&PanicOnDispatch, &cfg(), &event(U256::zero(), "hi".into(), 16)).await;
-        assert!(matches!(out, Err(CoordinatorError::RejectedEvent(_))), "got {out:?}");
+        let out = handle_event(
+            &PanicOnDispatch,
+            &cfg(),
+            &event(U256::zero(), "hi".into(), 16),
+        )
+        .await;
+        assert!(
+            matches!(out, Err(CoordinatorError::RejectedEvent(_))),
+            "got {out:?}"
+        );
     }
 
     #[tokio::test]
     async fn oversized_prompt_is_rejected_before_dispatch() {
         let big = "x".repeat(128 * 1024 + 1);
-        let out = handle_event(&PanicOnDispatch, &cfg(), &event(U256::from(1_000u64), big, 16)).await;
-        assert!(matches!(out, Err(CoordinatorError::RejectedEvent(_))), "got {out:?}");
+        let out = handle_event(
+            &PanicOnDispatch,
+            &cfg(),
+            &event(U256::from(1_000u64), big, 16),
+        )
+        .await;
+        assert!(
+            matches!(out, Err(CoordinatorError::RejectedEvent(_))),
+            "got {out:?}"
+        );
     }
 
     #[tokio::test]
     async fn over_cap_max_tokens_is_rejected_before_dispatch() {
-        let out =
-            handle_event(&PanicOnDispatch, &cfg(), &event(U256::from(1_000u64), "hi".into(), 4_294_967_295)).await;
-        assert!(matches!(out, Err(CoordinatorError::RejectedEvent(_))), "got {out:?}");
+        let out = handle_event(
+            &PanicOnDispatch,
+            &cfg(),
+            &event(U256::from(1_000u64), "hi".into(), 4_294_967_295),
+        )
+        .await;
+        assert!(
+            matches!(out, Err(CoordinatorError::RejectedEvent(_))),
+            "got {out:?}"
+        );
     }
 }

@@ -84,12 +84,7 @@ pub struct HttpPipelineChainClient {
 impl HttpPipelineChainClient {
     /// Construct a client pointed at `rpc_url`, signing writes to
     /// `contract_addr` with `wallet` on chain `chain_id`.
-    pub fn new(
-        rpc_url: String,
-        chain_id: u64,
-        contract_addr: H160,
-        wallet: Wallet,
-    ) -> Self {
+    pub fn new(rpc_url: String, chain_id: u64, contract_addr: H160, wallet: Wallet) -> Self {
         // CP-B-006 / CP-B-012: redirect-safe, timeout-bounded, fail-closed.
         let http = crate::outbound::redirect_safe_client(HTTP_TIMEOUT);
         Self {
@@ -102,11 +97,7 @@ impl HttpPipelineChainClient {
         }
     }
 
-    async fn rpc(
-        &self,
-        method: &str,
-        params: Value,
-    ) -> Result<Value, PipelineChainError> {
+    async fn rpc(&self, method: &str, params: Value) -> Result<Value, PipelineChainError> {
         let body = json!({
             "jsonrpc": "2.0",
             "method": method,
@@ -119,21 +110,21 @@ impl HttpPipelineChainClient {
             .json(&body)
             .send()
             .await
-            .map_err(|e| {
-                PipelineChainError::WrongState(format!("{} transport: {}", method, e))
-            })?;
-        let value: Value = resp.json().await.map_err(|e| {
-            PipelineChainError::WrongState(format!("{} decode: {}", method, e))
-        })?;
+            .map_err(|e| PipelineChainError::WrongState(format!("{} transport: {}", method, e)))?;
+        let value: Value = resp
+            .json()
+            .await
+            .map_err(|e| PipelineChainError::WrongState(format!("{} decode: {}", method, e)))?;
         if let Some(err) = value.get("error").filter(|v| !v.is_null()) {
             return Err(PipelineChainError::WrongState(format!(
                 "{} rpc error: {}",
                 method, err
             )));
         }
-        value.get("result").cloned().ok_or_else(|| {
-            PipelineChainError::WrongState(format!("{} missing result", method))
-        })
+        value
+            .get("result")
+            .cloned()
+            .ok_or_else(|| PipelineChainError::WrongState(format!("{} missing result", method)))
     }
 
     async fn eth_call(&self, data: &[u8]) -> Result<Vec<u8>, PipelineChainError> {
@@ -144,12 +135,11 @@ impl HttpPipelineChainClient {
             "latest",
         ]);
         let result = self.rpc("eth_call", params).await?;
-        let hex_str = result.as_str().ok_or_else(|| {
-            PipelineChainError::WrongState("eth_call result not a string".into())
-        })?;
-        hex::decode(hex_str.trim_start_matches("0x")).map_err(|e| {
-            PipelineChainError::WrongState(format!("eth_call bad hex: {}", e))
-        })
+        let hex_str = result
+            .as_str()
+            .ok_or_else(|| PipelineChainError::WrongState("eth_call result not a string".into()))?;
+        hex::decode(hex_str.trim_start_matches("0x"))
+            .map_err(|e| PipelineChainError::WrongState(format!("eth_call bad hex: {}", e)))
     }
 
     async fn fetch_nonce(&self) -> Result<u64, PipelineChainError> {
@@ -158,33 +148,28 @@ impl HttpPipelineChainClient {
             .rpc("eth_getTransactionCount", json!([addr, "pending"]))
             .await?;
         let hex_str = result.as_str().ok_or_else(|| {
-            PipelineChainError::WrongState(
-                "eth_getTransactionCount not a string".into(),
-            )
+            PipelineChainError::WrongState("eth_getTransactionCount not a string".into())
         })?;
-        parse_hex_u64(hex_str).map_err(|e| {
-            PipelineChainError::WrongState(format!("nonce decode: {}", e))
-        })
+        parse_hex_u64(hex_str)
+            .map_err(|e| PipelineChainError::WrongState(format!("nonce decode: {}", e)))
     }
 
     async fn fetch_gas_price(&self) -> Result<U256, PipelineChainError> {
         let result = self.rpc("eth_gasPrice", json!([])).await?;
-        let hex_str = result.as_str().ok_or_else(|| {
-            PipelineChainError::WrongState("eth_gasPrice not a string".into())
-        })?;
-        parse_hex_u256(hex_str).map_err(|e| {
-            PipelineChainError::WrongState(format!("gas price decode: {}", e))
-        })
+        let hex_str = result
+            .as_str()
+            .ok_or_else(|| PipelineChainError::WrongState("eth_gasPrice not a string".into()))?;
+        parse_hex_u256(hex_str)
+            .map_err(|e| PipelineChainError::WrongState(format!("gas price decode: {}", e)))
     }
 
-    async fn send_write(
-        &self,
-        calldata: Vec<u8>,
-    ) -> Result<H256, PipelineChainError> {
+    async fn send_write(&self, calldata: Vec<u8>) -> Result<H256, PipelineChainError> {
         let nonce = self.fetch_nonce().await?;
         let gas_price = self.fetch_gas_price().await?;
         let priority = U256::from(DEFAULT_PRIORITY_FEE_WEI);
-        let max_fee = gas_price.saturating_mul(U256::from(2u64)).saturating_add(priority);
+        let max_fee = gas_price
+            .saturating_mul(U256::from(2u64))
+            .saturating_add(priority);
 
         let tx = Eip1559Tx {
             chain_id: self.chain_id,
@@ -211,10 +196,7 @@ impl HttpPipelineChainClient {
         Ok(tx_hash)
     }
 
-    async fn wait_for_receipt(
-        &self,
-        tx_hash: H256,
-    ) -> Result<Option<u64>, PipelineChainError> {
+    async fn wait_for_receipt(&self, tx_hash: H256) -> Result<Option<u64>, PipelineChainError> {
         let hash_hex = format!("0x{}", hex::encode(tx_hash.as_bytes()));
         let deadline = tokio::time::Instant::now() + RECEIPT_WAIT_TIMEOUT;
         let mut delay = RECEIPT_POLL_INITIAL;
@@ -251,12 +233,11 @@ impl HttpPipelineChainClient {
     /// poller's `to_block` bound.
     pub async fn latest_block(&self) -> Result<u64, PipelineChainError> {
         let result = self.rpc("eth_blockNumber", serde_json::json!([])).await?;
-        let hex_str = result.as_str().ok_or_else(|| {
-            PipelineChainError::WrongState("eth_blockNumber not a string".into())
-        })?;
-        u64::from_str_radix(hex_str.trim_start_matches("0x"), 16).map_err(|e| {
-            PipelineChainError::WrongState(format!("blockNumber decode: {}", e))
-        })
+        let hex_str = result
+            .as_str()
+            .ok_or_else(|| PipelineChainError::WrongState("eth_blockNumber not a string".into()))?;
+        u64::from_str_radix(hex_str.trim_start_matches("0x"), 16)
+            .map_err(|e| PipelineChainError::WrongState(format!("blockNumber decode: {}", e)))
     }
 
     /// Poll all ComputePoolPipeline events in `[from_block,
@@ -283,9 +264,9 @@ impl HttpPipelineChainClient {
             }]),
         };
         let result = self.rpc("eth_getLogs", params).await?;
-        let arr = result.as_array().ok_or_else(|| {
-            PipelineChainError::WrongState("eth_getLogs not array".into())
-        })?;
+        let arr = result
+            .as_array()
+            .ok_or_else(|| PipelineChainError::WrongState("eth_getLogs not array".into()))?;
         let mut out = Vec::with_capacity(arr.len());
         for entry in arr {
             if let Some(log) = crate::events::decode_log_entry(entry) {
@@ -431,9 +412,7 @@ fn u32_from_word(word: &[u8]) -> Result<u32, PipelineChainError> {
     }
 }
 
-fn request_state_from_byte(
-    b: u8,
-) -> Result<PipelineRequestState, PipelineChainError> {
+fn request_state_from_byte(b: u8) -> Result<PipelineRequestState, PipelineChainError> {
     // Matches Solidity enum RequestState:
     //   0 = Created, 1 = InFlight, 2 = Completed, 3 = Failed.
     // Our Rust enum has no `Created` (the mock starts at InFlight on
@@ -482,8 +461,7 @@ mod tests {
     use ethereum_types::Address;
     use tokio::net::TcpListener;
 
-    const TEST_HEX: &str =
-        "0000000000000000000000000000000000000000000000000000000000000001";
+    const TEST_HEX: &str = "0000000000000000000000000000000000000000000000000000000000000001";
 
     #[derive(Default, Clone)]
     struct RpcLog {
@@ -543,10 +521,7 @@ mod tests {
         }
     }
 
-    async fn rpc_handler(
-        State(state): State<StubState>,
-        Json(body): Json<Value>,
-    ) -> Json<Value> {
+    async fn rpc_handler(State(state): State<StubState>, Json(body): Json<Value>) -> Json<Value> {
         let method = body
             .get("method")
             .and_then(|v| v.as_str())
@@ -621,11 +596,7 @@ mod tests {
         let all = [s.requests, s.get_stage_owner, s.advance_request];
         for i in 0..all.len() {
             for j in (i + 1)..all.len() {
-                assert_ne!(
-                    all[i], all[j],
-                    "selector collision at {} vs {}",
-                    i, j
-                );
+                assert_ne!(all[i], all[j], "selector collision at {} vs {}", i, j);
             }
         }
     }
@@ -652,10 +623,7 @@ mod tests {
 
         let client = make_client(format!("http://{}", addr));
         let caller = Address::repeat_byte(0x77);
-        let result = client
-            .advance_request(42, caller)
-            .await
-            .expect("advance");
+        let result = client.advance_request(42, caller).await.expect("advance");
 
         assert_eq!(result, PipelineRequestState::Completed);
 
@@ -699,7 +667,7 @@ mod tests {
                 11,
                 requester,
                 2,
-                1,                           // InFlight
+                1,                             // InFlight
                 3_000_000_000_000_000_000u128, // escrow (3 ether)
             )),
         );

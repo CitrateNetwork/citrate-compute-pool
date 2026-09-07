@@ -109,8 +109,8 @@ async fn main() -> ExitCode {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(40204);
-    let rpc_url = env::var("CITRATE_WORKER_RPC_URL")
-        .unwrap_or_else(|_| "https://rpc.citrate.ai".to_string());
+    let rpc_url =
+        env::var("CITRATE_WORKER_RPC_URL").unwrap_or_else(|_| "https://rpc.citrate.ai".to_string());
     // CP-B-006: the RPC leg reads chain truth AND carries signed money
     // transactions. A plaintext remote RPC is MITM-able (false chain
     // truth to a daemon that signs). Refuse fail-closed at startup —
@@ -164,44 +164,26 @@ async fn main() -> ExitCode {
 
     match mode {
         Mode::Training => {
-            let client = HttpChainClientTraining::new(
-                rpc_url,
-                chain_id,
-                contract,
-                wallet,
-            );
+            let client = HttpChainClientTraining::new(rpc_url, chain_id, contract, wallet);
             // CP-B-006 (F-5 parity): fail-fast if the RPC's advertised
             // chain id doesn't match the configured one, before signing.
             if let Err(e) = client.verify_chain_id().await {
                 tracing::error!(error = %e, "RPC chain_id verification failed");
                 return ExitCode::from(12);
             }
-            if let Err(e) = training_event_loop(
-                &client,
-                job_id_filter,
-                poll_interval,
-                confirmations_buffer,
-            )
-            .await
+            if let Err(e) =
+                training_event_loop(&client, job_id_filter, poll_interval, confirmations_buffer)
+                    .await
             {
                 tracing::error!(error = %e, "training event loop terminated");
                 return ExitCode::from(10);
             }
         }
         Mode::Pipeline => {
-            let client = HttpPipelineChainClient::new(
-                rpc_url,
-                chain_id,
-                contract,
-                wallet,
-            );
-            if let Err(e) = pipeline_event_loop(
-                &client,
-                job_id_filter,
-                poll_interval,
-                confirmations_buffer,
-            )
-            .await
+            let client = HttpPipelineChainClient::new(rpc_url, chain_id, contract, wallet);
+            if let Err(e) =
+                pipeline_event_loop(&client, job_id_filter, poll_interval, confirmations_buffer)
+                    .await
             {
                 tracing::error!(error = %e, "pipeline event loop terminated");
                 return ExitCode::from(11);
@@ -222,9 +204,14 @@ async fn training_event_loop(
     let seen: Arc<Mutex<HashSet<(H256, u32)>>> = Arc::new(Mutex::new(HashSet::new()));
 
     loop {
-        if let Err(e) =
-            training_tick(client, job_id_filter, &mut last_block, confirmations_buffer, &seen)
-                .await
+        if let Err(e) = training_tick(
+            client,
+            job_id_filter,
+            &mut last_block,
+            confirmations_buffer,
+            &seen,
+        )
+        .await
         {
             tracing::warn!(error = %e, "training poll tick failed; retrying after interval");
         }
@@ -272,9 +259,14 @@ async fn pipeline_event_loop(
     let seen: Arc<Mutex<HashSet<(H256, u32)>>> = Arc::new(Mutex::new(HashSet::new()));
 
     loop {
-        if let Err(e) =
-            pipeline_tick(client, job_id_filter, &mut last_block, confirmations_buffer, &seen)
-                .await
+        if let Err(e) = pipeline_tick(
+            client,
+            job_id_filter,
+            &mut last_block,
+            confirmations_buffer,
+            &seen,
+        )
+        .await
         {
             tracing::warn!(error = %e, "pipeline poll tick failed; retrying after interval");
         }
@@ -376,11 +368,7 @@ fn env_address(key: &str) -> Result<H160, String> {
     let raw = env::var(key).map_err(|_| format!("{} unset", key))?;
     let trimmed = raw.trim().trim_start_matches("0x");
     if trimmed.len() != 40 {
-        return Err(format!(
-            "{} wants 40 hex chars, got {}",
-            key,
-            trimmed.len()
-        ));
+        return Err(format!("{} wants 40 hex chars, got {}", key, trimmed.len()));
     }
     let bytes = hex::decode(trimmed).map_err(|e| format!("{} bad hex: {}", key, e))?;
     let mut arr = [0u8; 20];

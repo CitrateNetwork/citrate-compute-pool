@@ -171,7 +171,10 @@ mod tests {
             "http://LOCALHOST:8080",
             "http://[::1]:8545",
         ] {
-            assert!(validate_outbound_url_with(url, false).is_ok(), "{url} rejected");
+            assert!(
+                validate_outbound_url_with(url, false).is_ok(),
+                "{url} rejected"
+            );
         }
     }
 
@@ -206,7 +209,10 @@ mod tests {
             "http://",
             "http://user@127.0.0.1:1",
         ] {
-            assert!(validate_outbound_url_with(url, false).is_err(), "{url} accepted");
+            assert!(
+                validate_outbound_url_with(url, false).is_err(),
+                "{url} accepted"
+            );
         }
     }
 

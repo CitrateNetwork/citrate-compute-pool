@@ -84,7 +84,9 @@ async fn an_artifact_already_present_and_correct_is_not_refetched() {
     std::fs::write(&dest, body).unwrap();
 
     let m = StubMirror::serving(body);
-    let fetched = fetch_verified(&m, "p", &dest, keccak256(body)).await.unwrap();
+    let fetched = fetch_verified(&m, "p", &dest, keccak256(body))
+        .await
+        .unwrap();
     assert!(!fetched, "should not have transferred");
     assert_eq!(m.hits(), 0, "the mirror should not have been contacted");
 }
@@ -99,7 +101,9 @@ async fn a_present_but_corrupt_artifact_is_replaced() {
     std::fs::write(&dest, b"rotted").unwrap();
 
     let m = StubMirror::serving(good);
-    assert!(fetch_verified(&m, "p", &dest, keccak256(good)).await.unwrap());
+    assert!(fetch_verified(&m, "p", &dest, keccak256(good))
+        .await
+        .unwrap());
     assert_eq!(std::fs::read(&dest).unwrap(), good);
 }
 
@@ -117,7 +121,10 @@ async fn a_mirror_serving_the_wrong_bytes_is_rejected_and_writes_nothing() {
         .await
         .unwrap_err();
     assert!(matches!(e, FetchError::HashMismatch { .. }), "got {e:?}");
-    assert!(!dest.exists(), "nothing may be left where a good file belongs");
+    assert!(
+        !dest.exists(),
+        "nothing may be left where a good file belongs"
+    );
 }
 
 /// And it must not leave a `.partial` behind either — a stray temp file is
@@ -162,7 +169,9 @@ async fn a_bad_fetch_does_not_destroy_a_good_file_already_in_place() {
 async fn an_unreachable_mirror_is_an_error_not_a_panic() {
     let d = tmpdir("down");
     let m = StubMirror::failing(FetchError::Transport("connection refused".into()));
-    let e = fetch_verified(&m, "p", &d.join("x"), H256::zero()).await.unwrap_err();
+    let e = fetch_verified(&m, "p", &d.join("x"), H256::zero())
+        .await
+        .unwrap_err();
     assert!(matches!(e, FetchError::Transport(_)));
 }
 
@@ -170,7 +179,9 @@ async fn an_unreachable_mirror_is_an_error_not_a_panic() {
 async fn an_oversized_artifact_is_refused() {
     let d = tmpdir("toobig");
     let m = StubMirror::failing(FetchError::TooLarge);
-    let e = fetch_verified(&m, "p", &d.join("x"), H256::zero()).await.unwrap_err();
+    let e = fetch_verified(&m, "p", &d.join("x"), H256::zero())
+        .await
+        .unwrap_err();
     assert!(matches!(e, FetchError::TooLarge));
 }
 
@@ -208,10 +219,22 @@ fn ordinary_store_paths_resolve_under_the_root() {
 fn remote_paths_mirror_the_local_store_layout() {
     let h = H256::repeat_byte(0xAB);
     let hex = format!("0x{}", hex::encode(h.as_bytes()));
-    assert_eq!(model_path(&h, "model.safetensors"), format!("models/{hex}/model.safetensors"));
-    assert_eq!(model_path(&h, "sidecar.nat.json"), format!("models/{hex}/sidecar.nat.json"));
-    assert_eq!(dataset_path(&h, "manifest.json"), format!("datasets/{hex}/manifest.json"));
-    assert_eq!(dataset_path(&h, "shard_0042.json"), format!("datasets/{hex}/shard_0042.json"));
+    assert_eq!(
+        model_path(&h, "model.safetensors"),
+        format!("models/{hex}/model.safetensors")
+    );
+    assert_eq!(
+        model_path(&h, "sidecar.nat.json"),
+        format!("models/{hex}/sidecar.nat.json")
+    );
+    assert_eq!(
+        dataset_path(&h, "manifest.json"),
+        format!("datasets/{hex}/manifest.json")
+    );
+    assert_eq!(
+        dataset_path(&h, "shard_0042.json"),
+        format!("datasets/{hex}/shard_0042.json")
+    );
 }
 
 #[test]
@@ -250,9 +273,7 @@ async fn spawn_chunked_oversize_server(total: usize) -> std::net::SocketAddr {
             let mut sent = 0usize;
             while sent < total {
                 let n = chunk.len().min(total - sent);
-                let _ = sock
-                    .write_all(format!("{:x}\r\n", n).as_bytes())
-                    .await;
+                let _ = sock.write_all(format!("{:x}\r\n", n).as_bytes()).await;
                 let _ = sock.write_all(&chunk[..n]).await;
                 let _ = sock.write_all(b"\r\n").await;
                 sent += n;
@@ -287,6 +308,9 @@ async fn a_chunked_oversize_mirror_response_is_refused_by_the_streaming_cap() {
 async fn a_chunked_response_under_the_cap_is_served() {
     let addr = spawn_chunked_oversize_server(100).await;
     let mirror = HttpMirror::new(format!("http://{addr}"));
-    let out = mirror.fetch_capped("anything", 256).await.expect("under cap serves");
+    let out = mirror
+        .fetch_capped("anything", 256)
+        .await
+        .expect("under cap serves");
     assert_eq!(out.len(), 100);
 }

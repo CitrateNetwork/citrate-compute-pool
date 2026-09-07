@@ -23,7 +23,7 @@ use crate::backend::ModelBackend;
 use crate::chain::{ChainClient, JobChainState};
 use crate::merkle::compute_epoch_root;
 use crate::transport::{Transport, WorkerMessage};
-use crate::types::{B256, EpochIndex, JobId, StepCommit, StepIndex, WorkerAddress};
+use crate::types::{EpochIndex, JobId, StepCommit, StepIndex, WorkerAddress, B256};
 
 /// SECREM-02 6.3 (CITRATE_COMPUTE_POOL-2026-05-31-005): per-message
 /// timeout on the epoch drain loops. A peer that stops sending (or a
@@ -66,10 +66,7 @@ pub(crate) struct EpochAggregator {
 }
 
 impl EpochAggregator {
-    pub(crate) fn new(
-        epoch: EpochIndex,
-        members: impl IntoIterator<Item = WorkerAddress>,
-    ) -> Self {
+    pub(crate) fn new(epoch: EpochIndex, members: impl IntoIterator<Item = WorkerAddress>) -> Self {
         Self {
             epoch,
             members: members.into_iter().collect(),
@@ -280,8 +277,7 @@ where
             // seen every other worker's (steps-per-epoch) commits for
             // this epoch, then compute + post the Merkle root.
             if self.config.is_coordinator {
-                let expected_total =
-                    (worker_count as usize) * (spec.steps_per_epoch as usize);
+                let expected_total = (worker_count as usize) * (spec.steps_per_epoch as usize);
 
                 // RM-E.3 / COMPUTE_POOL-001: aggregate through a
                 // membership + (worker, step) dedup gate so a flooder
@@ -353,14 +349,11 @@ where
                 // usize::MAX in release) on this non-coordinator path.
                 let expected =
                     (worker_count as usize).saturating_sub(1) * (spec.steps_per_epoch as usize);
-                let mut archive_gate =
-                    EpochAggregator::new(epoch, snap.workers.iter().copied());
+                let mut archive_gate = EpochAggregator::new(epoch, snap.workers.iter().copied());
                 let deadline = tokio::time::Instant::now() + ARCHIVE_DRAIN_DEADLINE;
                 while archive_gate.len() < expected {
-                    let per_msg_deadline = std::cmp::min(
-                        deadline,
-                        tokio::time::Instant::now() + DRAIN_RECV_TIMEOUT,
-                    );
+                    let per_msg_deadline =
+                        std::cmp::min(deadline, tokio::time::Instant::now() + DRAIN_RECV_TIMEOUT);
                     let recv =
                         tokio::time::timeout_at(per_msg_deadline, self.transport.recv(me)).await;
                     let msg = match recv {
@@ -420,7 +413,9 @@ where
         if self.config.is_coordinator {
             // Roll blocks forward to simulate the challenge window
             // elapsing. Real worker waits for the real block clock.
-            self.chain.advance_blocks(spec.challenge_window_blocks as u64 + 1).await;
+            self.chain
+                .advance_blocks(spec.challenge_window_blocks as u64 + 1)
+                .await;
             self.chain.finalize(job_id).await?;
             info!(worker = %me, "finalized job");
         } else {
@@ -496,7 +491,10 @@ mod compute_pool_001_tests {
 
         // Hostile stream interleaved with the honest commits.
         let mut agg = EpochAggregator::new(epoch, members);
-        assert!(agg.try_accept(commit(w1, epoch, 0, 0x11)), "honest w1 accepted");
+        assert!(
+            agg.try_accept(commit(w1, epoch, 0, 0x11)),
+            "honest w1 accepted"
+        );
         assert!(
             !agg.try_accept(commit(evil, epoch, 0, 0xEE)),
             "forged non-member commit must be rejected"
@@ -509,7 +507,10 @@ mod compute_pool_001_tests {
             !agg.try_accept(commit(w2, epoch + 1, 0, 0x22)),
             "wrong-epoch commit must be rejected"
         );
-        assert!(agg.try_accept(commit(w2, epoch, 0, 0x22)), "honest w2 accepted");
+        assert!(
+            agg.try_accept(commit(w2, epoch, 0, 0x22)),
+            "honest w2 accepted"
+        );
 
         assert_eq!(agg.len(), 2, "only the two honest commits are counted");
         let (got_root, _) = compute_epoch_root(&agg.into_commits());

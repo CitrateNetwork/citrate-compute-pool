@@ -76,12 +76,11 @@ impl WsChainSubscriber {
         // fail-closed before dialing. wss any-host / ws loopback-only.
         crate::outbound::validate_outbound_ws_url(&self.rpc_ws_url)
             .map_err(|e| CoordinatorError::Chain(format!("CITRATE_POOL_WS_URL: {}", e)))?;
-        let (ws_stream, _response) =
-            tokio_tungstenite::connect_async(&self.rpc_ws_url)
-                .await
-                .map_err(|e| {
-                    CoordinatorError::Chain(format!("ws connect {}: {}", self.rpc_ws_url, e))
-                })?;
+        let (ws_stream, _response) = tokio_tungstenite::connect_async(&self.rpc_ws_url)
+            .await
+            .map_err(|e| {
+                CoordinatorError::Chain(format!("ws connect {}: {}", self.rpc_ws_url, e))
+            })?;
 
         let (mut write, mut read) = ws_stream.split();
 
@@ -103,22 +102,18 @@ impl WsChainSubscriber {
         write
             .send(Message::Text(subscribe_req.to_string().into()))
             .await
-            .map_err(|e| {
-                CoordinatorError::Chain(format!("ws subscribe send: {}", e))
-            })?;
+            .map_err(|e| CoordinatorError::Chain(format!("ws subscribe send: {}", e)))?;
 
         // Wait for the subscription id reply.
         let sub_id = loop {
-            let msg = read.next().await.ok_or_else(|| {
-                CoordinatorError::Chain("ws closed before subscribe ack".into())
-            })?;
-            let text = msg.map_err(|e| {
-                CoordinatorError::Chain(format!("ws recv: {}", e))
-            })?;
+            let msg = read
+                .next()
+                .await
+                .ok_or_else(|| CoordinatorError::Chain("ws closed before subscribe ack".into()))?;
+            let text = msg.map_err(|e| CoordinatorError::Chain(format!("ws recv: {}", e)))?;
             let Message::Text(s) = text else { continue };
-            let parsed: Value = serde_json::from_str(&s).map_err(|e| {
-                CoordinatorError::Chain(format!("ws subscribe ack parse: {}", e))
-            })?;
+            let parsed: Value = serde_json::from_str(&s)
+                .map_err(|e| CoordinatorError::Chain(format!("ws subscribe ack parse: {}", e)))?;
             if let Some(id) = parsed.get("result").and_then(|v| v.as_str()) {
                 break id.to_string();
             }
@@ -163,10 +158,7 @@ impl WsChainSubscriber {
                 };
                 // Notification shape: { "method": "eth_subscription",
                 //   "params": { "subscription": "0x...", "result": <log>} }
-                let log = match parsed
-                    .get("params")
-                    .and_then(|p| p.get("result"))
-                {
+                let log = match parsed.get("params").and_then(|p| p.get("result")) {
                     Some(l) => l.clone(),
                     None => continue,
                 };
@@ -232,8 +224,7 @@ fn decode_compute_requested(
         .ok_or_else(|| CoordinatorError::Chain("log missing address".into()))?;
     let log_address_bytes = hex::decode(log_address.trim_start_matches("0x"))
         .map_err(|e| CoordinatorError::Chain(format!("log address hex: {}", e)))?;
-    if log_address_bytes.len() != 20 || H160::from_slice(&log_address_bytes) != expected_contract
-    {
+    if log_address_bytes.len() != 20 || H160::from_slice(&log_address_bytes) != expected_contract {
         return Err(CoordinatorError::Chain(format!(
             "log emitted by {log_address}, expected pool contract {expected_contract:?}"
         )));
@@ -312,8 +303,8 @@ fn topic_u64(topic: Option<&str>) -> Result<u64, CoordinatorError> {
             stripped.len()
         )));
     }
-    let bytes = hex::decode(stripped)
-        .map_err(|e| CoordinatorError::Chain(format!("topic hex: {}", e)))?;
+    let bytes =
+        hex::decode(stripped).map_err(|e| CoordinatorError::Chain(format!("topic hex: {}", e)))?;
     // CP-B-007: an indexed topic is attacker-controlled over a MITM'd or
     // hostile subscription; `as_u64()` panics on overflow. Reject the
     // out-of-range word instead of unwinding out of the event loop.
@@ -350,9 +341,7 @@ mod tests {
     /// Spin up a minimal WebSocket server that accepts one client,
     /// sends back a subscription id, then pushes N log
     /// notifications before closing.
-    async fn spawn_stub_ws(
-        n_logs: usize,
-    ) -> SocketAddr {
+    async fn spawn_stub_ws(n_logs: usize) -> SocketAddr {
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
         let addr = listener.local_addr().expect("local_addr");
         tokio::spawn(async move {

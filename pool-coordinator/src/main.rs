@@ -121,8 +121,12 @@ async fn main() -> ExitCode {
             eprintln!("wallet load failed: {}", e);
             eprintln!();
             eprintln!("Set one of:");
-            eprintln!("  CITRATE_POOL_KEYSTORE_PATH + CITRATE_POOL_KEYSTORE_PASSPHRASE  (production)");
-            eprintln!("  CITRATE_POOL_PRIVATE_KEY_HEX                                   (testnet only)");
+            eprintln!(
+                "  CITRATE_POOL_KEYSTORE_PATH + CITRATE_POOL_KEYSTORE_PASSPHRASE  (production)"
+            );
+            eprintln!(
+                "  CITRATE_POOL_PRIVATE_KEY_HEX                                   (testnet only)"
+            );
             return ExitCode::from(2);
         }
     };
@@ -210,8 +214,7 @@ async fn main() -> ExitCode {
         .and_then(|s| s.parse().ok())
         .unwrap_or(12);
 
-    let seen: Arc<Mutex<SeenEvents>> =
-        Arc::new(Mutex::new(SeenEvents::with_cap(SEEN_EVENTS_CAP)));
+    let seen: Arc<Mutex<SeenEvents>> = Arc::new(Mutex::new(SeenEvents::with_cap(SEEN_EVENTS_CAP)));
 
     // Event polling loop.
     //
@@ -239,8 +242,7 @@ async fn main() -> ExitCode {
         // Update gauge after each tick.
         {
             let set = seen.lock().await;
-            ::metrics::gauge!("pool_coord_seen_events_cardinality")
-                .set(set.len() as f64);
+            ::metrics::gauge!("pool_coord_seen_events_cardinality").set(set.len() as f64);
         }
         tokio::time::sleep(poll_interval).await;
     }
@@ -285,11 +287,7 @@ async fn tick(
                         "outcome" => "success"
                     )
                     .increment(1);
-                    tracing::info!(
-                        pool = event.pool_id,
-                        job = event.job_id,
-                        "event handled"
-                    );
+                    tracing::info!(pool = event.pool_id, job = event.job_id, "event handled");
                 }
                 Err(CoordinatorError::NotCoordinator) => {
                     ::metrics::counter!(
@@ -338,11 +336,7 @@ fn env_address(key: &str) -> Result<H160, String> {
     let raw = env::var(key).map_err(|_| format!("{} unset", key))?;
     let trimmed = raw.trim().trim_start_matches("0x");
     if trimmed.len() != 40 {
-        return Err(format!(
-            "{} wants 40 hex chars, got {}",
-            key,
-            trimmed.len()
-        ));
+        return Err(format!("{} wants 40 hex chars, got {}", key, trimmed.len()));
     }
     let bytes = hex::decode(trimmed).map_err(|e| format!("{} bad hex: {}", key, e))?;
     let mut arr = [0u8; 20];

@@ -492,8 +492,10 @@ async fn status_get_does_not_diverge_memory_from_disk() {
     let c = Arc::new(Coordinator::open(Store::new(path.clone())).unwrap());
     // A job whose lease expires immediately, so the very next status read
     // sees an expirable lease.
-    c.add_job(JobSpec::new("probe-job", Capability::Probe, serde_json::json!({})).with_lease_secs(0))
-        .unwrap();
+    c.add_job(
+        JobSpec::new("probe-job", Capability::Probe, serde_json::json!({})).with_lease_secs(0),
+    )
+    .unwrap();
 
     // Register a probe-tier worker and lease the job.
     let res = router(c.clone())
