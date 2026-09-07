@@ -167,6 +167,9 @@ async fn dispatch_does_not_follow_redirect_to_off_gate_sink() {
             .into_iter()
             .collect(),
         provider_timeout_secs: 30,
+        min_payment_grains: ethereum_types::U256::from(1u64),
+        max_prompt_bytes: 128 * 1024,
+        max_tokens_cap: 8192,
     };
 
     let event = ComputeRequestedEvent {

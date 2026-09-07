@@ -100,6 +100,35 @@ pub async fn handle_event<C: ChainAdapter + ?Sized>(
     cfg: &CoordinatorConfig,
     event: &ComputeRequestedEvent,
 ) -> Result<(), CoordinatorError> {
+    // 0. CP-B-008: admission gate — refuse abusive events BEFORE any
+    //    on-chain `recordDispatch`. The dispatch decision otherwise
+    //    never reads escrow, never caps the requester-supplied prompt,
+    //    and bounds `max_tokens` only at `u32::MAX`, so a zero-payment
+    //    job demanding billions of tokens over a multi-megabyte prompt
+    //    would be recorded on-chain against a deterministically-selected
+    //    honest member and then `failJob`'d against it. Rejecting here
+    //    means the member is never attributed the work at all.
+    if !cfg.min_payment_grains.is_zero() && event.payment_grains < cfg.min_payment_grains {
+        return Err(CoordinatorError::RejectedEvent(format!(
+            "job {} payment_grains {} below floor {}",
+            event.job_id, event.payment_grains, cfg.min_payment_grains
+        )));
+    }
+    if event.prompt.len() > cfg.max_prompt_bytes {
+        return Err(CoordinatorError::RejectedEvent(format!(
+            "job {} prompt {} bytes exceeds cap {}",
+            event.job_id,
+            event.prompt.len(),
+            cfg.max_prompt_bytes
+        )));
+    }
+    if event.max_tokens > cfg.max_tokens_cap {
+        return Err(CoordinatorError::RejectedEvent(format!(
+            "job {} max_tokens {} exceeds cap {}",
+            event.job_id, event.max_tokens, cfg.max_tokens_cap
+        )));
+    }
+
     // 1. Are we the elected coordinator for the current epoch?
     //    SECREM-02 6.3 (CITRATE_COMPUTE_POOL-2026-05-31-008): the
     //    epoch is derived from the event's block number, mirroring
@@ -156,10 +185,17 @@ pub async fn handle_event<C: ChainAdapter + ?Sized>(
     //    construction-time outbound gate (e.g. https->http downgrade to
     //    a cleartext off-gate sink). `Policy::none()` returns the 3xx as
     //    a response instead, so the prompt is never delivered to it.
+    // CP-B-012: do NOT fall back to `Client::default()` on a builder
+    // error — the default follows up to 10 redirects, which is exactly
+    // the FWA-BV-CP-01 vulnerability this `Policy::none()` exists to
+    // prevent (fail-open). A coordinator that cannot build a
+    // redirect-safe client must not dispatch the buyer prompt at all.
     let http = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .build()
-        .unwrap_or_default();
+        .map_err(|e| {
+            CoordinatorError::Internal(format!("could not build redirect-safe HTTP client: {e}"))
+        })?;
     let body = PoolInferRequest {
         model: DEFAULT_MODEL.to_string(),
         prompt: event.prompt.clone(),
@@ -207,4 +243,96 @@ pub fn log_identity(self_addr: H160, member_count: usize) {
         configured_members = member_count,
         "pool-coordinator starting"
     );
+}
+
+#[cfg(test)]
+mod admission_tests {
+    use super::*;
+    use crate::chain::{ComputeRequestedEvent, PoolMemberInfo, RecordDispatchOutcome};
+    use async_trait::async_trait;
+    use ethereum_types::{H160, H256, U256};
+
+    /// A chain adapter that PANICS if `record_dispatch` is ever called.
+    /// CP-B-008: the admission gate must refuse an abusive event before
+    /// any on-chain attribution, so a rejected event must never reach
+    /// `record_dispatch` (which is what marks an honest member the
+    /// party that then gets `failJob`'d).
+    struct PanicOnDispatch;
+
+    #[async_trait]
+    impl ChainAdapter for PanicOnDispatch {
+        fn self_address(&self) -> H160 {
+            H160::from([0xaa; 20])
+        }
+        async fn coordinator_for(&self, _p: u64, _e: u64) -> Result<H160, CoordinatorError> {
+            Ok(H160::from([0xaa; 20]))
+        }
+        async fn pool_members(&self, _p: u64) -> Result<Vec<PoolMemberInfo>, CoordinatorError> {
+            Ok(vec![PoolMemberInfo {
+                address: H160::from([0xb1; 20]),
+                gpu_count: 1,
+                active: true,
+            }])
+        }
+        async fn record_dispatch(
+            &self,
+            _job: u64,
+            _m: H160,
+        ) -> Result<RecordDispatchOutcome, CoordinatorError> {
+            panic!("record_dispatch must NOT be reached for a rejected event (CP-B-008)");
+        }
+        async fn complete_job(&self, _j: u64) -> Result<H256, CoordinatorError> {
+            Ok(H256::zero())
+        }
+        async fn fail_job(&self, _j: u64) -> Result<H256, CoordinatorError> {
+            Ok(H256::zero())
+        }
+    }
+
+    fn cfg() -> CoordinatorConfig {
+        CoordinatorConfig {
+            chain_id: 40204,
+            rpc_url: "http://127.0.0.1:8545".to_string(),
+            wallet_address: H160::from([0xaa; 20]),
+            member_endpoints: std::collections::HashMap::new(),
+            provider_timeout_secs: 30,
+            min_payment_grains: U256::from(1u64),
+            max_prompt_bytes: 128 * 1024,
+            max_tokens_cap: 8192,
+        }
+    }
+
+    fn event(payment: U256, prompt: String, max_tokens: u32) -> ComputeRequestedEvent {
+        ComputeRequestedEvent {
+            pool_id: 1,
+            job_id: 7,
+            requester: H160::from([0xc1; 20]),
+            payment_grains: payment,
+            prompt,
+            max_tokens,
+            tx_hash: H256::zero(),
+            log_index: 0,
+            block_number: 1,
+        }
+    }
+
+    #[tokio::test]
+    async fn zero_payment_event_is_rejected_before_dispatch() {
+        let out = handle_event(&PanicOnDispatch, &cfg(), &event(U256::zero(), "hi".into(), 16)).await;
+        assert!(matches!(out, Err(CoordinatorError::RejectedEvent(_))), "got {out:?}");
+    }
+
+    #[tokio::test]
+    async fn oversized_prompt_is_rejected_before_dispatch() {
+        let big = "x".repeat(128 * 1024 + 1);
+        let out = handle_event(&PanicOnDispatch, &cfg(), &event(U256::from(1_000u64), big, 16)).await;
+        assert!(matches!(out, Err(CoordinatorError::RejectedEvent(_))), "got {out:?}");
+    }
+
+    #[tokio::test]
+    async fn over_cap_max_tokens_is_rejected_before_dispatch() {
+        let out =
+            handle_event(&PanicOnDispatch, &cfg(), &event(U256::from(1_000u64), "hi".into(), 4_294_967_295)).await;
+        assert!(matches!(out, Err(CoordinatorError::RejectedEvent(_))), "got {out:?}");
+    }
 }

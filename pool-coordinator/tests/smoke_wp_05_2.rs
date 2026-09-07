@@ -181,6 +181,9 @@ fn config(provider_addrs: &[(H160, SocketAddr)]) -> CoordinatorConfig {
         wallet_address: H160::from([0xaa; 20]),
         member_endpoints: endpoints,
         provider_timeout_secs: 30,
+        min_payment_grains: ethereum_types::U256::from(1u64),
+        max_prompt_bytes: 128 * 1024,
+        max_tokens_cap: 8192,
     }
 }
 

@@ -34,7 +34,7 @@
 //!   default "latest" (start at the current tip; historical
 //!   events are ignored)
 
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::env;
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -55,6 +55,53 @@ use citrate_pool_coordinator::{
 /// memory-safety bound for chains with unexpectedly long reorg
 /// tails or misconfigured buffer values.
 const SEEN_EVENTS_CAP: usize = 10_000;
+
+/// CP-B-013: a FIFO-ordered dedup set for `(tx_hash, log_index)` event
+/// keys. The previous implementation used a bare `HashSet` and, when
+/// capped, evicted `set.iter().take(n)` — but `HashSet` iteration order
+/// is `RandomState`-randomised, so it dropped an *arbitrary* half rather
+/// than the "oldest half" the comment claimed. A still-recent key
+/// evicted while inside the reorg re-scan window would then be
+/// re-dispatched. A `VecDeque` insertion-order queue alongside the
+/// membership set evicts the genuinely-oldest entries, matching the
+/// `ReplayGuard` discipline already used in `libp2p_transport`.
+struct SeenEvents {
+    set: HashSet<(H256, u32)>,
+    order: VecDeque<(H256, u32)>,
+    cap: usize,
+}
+
+impl SeenEvents {
+    fn with_cap(cap: usize) -> Self {
+        Self {
+            set: HashSet::new(),
+            order: VecDeque::new(),
+            cap,
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.set.len()
+    }
+
+    /// Insert `key`. Returns `true` if it was new (not a replay). Evicts
+    /// the oldest entries first when at capacity.
+    fn insert(&mut self, key: (H256, u32)) -> bool {
+        if self.set.contains(&key) {
+            return false;
+        }
+        while self.set.len() >= self.cap {
+            match self.order.pop_front() {
+                Some(oldest) => {
+                    self.set.remove(&oldest);
+                }
+                None => break,
+            }
+        }
+        self.order.push_back(key);
+        self.set.insert(key)
+    }
+}
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -163,8 +210,8 @@ async fn main() -> ExitCode {
         .and_then(|s| s.parse().ok())
         .unwrap_or(12);
 
-    let seen: Arc<Mutex<HashSet<(H256, u32)>>> =
-        Arc::new(Mutex::new(HashSet::new()));
+    let seen: Arc<Mutex<SeenEvents>> =
+        Arc::new(Mutex::new(SeenEvents::with_cap(SEEN_EVENTS_CAP)));
 
     // Event polling loop.
     //
@@ -204,7 +251,7 @@ async fn tick(
     cfg: &CoordinatorConfig,
     last_block: u64,
     confirmations_buffer: u64,
-    seen: &Arc<Mutex<HashSet<(H256, u32)>>>,
+    seen: &Arc<Mutex<SeenEvents>>,
 ) -> Result<u64, CoordinatorError> {
     let latest = adapter.latest_block().await?;
     if latest <= last_block {
@@ -215,22 +262,8 @@ async fn tick(
     let from = last_block.saturating_sub(confirmations_buffer).max(1);
     let events = adapter.poll_compute_requested(from, latest).await?;
 
-    // Evict old entries + check cap before inserting new ones.
-    {
-        let mut set = seen.lock().await;
-        if set.len() >= SEEN_EVENTS_CAP {
-            // When capped, drop half. Brute-force but deterministic.
-            let drop_count = set.len() / 2;
-            let to_remove: Vec<_> = set.iter().take(drop_count).cloned().collect();
-            for k in to_remove {
-                set.remove(&k);
-            }
-            tracing::warn!(
-                dropped = drop_count,
-                "dedup set hit cap; dropped oldest half"
-            );
-        }
-    }
+    // CP-B-013: eviction is FIFO (oldest-first) inside `SeenEvents::insert`,
+    // so a still-recent key can no longer be dropped ahead of an older one.
 
     for event in events {
         ::metrics::counter!("pool_coord_events_observed_total").increment(1);
@@ -347,4 +380,44 @@ fn print_config_help(err: &str) {
     eprintln!("  CITRATE_POOL_PROVIDER_TIMEOUT_SECS  default 30");
     eprintln!("  CITRATE_POOL_POLL_INTERVAL_SECS   default 3");
     eprintln!("  CITRATE_POOL_FROM_BLOCK           default \"latest\"");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn key(n: u8) -> (H256, u32) {
+        (H256::from([n; 32]), n as u32)
+    }
+
+    // CP-B-013 tripwire: at capacity the dedup set must evict the
+    // OLDEST entries, so the most-recently-inserted keys survive and
+    // cannot be re-dispatched. Pre-fix (HashSet::iter().take) this was
+    // non-deterministic and could evict a still-recent key.
+    #[test]
+    fn seen_events_evicts_oldest_first_and_keeps_recent() {
+        let mut seen = SeenEvents::with_cap(3);
+        assert!(seen.insert(key(1)));
+        assert!(seen.insert(key(2)));
+        assert!(seen.insert(key(3)));
+        // Inserting a 4th at cap must evict the oldest (key 1), never a
+        // more-recent one.
+        assert!(seen.insert(key(4)));
+        assert_eq!(seen.len(), 3);
+        // The three most-recent keys survive → replays are still caught.
+        assert!(!seen.insert(key(2)), "recent key 2 must still be deduped");
+        assert!(!seen.insert(key(3)), "recent key 3 must still be deduped");
+        assert!(!seen.insert(key(4)), "recent key 4 must still be deduped");
+        // The evicted oldest key is treated as new (acceptable: it has
+        // aged out of the reorg window).
+        assert!(seen.insert(key(1)));
+    }
+
+    #[test]
+    fn seen_events_dedups_exact_replay() {
+        let mut seen = SeenEvents::with_cap(10);
+        assert!(seen.insert(key(7)));
+        assert!(!seen.insert(key(7)), "exact replay must be refused");
+        assert_eq!(seen.len(), 1);
+    }
 }

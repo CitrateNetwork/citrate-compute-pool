@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::env;
 
-use ethereum_types::H160;
+use ethereum_types::{H160, U256};
 
 use crate::outbound::validate_outbound_url;
 
@@ -25,6 +25,21 @@ pub struct CoordinatorConfig {
     pub member_endpoints: HashMap<H160, String>,
     /// Per-request HTTPS timeout against pool members.
     pub provider_timeout_secs: u64,
+    /// CP-B-008 admission floor: refuse a `ComputeRequested` whose
+    /// escrowed `payment_grains` is below this, BEFORE `recordDispatch`.
+    /// The dispatch decision never reads escrow otherwise, so a
+    /// zero-payment job would be recorded on-chain against a
+    /// deterministically-selected honest member and then `failJob`'d
+    /// against it. Default 1 (refuse zero-payment). `0` disables.
+    pub min_payment_grains: U256,
+    /// CP-B-008 admission cap: refuse a job whose decoded prompt exceeds
+    /// this many bytes before dispatch. Bounds the multi-megabyte-prompt
+    /// grief vector. Default 128 KiB.
+    pub max_prompt_bytes: usize,
+    /// CP-B-008 admission cap: refuse a job whose `max_tokens` exceeds
+    /// this before dispatch. The decoder clamps only at `u32::MAX`;
+    /// this is the real serviceable ceiling. Default 8192.
+    pub max_tokens_cap: u32,
 }
 
 impl CoordinatorConfig {
@@ -55,12 +70,28 @@ impl CoordinatorConfig {
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or(30);
+        // CP-B-008 admission gate thresholds (env-overridable).
+        let min_payment_grains = env::var("CITRATE_POOL_MIN_PAYMENT_GRAINS")
+            .ok()
+            .and_then(|s| U256::from_dec_str(s.trim()).ok())
+            .unwrap_or_else(|| U256::from(1u64));
+        let max_prompt_bytes = env::var("CITRATE_POOL_MAX_PROMPT_BYTES")
+            .ok()
+            .and_then(|s| s.trim().parse().ok())
+            .unwrap_or(128 * 1024);
+        let max_tokens_cap = env::var("CITRATE_POOL_MAX_TOKENS")
+            .ok()
+            .and_then(|s| s.trim().parse().ok())
+            .unwrap_or(8192);
         Ok(Self {
             chain_id,
             rpc_url,
             wallet_address,
             member_endpoints,
             provider_timeout_secs,
+            min_payment_grains,
+            max_prompt_bytes,
+            max_tokens_cap,
         })
     }
 }

@@ -314,7 +314,16 @@ fn topic_u64(topic: Option<&str>) -> Result<u64, CoordinatorError> {
     }
     let bytes = hex::decode(stripped)
         .map_err(|e| CoordinatorError::Chain(format!("topic hex: {}", e)))?;
-    Ok(U256::from_big_endian(&bytes).as_u64())
+    // CP-B-007: an indexed topic is attacker-controlled over a MITM'd or
+    // hostile subscription; `as_u64()` panics on overflow. Reject the
+    // out-of-range word instead of unwinding out of the event loop.
+    let word = U256::from_big_endian(&bytes);
+    if word > U256::from(u64::MAX) {
+        return Err(CoordinatorError::Chain(format!(
+            "topic value {word} exceeds u64::MAX (hostile/garbled event)"
+        )));
+    }
+    Ok(word.low_u64())
 }
 
 fn topic_address(topic: Option<&str>) -> Result<H160, CoordinatorError> {
