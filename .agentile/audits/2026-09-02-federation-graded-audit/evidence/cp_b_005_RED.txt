@@ -1,0 +1,9 @@
+FAIL: training-worker/src/wallet.rs does not import zeroize::Zeroizing
+FAIL: training-worker/src/wallet.rs leaves decrypted plaintext un-zeroized (raw Vec clone)
+FAIL: training-worker/src/wallet.rs round-trips the key through an un-zeroized hex String
+FAIL: training-worker/src/wallet.rs does not wrap the hex key in Zeroizing
+FAIL: pool-coordinator/src/wallet.rs does not import zeroize::Zeroizing
+FAIL: pool-coordinator/src/wallet.rs leaves decrypted plaintext un-zeroized (raw Vec clone)
+FAIL: pool-coordinator/src/wallet.rs round-trips the key through an un-zeroized hex String
+FAIL: pool-coordinator/src/wallet.rs does not wrap the hex key in Zeroizing
+CP-B-005 tripwire: RED (key material not zeroized)

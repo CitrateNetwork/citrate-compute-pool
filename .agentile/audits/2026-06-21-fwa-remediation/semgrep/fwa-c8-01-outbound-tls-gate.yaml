@@ -1,0 +1,65 @@
+rules:
+  # FWA-C8-01 (federation-wide audit 2026-06-20, MEDIUM): every outbound
+  # connection the coordinator opens — the JSON-RPC leg, the member
+  # /pool-infer dispatch leg, and the opt-in ws event-subscription leg —
+  # must have its URL passed through the outbound TLS gate
+  # (validate_outbound_url / validate_outbound_ws_url) so a plaintext
+  # remote endpoint is refused fail-closed and a network MITM can neither
+  # read the buyer prompt nor forge a completion/failure/chain-truth.
+  #
+  # Permanent tripwire: a NEW outbound sink in a function that does not
+  # call the gate trips here. The gate may be invoked bare or wrapped
+  # (`.map_err(..)?`) and bare or path-qualified (`crate::outbound::..`),
+  # so both not-inside forms are listed.
+
+  - id: fwa-c8-01-ws-connect-without-tls-gate
+    languages: [rust]
+    severity: ERROR
+    message: >-
+      FWA-C8-01: tokio_tungstenite::connect_async(...) opens an outbound
+      websocket but the enclosing function does not call
+      validate_outbound_ws_url on the URL first. A plaintext remote ws://
+      subscription is MITM-able (forged ComputeRequested events). Validate
+      the URL fail-closed before dialing.
+    patterns:
+      - pattern: tokio_tungstenite::connect_async(...)
+      - pattern-not-inside: |
+          fn $F(...) -> $R {
+            ...
+            <... validate_outbound_ws_url(...) ...>;
+            ...
+          }
+      - pattern-not-inside: |
+          fn $F(...) -> $R {
+            ...
+            <... $C::validate_outbound_ws_url(...) ...>;
+            ...
+          }
+
+  - id: fwa-c8-01-member-endpoint-stored-without-tls-gate
+    languages: [rust]
+    severity: ERROR
+    message: >-
+      FWA-C8-01: a pool member endpoint URL is inserted into the endpoint
+      map without first passing it through validate_outbound_url. The
+      coordinator POSTs the buyer prompt to this URL and trusts the
+      completion to decide completeJob/failJob — a plaintext remote
+      endpoint is MITM-able. Validate fail-closed at parse time.
+    patterns:
+      - pattern: $MAP.insert($K, $URL.to_string());
+      - pattern-inside: |
+          fn parse_endpoints(...) -> $R {
+            ...
+          }
+      - pattern-not-inside: |
+          fn parse_endpoints(...) -> $R {
+            ...
+            <... validate_outbound_url(...) ...>;
+            ...
+          }
+      - pattern-not-inside: |
+          fn parse_endpoints(...) -> $R {
+            ...
+            <... $C::validate_outbound_url(...) ...>;
+            ...
+          }

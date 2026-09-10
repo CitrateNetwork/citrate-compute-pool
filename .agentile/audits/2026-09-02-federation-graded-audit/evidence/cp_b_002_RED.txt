@@ -1,0 +1,6 @@
+test a_captured_lease_request_cannot_be_replayed ... FAILED
+---- a_captured_lease_request_cannot_be_replayed stdout ----
+thread 'a_captured_lease_request_cannot_be_replayed' (1064374) panicked at training-coordinator/tests/http_end_to_end.rs:336:5:
+assertion `left == right` failed: a replayed lease request must be refused
+    a_captured_lease_request_cannot_be_replayed
+test result: FAILED. 8 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.13s

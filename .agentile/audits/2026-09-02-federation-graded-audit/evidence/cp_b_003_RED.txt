@@ -1,0 +1,4 @@
+test state::tests::the_worker_map_is_bounded_regardless_of_how_many_keys_register ... FAILED
+thread 'state::tests::the_worker_map_is_bounded_regardless_of_how_many_keys_register' (3662928) panicked at training-coordinator/src/state_tests.rs:264:5:
+worker map grew to 4596 for 4596 registrations; must be capped at 4096
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 48 filtered out; finished in 0.01s

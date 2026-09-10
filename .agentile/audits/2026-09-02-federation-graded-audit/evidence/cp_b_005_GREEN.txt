@@ -1,0 +1,1 @@
+CP-B-005 tripwire: GREEN (key material wrapped in Zeroizing in both wallets)

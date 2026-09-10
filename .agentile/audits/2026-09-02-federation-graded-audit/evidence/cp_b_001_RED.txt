@@ -1,0 +1,12 @@
+test attestation::tests::an_impossible_throughput_claim_does_not_mint_the_top_tier ... FAILED
+test state::tests::distinct_fresh_keys_cannot_quarantine_a_job_by_leasing_and_expiring ... FAILED
+---- attestation::tests::an_impossible_throughput_claim_does_not_mint_the_top_tier stdout ----
+thread 'attestation::tests::an_impossible_throughput_claim_does_not_mint_the_top_tier' (4030615) panicked at training-coordinator/src/attestation_tests.rs:124:5:
+assertion `left == right` failed
+  left: H01
+ right: Probe
+---- state::tests::distinct_fresh_keys_cannot_quarantine_a_job_by_leasing_and_expiring stdout ----
+thread 'state::tests::distinct_fresh_keys_cannot_quarantine_a_job_by_leasing_and_expiring' (4030648) panicked at training-coordinator/src/state_tests.rs:174:27:
+    attestation::tests::an_impossible_throughput_claim_does_not_mint_the_top_tier
+    state::tests::distinct_fresh_keys_cannot_quarantine_a_job_by_leasing_and_expiring
+test result: FAILED. 49 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.21s
