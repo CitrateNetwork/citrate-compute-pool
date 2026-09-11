@@ -1,5 +1,7 @@
 # citrate-compute-pool
 
+*Part of the **[Citrate Network](https://citrate.ai)** — own the means of computation. · [Docs](https://docs.citrate.ai) · [Run a node](https://citrate.ai/download) · [Contribute → free membership](https://github.com/CitrateNetwork/.github/blob/main/CONTRIBUTING.md)*
+
 > The pool-side daemons for the Citrate compute marketplace (chain 40204) — an
 > inference **pool coordinator** that dispatches jobs across member nodes and
 > settles on chain, and a **training coordinator + workers** that lease and run
