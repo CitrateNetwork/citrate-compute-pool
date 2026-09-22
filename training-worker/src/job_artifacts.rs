@@ -199,7 +199,10 @@ impl std::fmt::Display for ArtifactError {
                  epochs from this would be paid work on the wrong artifact."
             ),
             ArtifactError::UnreadableSidecar(e) => {
-                write!(f, "cannot determine the job's architecture from its sidecar: {e}")
+                write!(
+                    f,
+                    "cannot determine the job's architecture from its sidecar: {e}"
+                )
             }
             ArtifactError::UnknownCommitmentGrid(g) => write!(
                 f,
@@ -278,7 +281,8 @@ impl ArtifactStore {
 
     /// `<dir>/shard_NNNN.json` — one `nat_data::manifest::Shard`.
     pub fn shard_path(&self, hash: &B256, index: u32) -> PathBuf {
-        self.dataset_dir(hash).join(format!("shard_{index:04}.json"))
+        self.dataset_dir(hash)
+            .join(format!("shard_{index:04}.json"))
     }
 
     /// `<root>/models/<hex>/sidecar.nat.json` — the zone graph. Its presence is
@@ -354,8 +358,8 @@ fn read_architecture(sidecar: &Path) -> Result<Architecture, ArtifactError> {
         Err(e) => return Err(ArtifactError::UnreadableSidecar(e.to_string())),
     };
 
-    let doc: serde_json::Value = serde_json::from_str(&raw)
-        .map_err(|e| ArtifactError::UnreadableSidecar(e.to_string()))?;
+    let doc: serde_json::Value =
+        serde_json::from_str(&raw).map_err(|e| ArtifactError::UnreadableSidecar(e.to_string()))?;
 
     // An explicit architecture wins, so a sidecar can name something we must
     // refuse (MoE) instead of being read as "has zones, therefore zone-trainable".
@@ -421,7 +425,10 @@ fn read_model_shape(sidecar: &Path) -> Result<ModelShape, ArtifactError> {
         serde_json::from_str(&raw).map_err(|e| ArtifactError::UnreadableSidecar(e.to_string()))?;
     let d = ModelShape::default();
     let num = |k: &str, fallback: usize| -> usize {
-        doc.get(k).and_then(|v| v.as_u64()).map(|v| v as usize).unwrap_or(fallback)
+        doc.get(k)
+            .and_then(|v| v.as_u64())
+            .map(|v| v as usize)
+            .unwrap_or(fallback)
     };
     Ok(ModelShape {
         vocab: num("vocab", d.vocab),

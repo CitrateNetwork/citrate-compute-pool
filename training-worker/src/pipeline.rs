@@ -45,7 +45,7 @@ use thiserror::Error;
 use tracing::{debug, info};
 
 use crate::transport::{Transport, WorkerMessage};
-use crate::types::{B256, WorkerAddress};
+use crate::types::{WorkerAddress, B256};
 
 // ── Types ───────────────────────────────────────────────────────
 
@@ -248,11 +248,7 @@ impl MockPipelineChainClient {
 
     /// Test-side helper: how much did `worker` earn serving this
     /// request?
-    pub fn payment_earned(
-        &self,
-        request_id: PipelineRequestId,
-        worker: WorkerAddress,
-    ) -> u128 {
+    pub fn payment_earned(&self, request_id: PipelineRequestId, worker: WorkerAddress) -> u128 {
         let state = self.inner.lock();
         state
             .requests
@@ -427,9 +423,8 @@ where
 
         // Receive or supply the input activation.
         let incoming: Vec<u8> = if self.role.is_first_stage() {
-            first_stage_input.ok_or_else(|| {
-                anyhow::anyhow!("stage 0 requires first_stage_input")
-            })?
+            first_stage_input
+                .ok_or_else(|| anyhow::anyhow!("stage 0 requires first_stage_input"))?
         } else {
             let upstream_stage = self.role.stage_index - 1;
             loop {
@@ -499,11 +494,8 @@ where
         // Run this stage's computation. S0 uses a deterministic
         // chaining: output = keccak(stage_index || input). Real
         // GPU execution lands in S2 as a ModelBackend impl.
-        let output = pipeline_stage_forward(
-            self.role.stage_index,
-            self.role.total_stages,
-            &incoming,
-        );
+        let output =
+            pipeline_stage_forward(self.role.stage_index, self.role.total_stages, &incoming);
 
         // Forward to the next stage, OR return the final output.
         let final_output = if let Some(next) = self.role.next_stage() {
@@ -582,11 +574,8 @@ where
         let mut retries = 0u32;
 
         loop {
-            let attempt = tokio::time::timeout(
-                recv_timeout,
-                self.serve_request(request_id, None),
-            )
-            .await;
+            let attempt =
+                tokio::time::timeout(recv_timeout, self.serve_request(request_id, None)).await;
             match attempt {
                 Ok(Ok(out)) => return Ok(out),
                 Ok(Err(e)) => {
@@ -624,8 +613,7 @@ where
                         // Check if the request has already been
                         // marked Failed on chain — if so, exit
                         // cleanly rather than retry forever.
-                        if let Ok(snap) = self.chain.request_snapshot(request_id).await
-                        {
+                        if let Ok(snap) = self.chain.request_snapshot(request_id).await {
                             if snap.state == PipelineRequestState::Failed {
                                 return Err(anyhow::anyhow!(
                                     "request {} marked Failed on chain",
@@ -744,7 +732,10 @@ mod tests {
 
         // Each worker earned payment / 4 = 1 ether.
         for w in [w1, w2, w3, w4] {
-            assert_eq!(chain.payment_earned(req_id, w), 1_000_000_000_000_000_000u128);
+            assert_eq!(
+                chain.payment_earned(req_id, w),
+                1_000_000_000_000_000_000u128
+            );
         }
     }
 
@@ -853,6 +844,9 @@ mod tests {
 
         // w2 tries to advance while w1 holds stage 0.
         let err = chain.advance_request(req_id, w2).await.unwrap_err();
-        assert!(matches!(err, PipelineChainError::NotStageOwner { stage: 0 }));
+        assert!(matches!(
+            err,
+            PipelineChainError::NotStageOwner { stage: 0 }
+        ));
     }
 }

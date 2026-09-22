@@ -94,8 +94,7 @@ pub fn zone_deltas(
     before: &[(String, Vec<f32>)],
     after: &[(String, Vec<f32>)],
 ) -> Result<Vec<ZoneDelta>, DeltaError> {
-    let pre: BTreeMap<&str, &Vec<f32>> =
-        before.iter().map(|(n, v)| (n.as_str(), v)).collect();
+    let pre: BTreeMap<&str, &Vec<f32>> = before.iter().map(|(n, v)| (n.as_str(), v)).collect();
     let post: BTreeMap<&str, &Vec<f32>> = after.iter().map(|(n, v)| (n.as_str(), v)).collect();
 
     if pre.len() != before.len() || post.len() != after.len() {

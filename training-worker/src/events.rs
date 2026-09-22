@@ -173,10 +173,7 @@ pub fn decode_log_entry(entry: &serde_json::Value) -> Option<RawLog> {
 pub fn job_id_topic_filter(job_id: u64) -> serde_json::Value {
     let mut buf = [0u8; 32];
     U256::from(job_id).to_big_endian(&mut buf);
-    serde_json::json!([
-        serde_json::Value::Null,
-        format!("0x{}", hex::encode(buf))
-    ])
+    serde_json::json!([serde_json::Value::Null, format!("0x{}", hex::encode(buf))])
 }
 
 fn keccak(sig: &str) -> H256 {
@@ -195,28 +192,88 @@ pub fn classify(topic0: H256) -> EventKind {
     // at 3-second cadence so the linear scan is <1µs per event.
     let candidates: &[(EventKind, &str)] = &[
         // CM-07 signatures (exact match with ComputePoolTraining.sol events)
-        (EventKind::TrainingJobOpened, "TrainingJobOpened(uint256,address,bytes32,bytes32,uint32,uint32)"),
-        (EventKind::WorkerJoined, "WorkerJoined(uint256,address,uint128)"),
-        (EventKind::RecruitmentClosed, "RecruitmentClosed(uint256,uint32,address)"),
-        (EventKind::CoordinatorReassigned, "CoordinatorReassigned(uint256,address,address,uint128)"),
-        (EventKind::EpochCommitted, "EpochCommitted(uint256,uint32,bytes32)"),
-        (EventKind::EpochPaymentReleased, "EpochPaymentReleased(uint256,uint32,address,uint128)"),
-        (EventKind::ChallengeOpened, "ChallengeOpened(uint256,uint32,uint32,address,address,uint128)"),
-        (EventKind::ChallengeVoted, "ChallengeVoted(uint256,uint32,uint32,address,address,bool)"),
-        (EventKind::ChallengeResolved, "ChallengeResolved(uint256,uint32,uint32,address,bool,uint128)"),
-        (EventKind::WorkerStakeReturned, "WorkerStakeReturned(uint256,address,uint128)"),
-        (EventKind::TrainingJobCompleted, "TrainingJobCompleted(uint256,bytes32)"),
-        (EventKind::TrainingJobAborted, "TrainingJobAborted(uint256,string)"),
+        (
+            EventKind::TrainingJobOpened,
+            "TrainingJobOpened(uint256,address,bytes32,bytes32,uint32,uint32)",
+        ),
+        (
+            EventKind::WorkerJoined,
+            "WorkerJoined(uint256,address,uint128)",
+        ),
+        (
+            EventKind::RecruitmentClosed,
+            "RecruitmentClosed(uint256,uint32,address)",
+        ),
+        (
+            EventKind::CoordinatorReassigned,
+            "CoordinatorReassigned(uint256,address,address,uint128)",
+        ),
+        (
+            EventKind::EpochCommitted,
+            "EpochCommitted(uint256,uint32,bytes32)",
+        ),
+        (
+            EventKind::EpochPaymentReleased,
+            "EpochPaymentReleased(uint256,uint32,address,uint128)",
+        ),
+        (
+            EventKind::ChallengeOpened,
+            "ChallengeOpened(uint256,uint32,uint32,address,address,uint128)",
+        ),
+        (
+            EventKind::ChallengeVoted,
+            "ChallengeVoted(uint256,uint32,uint32,address,address,bool)",
+        ),
+        (
+            EventKind::ChallengeResolved,
+            "ChallengeResolved(uint256,uint32,uint32,address,bool,uint128)",
+        ),
+        (
+            EventKind::WorkerStakeReturned,
+            "WorkerStakeReturned(uint256,address,uint128)",
+        ),
+        (
+            EventKind::TrainingJobCompleted,
+            "TrainingJobCompleted(uint256,bytes32)",
+        ),
+        (
+            EventKind::TrainingJobAborted,
+            "TrainingJobAborted(uint256,string)",
+        ),
         // CM-08 signatures (exact match with ComputePoolPipeline.sol events)
-        (EventKind::PipelineJobCreated, "PipelineJobCreated(uint256,address,uint32,bytes32)"),
-        (EventKind::StageAssigned, "StageAssigned(uint256,uint32,address,uint128)"),
+        (
+            EventKind::PipelineJobCreated,
+            "PipelineJobCreated(uint256,address,uint32,bytes32)",
+        ),
+        (
+            EventKind::StageAssigned,
+            "StageAssigned(uint256,uint32,address,uint128)",
+        ),
         (EventKind::PipelineJobActivated, "JobActivated(uint256)"),
-        (EventKind::PipelineRequestSubmitted, "PipelineRequestSubmitted(uint256,uint256,address,uint128)"),
-        (EventKind::StageServed, "StageServed(uint256,uint32,address,uint128)"),
-        (EventKind::PipelineRequestCompleted, "PipelineRequestCompleted(uint256)"),
-        (EventKind::PipelineRequestFailed, "PipelineRequestFailed(uint256,uint128)"),
-        (EventKind::StageFaulted, "StageFaulted(uint256,uint32,address)"),
-        (EventKind::StageReassigned, "StageReassigned(uint256,uint32,address,address)"),
+        (
+            EventKind::PipelineRequestSubmitted,
+            "PipelineRequestSubmitted(uint256,uint256,address,uint128)",
+        ),
+        (
+            EventKind::StageServed,
+            "StageServed(uint256,uint32,address,uint128)",
+        ),
+        (
+            EventKind::PipelineRequestCompleted,
+            "PipelineRequestCompleted(uint256)",
+        ),
+        (
+            EventKind::PipelineRequestFailed,
+            "PipelineRequestFailed(uint256,uint128)",
+        ),
+        (
+            EventKind::StageFaulted,
+            "StageFaulted(uint256,uint32,address)",
+        ),
+        (
+            EventKind::StageReassigned,
+            "StageReassigned(uint256,uint32,address,address)",
+        ),
         (EventKind::PipelineJobDraining, "JobDraining(uint256)"),
         (EventKind::PipelineJobTerminated, "JobTerminated(uint256)"),
     ];

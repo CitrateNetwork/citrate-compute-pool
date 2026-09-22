@@ -773,8 +773,8 @@ fn verify_envelope(
 
     // ── Sender authentication ──
     // Parse the claimed pubkey.
-    let vk = VerifyingKey::from_sec1_bytes(&env.pubkey_sec1)
-        .map_err(|e| format!("bad pubkey: {e}"))?;
+    let vk =
+        VerifyingKey::from_sec1_bytes(&env.pubkey_sec1).map_err(|e| format!("bad pubkey: {e}"))?;
 
     // Re-derive the address from the pubkey and compare to the
     // declared `sender_addr`. This catches the case where a peer
@@ -913,7 +913,11 @@ mod tests {
             sender_addr: address_from_signing_key(sk).0,
             payload,
             signature: sig.to_der().as_bytes().to_vec(),
-            pubkey_sec1: sk.verifying_key().to_encoded_point(false).as_bytes().to_vec(),
+            pubkey_sec1: sk
+                .verifying_key()
+                .to_encoded_point(false)
+                .as_bytes()
+                .to_vec(),
         }
     }
 
@@ -977,9 +981,14 @@ mod tests {
             .expect("node A starts");
         let a_addr = wait_listener(&a).await;
 
-        let b = LibP2pTransport::new(sk_b.clone(), listen_addr(), vec![a_addr.clone()], test_scope())
-            .await
-            .expect("node B starts");
+        let b = LibP2pTransport::new(
+            sk_b.clone(),
+            listen_addr(),
+            vec![a_addr.clone()],
+            test_scope(),
+        )
+        .await
+        .expect("node B starts");
         let b_addr = wait_listener(&b).await;
 
         let c = LibP2pTransport::new(
@@ -1200,14 +1209,18 @@ mod tests {
             pubkey_sec1: Vec<u8>,
         }
         let sk = test_key(0x7A);
-        let payload = bincode::serialize(&WorkerMessage::EpochClose { epoch: 1 })
-            .expect("serialize msg");
+        let payload =
+            bincode::serialize(&WorkerMessage::EpochClose { epoch: 1 }).expect("serialize msg");
         let sig: Signature = sk.sign(&payload); // v1 signed bare payload
         let v1 = WireEnvelopeV1 {
             sender_addr: address_from_signing_key(&sk).0,
             payload,
             signature: sig.to_der().as_bytes().to_vec(),
-            pubkey_sec1: sk.verifying_key().to_encoded_point(false).as_bytes().to_vec(),
+            pubkey_sec1: sk
+                .verifying_key()
+                .to_encoded_point(false)
+                .as_bytes()
+                .to_vec(),
         };
         let bytes = bincode::serialize(&v1).expect("ser v1");
         assert!(
@@ -1302,7 +1315,10 @@ mod tests {
         );
         let bytes = bincode::serialize(&env).expect("ser");
         let mut guard = fresh_guard();
-        assert!(verify_with(&bytes, &mut guard).is_ok(), "first delivery verifies");
+        assert!(
+            verify_with(&bytes, &mut guard).is_ok(),
+            "first delivery verifies"
+        );
         let err = verify_with(&bytes, &mut guard)
             .expect_err("replayed envelope (same sender+nonce) must be rejected");
         assert!(err.contains("replayed"), "err was: {err}");
@@ -1332,8 +1348,7 @@ mod tests {
         transport.register(peer).await;
 
         // recv should block (no messages, no peers). Poll briefly.
-        let res =
-            tokio::time::timeout(Duration::from_millis(200), transport.recv(peer)).await;
+        let res = tokio::time::timeout(Duration::from_millis(200), transport.recv(peer)).await;
         assert!(res.is_err(), "recv must block when no messages queued");
     }
 }

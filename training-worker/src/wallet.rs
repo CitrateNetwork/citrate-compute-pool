@@ -74,7 +74,9 @@ pub enum WalletError {
     AddressMismatch { declared: H160, derived: H160 },
     #[error("no key source configured (set CITRATE_TRAINING_PRIVATE_KEY_HEX or CITRATE_TRAINING_KEYSTORE_PATH+CITRATE_TRAINING_KEYSTORE_PASSPHRASE)")]
     NoKeySource,
-    #[error("CITRATE_TRAINING_KEYSTORE_PASSPHRASE required when CITRATE_TRAINING_KEYSTORE_PATH is set")]
+    #[error(
+        "CITRATE_TRAINING_KEYSTORE_PASSPHRASE required when CITRATE_TRAINING_KEYSTORE_PATH is set"
+    )]
     MissingPassphrase,
     #[error("keystore I/O: {0}")]
     KeystoreIo(String),
@@ -145,8 +147,8 @@ impl Wallet {
     pub fn from_keystore(path: &str, passphrase: &str) -> Result<Self, WalletError> {
         let raw = std::fs::read_to_string(path)
             .map_err(|e| WalletError::KeystoreIo(format!("read {}: {}", path, e)))?;
-        let file: KeystoreFile = serde_json::from_str(&raw)
-            .map_err(|e| WalletError::KeystoreParse(e.to_string()))?;
+        let file: KeystoreFile =
+            serde_json::from_str(&raw).map_err(|e| WalletError::KeystoreParse(e.to_string()))?;
         if file.version != 3 {
             return Err(WalletError::UnsupportedKeystoreVersion(file.version));
         }
@@ -204,7 +206,12 @@ impl Wallet {
         hasher.update(&ciphertext);
         let mac_actual = hasher.finalize();
         use subtle::ConstantTimeEq;
-        if mac_actual.as_slice().ct_eq(mac_expected.as_slice()).unwrap_u8() == 0 {
+        if mac_actual
+            .as_slice()
+            .ct_eq(mac_expected.as_slice())
+            .unwrap_u8()
+            == 0
+        {
             return Err(WalletError::InvalidPassphrase);
         }
 
@@ -252,7 +259,10 @@ impl Wallet {
         let signing_key =
             SigningKey::from_bytes(&(*sk_bytes).into()).map_err(|_| WalletError::BadSecret)?;
         let address = address_from_signing_key(&signing_key);
-        Ok(Self { signing_key, address })
+        Ok(Self {
+            signing_key,
+            address,
+        })
     }
 
     /// This wallet's EVM address (20 bytes, keccak-derived from
@@ -341,9 +351,7 @@ impl Wallet {
                     &digest,
                     &s,
                 )
-                .unwrap_or_else(|_| {
-                    RecoveryId::from_byte(0).expect("0 is a valid RecoveryId")
-                });
+                .unwrap_or_else(|_| RecoveryId::from_byte(0).expect("0 is a valid RecoveryId"));
                 (bytes, rid.to_byte())
             })
             .map_err(|e| WalletError::Sign(format!("{}", e)))?;
@@ -390,12 +398,7 @@ fn encode_eip1559_for_signing(tx: &Eip1559Tx) -> Vec<u8> {
     out
 }
 
-fn encode_eip1559_with_signature(
-    tx: &Eip1559Tx,
-    y_parity: u64,
-    r: U256,
-    s_: U256,
-) -> Vec<u8> {
+fn encode_eip1559_with_signature(tx: &Eip1559Tx, y_parity: u64, r: U256, s_: U256) -> Vec<u8> {
     let mut s = RlpStream::new();
     s.begin_list(12);
     s.append(&tx.chain_id);
@@ -449,8 +452,7 @@ mod tests {
 
     // Well-known secp256k1 key for deterministic tests.
     // Address: 0x7e5f4552091a69125d5dfcb7b8c2659029395bdf
-    const TEST_HEX: &str =
-        "0000000000000000000000000000000000000000000000000000000000000001";
+    const TEST_HEX: &str = "0000000000000000000000000000000000000000000000000000000000000001";
 
     #[test]
     fn loads_from_hex_without_prefix() {
@@ -540,12 +542,7 @@ mod tests {
 
         // Derive key.
         let mut derived = [0u8; 32];
-        pbkdf2::pbkdf2_hmac::<sha2::Sha256>(
-            passphrase.as_bytes(),
-            &salt,
-            c,
-            &mut derived,
-        );
+        pbkdf2::pbkdf2_hmac::<sha2::Sha256>(passphrase.as_bytes(), &salt, c, &mut derived);
 
         // Encrypt plaintext private key.
         let plaintext = hex::decode(TEST_HEX).expect("decode plaintext");
@@ -594,11 +591,8 @@ mod tests {
     #[test]
     fn loads_from_keystore_with_correct_passphrase() {
         let path = write_keystore("hunter2");
-        let w = Wallet::from_keystore(
-            path.to_str().expect("path utf8"),
-            "hunter2",
-        )
-        .expect("unlock");
+        let w =
+            Wallet::from_keystore(path.to_str().expect("path utf8"), "hunter2").expect("unlock");
         assert_eq!(
             w.address(),
             "0x7e5f4552091a69125d5dfcb7b8c2659029395bdf"
@@ -611,11 +605,8 @@ mod tests {
     #[test]
     fn rejects_wrong_passphrase() {
         let path = write_keystore("correct");
-        let err = Wallet::from_keystore(
-            path.to_str().expect("path utf8"),
-            "wrong",
-        )
-        .expect_err("must reject wrong passphrase");
+        let err = Wallet::from_keystore(path.to_str().expect("path utf8"), "wrong")
+            .expect_err("must reject wrong passphrase");
         assert!(matches!(err, WalletError::InvalidPassphrase));
         let _ = std::fs::remove_file(path);
     }
@@ -651,11 +642,8 @@ mod tests {
             .to_string(),
         )
         .expect("write bad fixture");
-        let err = Wallet::from_keystore(
-            tmp.to_str().expect("path utf8"),
-            "x",
-        )
-        .expect_err("must reject v2");
+        let err = Wallet::from_keystore(tmp.to_str().expect("path utf8"), "x")
+            .expect_err("must reject v2");
         assert!(matches!(err, WalletError::UnsupportedKeystoreVersion(2)));
         let _ = std::fs::remove_file(tmp);
     }

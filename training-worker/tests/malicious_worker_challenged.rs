@@ -108,14 +108,9 @@ async fn malicious_worker_is_challenged_and_slashed() {
 
     let w1_commits =
         compute_commits_for_worker(&honest, sp.model_start_hash, w1, 0, sp.steps_per_epoch).await;
-    let w2_commits = compute_commits_for_worker(
-        &malicious,
-        sp.model_start_hash,
-        w2,
-        1,
-        sp.steps_per_epoch,
-    )
-    .await;
+    let w2_commits =
+        compute_commits_for_worker(&malicious, sp.model_start_hash, w2, 1, sp.steps_per_epoch)
+            .await;
     let w3_commits =
         compute_commits_for_worker(&honest, sp.model_start_hash, w3, 2, sp.steps_per_epoch).await;
 
@@ -142,8 +137,7 @@ async fn malicious_worker_is_challenged_and_slashed() {
     all_commits.extend_from_slice(&w1_commits);
     all_commits.extend_from_slice(&w2_commits);
     all_commits.extend_from_slice(&w3_commits);
-    let (epoch_root, leaves) =
-        citrate_training_worker::compute_epoch_root(&all_commits);
+    let (epoch_root, leaves) = citrate_training_worker::compute_epoch_root(&all_commits);
 
     // Post the root. Because the coordinator is the one whose local
     // view of all commits includes w2's tampered one, the epoch root
@@ -241,7 +235,16 @@ async fn bad_proof_is_rejected_without_touching_state() {
     let empty_proof = Vec::<H256>::new();
 
     let err = chain
-        .challenge_step(job_id, challenger, 0, 0, w2, bogus_leaf, empty_proof, CHALLENGE_BOND)
+        .challenge_step(
+            job_id,
+            challenger,
+            0,
+            0,
+            w2,
+            bogus_leaf,
+            empty_proof,
+            CHALLENGE_BOND,
+        )
         .await
         .expect_err("bad proof must reject");
     assert!(matches!(

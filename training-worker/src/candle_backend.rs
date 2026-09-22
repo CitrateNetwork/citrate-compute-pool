@@ -101,11 +101,7 @@ impl CandleBackend {
         Self::new_with_device(device, in_dim, out_dim)
     }
 
-    fn new_with_device(
-        device: Device,
-        in_dim: usize,
-        out_dim: usize,
-    ) -> anyhow::Result<Self> {
+    fn new_with_device(device: Device, in_dim: usize, out_dim: usize) -> anyhow::Result<Self> {
         // Initialize weights as a deterministic ramp so two
         // backends with the same dims round-trip identically.
         // Real Llama loading replaces this with safetensors.
@@ -116,8 +112,8 @@ impl CandleBackend {
                 w_data.push(v);
             }
         }
-        let weights = CandleTensor::from_vec(w_data, (out_dim, in_dim), &device)
-            .context("weights tensor")?;
+        let weights =
+            CandleTensor::from_vec(w_data, (out_dim, in_dim), &device).context("weights tensor")?;
 
         let b_data: Vec<f32> = (0..out_dim).map(|i| i as f32 * 0.01).collect();
         let bias = CandleTensor::from_vec(b_data, (out_dim,), &device).context("bias tensor")?;
@@ -134,14 +130,11 @@ impl CandleBackend {
     /// Load weights from a safetensors file. Expected layout:
     ///   "weights" → f32 tensor of shape [out_dim, in_dim]
     ///   "bias"    → f32 tensor of shape [out_dim]
-    pub fn load_safetensors(
-        path: &Path,
-        device: Device,
-    ) -> anyhow::Result<Self> {
-        let bytes = std::fs::read(path)
-            .with_context(|| format!("read safetensors at {:?}", path))?;
-        let st = safetensors::SafeTensors::deserialize(&bytes)
-            .context("safetensors deserialize")?;
+    pub fn load_safetensors(path: &Path, device: Device) -> anyhow::Result<Self> {
+        let bytes =
+            std::fs::read(path).with_context(|| format!("read safetensors at {:?}", path))?;
+        let st =
+            safetensors::SafeTensors::deserialize(&bytes).context("safetensors deserialize")?;
 
         let w_view = st
             .tensor("weights")
@@ -169,20 +162,11 @@ impl CandleBackend {
         }
 
         // Convert raw bytes (f32 little-endian) to CandleTensor.
-        let weights = CandleTensor::from_raw_buffer(
-            w_view.data(),
-            DType::F32,
-            &[out_dim, in_dim],
-            &device,
-        )
-        .context("weights from buffer")?;
-        let bias = CandleTensor::from_raw_buffer(
-            b_view.data(),
-            DType::F32,
-            &[out_dim],
-            &device,
-        )
-        .context("bias from buffer")?;
+        let weights =
+            CandleTensor::from_raw_buffer(w_view.data(), DType::F32, &[out_dim, in_dim], &device)
+                .context("weights from buffer")?;
+        let bias = CandleTensor::from_raw_buffer(b_view.data(), DType::F32, &[out_dim], &device)
+            .context("bias from buffer")?;
 
         Ok(Self {
             device,
@@ -206,7 +190,9 @@ impl CandleBackend {
         let mut data = Vec::with_capacity(self.in_dim);
         for i in 0..self.in_dim {
             let raw = ((epoch as u64) << 32) | ((step as u64) << 16) | (worker_shard as u64);
-            let mixed = raw.wrapping_mul((i as u64) + 1).wrapping_add(0x9E3779B97F4A7C15);
+            let mixed = raw
+                .wrapping_mul((i as u64) + 1)
+                .wrapping_add(0x9E3779B97F4A7C15);
             // Stable f32 in [-1, 1].
             let v = ((mixed & 0xFFFF) as f32 / 32_768.0) - 1.0;
             data.push(v);
@@ -388,8 +374,8 @@ mod tests {
             b_bytes.extend_from_slice(&v.to_le_bytes());
         }
 
-        let w_view = TensorView::new(Dtype::F32, vec![out_dim, in_dim], &w_bytes)
-            .expect("weights view");
+        let w_view =
+            TensorView::new(Dtype::F32, vec![out_dim, in_dim], &w_bytes).expect("weights view");
         let b_view = TensorView::new(Dtype::F32, vec![out_dim], &b_bytes).expect("bias view");
 
         let mut tensors: BTreeMap<&str, TensorView> = BTreeMap::new();

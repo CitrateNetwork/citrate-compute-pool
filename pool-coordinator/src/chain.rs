@@ -68,18 +68,11 @@ pub trait ChainAdapter: Send + Sync {
     fn self_address(&self) -> H160;
 
     /// Read `ComputePool.coordinatorFor(poolId, epoch)`.
-    async fn coordinator_for(
-        &self,
-        pool_id: u64,
-        epoch: u64,
-    ) -> Result<H160, CoordinatorError>;
+    async fn coordinator_for(&self, pool_id: u64, epoch: u64) -> Result<H160, CoordinatorError>;
 
     /// Read the active member set of a pool. Used by the
     /// stateless-round-robin dispatcher.
-    async fn pool_members(
-        &self,
-        pool_id: u64,
-    ) -> Result<Vec<PoolMemberInfo>, CoordinatorError>;
+    async fn pool_members(&self, pool_id: u64) -> Result<Vec<PoolMemberInfo>, CoordinatorError>;
 
     /// Submit `ComputePool.recordDispatch(jobId)` from
     /// `self_address()`.
@@ -90,16 +83,10 @@ pub trait ChainAdapter: Send + Sync {
     ) -> Result<RecordDispatchOutcome, CoordinatorError>;
 
     /// Submit `ComputePool.completeJob(jobId)` from `self_address()`.
-    async fn complete_job(
-        &self,
-        job_id: u64,
-    ) -> Result<H256, CoordinatorError>;
+    async fn complete_job(&self, job_id: u64) -> Result<H256, CoordinatorError>;
 
     /// Submit `ComputePool.failJob(jobId)` from `self_address()`.
-    async fn fail_job(
-        &self,
-        job_id: u64,
-    ) -> Result<H256, CoordinatorError>;
+    async fn fail_job(&self, job_id: u64) -> Result<H256, CoordinatorError>;
 }
 
 /// Convert a block number into the (CM-05 WP-05.1) epoch number.

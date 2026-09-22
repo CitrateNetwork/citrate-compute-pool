@@ -369,8 +369,13 @@ impl NatBackend {
                 .ok_or_else(|| anyhow::anyhow!("manifest has no parent directory"))?
                 .join(format!("shard_{:04}.json", meta.shard_index));
 
-            let raw = std::fs::read_to_string(&path)
-                .map_err(|e| anyhow::anyhow!("shard {} unreadable at {}: {e}", meta.shard_index, path.display()))?;
+            let raw = std::fs::read_to_string(&path).map_err(|e| {
+                anyhow::anyhow!(
+                    "shard {} unreadable at {}: {e}",
+                    meta.shard_index,
+                    path.display()
+                )
+            })?;
             let shard: Shard = serde_json::from_str(&raw)?;
 
             if ShardManifest::of(&shard).provenance_root != meta.provenance_root {
@@ -435,8 +440,7 @@ impl ModelBackend for NatBackend {
     ) -> anyhow::Result<StepResult> {
         let manifest = self.load_manifest()?;
         let shards = self.read_and_verify_shards(&manifest, step, worker_shard)?;
-        let shuffle_seed =
-            ((epoch as u64) << 40) | ((step as u64) << 16) | worker_shard as u64;
+        let shuffle_seed = ((epoch as u64) << 40) | ((step as u64) << 16) | worker_shard as u64;
 
         // Snapshot -> train -> snapshot, entirely in memory. NAT ADR-0011's
         // `named_parameters` removed the safetensors round-trip that used to sit

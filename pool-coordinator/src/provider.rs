@@ -73,9 +73,7 @@ pub async fn dispatch_to_member(
 /// Semantic validation (output commitments / challenge hooks) is
 /// on-chain INFER-S2 scope; this gate only closes the
 /// pay-for-empty-work vector.
-pub fn validate_pool_infer_response(
-    resp: &PoolInferResponse,
-) -> Result<(), CoordinatorError> {
+pub fn validate_pool_infer_response(resp: &PoolInferResponse) -> Result<(), CoordinatorError> {
     if resp.output.trim().is_empty() {
         return Err(CoordinatorError::ProviderFailed(
             "provider returned empty output (refusing to complete unperformed work)".into(),

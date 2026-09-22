@@ -21,9 +21,7 @@ use async_trait::async_trait;
 use sha3::{Digest, Keccak256};
 
 use crate::quantize::{quantize_tensor, step_commitment, tensor_commitment};
-use crate::types::{
-    B256, CommitmentHash, EpochIndex, PrevWeightsHash, StepIndex, WeightsHash,
-};
+use crate::types::{CommitmentHash, EpochIndex, PrevWeightsHash, StepIndex, WeightsHash, B256};
 
 /// Simple flat-tensor abstraction. Production backends use
 /// multi-dimensional tensor crates (tch, candle); for S0 a Vec<f32>
@@ -78,7 +76,10 @@ pub trait ModelBackend: Send + Sync {
     /// conceptually "the identity" — the backend just returns the
     /// hash it was given; no tensor state is held. S2 real backends
     /// fetch from IPFS + load into GPU memory.
-    async fn load_starting_weights(&self, model_start_hash: WeightsHash) -> anyhow::Result<WeightsHash>;
+    async fn load_starting_weights(
+        &self,
+        model_start_hash: WeightsHash,
+    ) -> anyhow::Result<WeightsHash>;
 
     /// Execute a forward + backward pass for a specific
     /// (epoch, step, worker_shard). Returns the gradient tensors

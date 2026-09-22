@@ -22,15 +22,10 @@ pub enum WorkerMessage {
     StepCommitted(StepCommit),
     /// Coordinator announces that everyone's commits for this
     /// (epoch, step) are in and training can advance.
-    StepAdvance {
-        epoch: u32,
-        step: u32,
-    },
+    StepAdvance { epoch: u32, step: u32 },
     /// Coordinator announces the epoch close; workers stop
     /// producing step commits for this epoch.
-    EpochClose {
-        epoch: u32,
-    },
+    EpochClose { epoch: u32 },
     /// CM-08 pipeline activation forwarding. Stage i sends this to
     /// stage i+1 carrying the computed activation bytes. The
     /// `request_id` binds the activation to a specific in-flight
@@ -226,9 +221,7 @@ mod tests {
         transport.register(b).await;
 
         let t = Arc::clone(&transport);
-        let handle = tokio::spawn(async move {
-            t.recv(b).await
-        });
+        let handle = tokio::spawn(async move { t.recv(b).await });
 
         // Broadcast AFTER the recv task is spawned.
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;

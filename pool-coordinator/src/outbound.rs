@@ -84,10 +84,7 @@ pub fn validate_outbound_url(url: &str) -> Result<(), OutboundUrlError> {
 /// Pure core of [`validate_outbound_url`]: `allow_insecure` is the
 /// explicit dev-only override (separated for deterministic, env-free
 /// unit tests).
-pub fn validate_outbound_url_with(
-    url: &str,
-    allow_insecure: bool,
-) -> Result<(), OutboundUrlError> {
+pub fn validate_outbound_url_with(url: &str, allow_insecure: bool) -> Result<(), OutboundUrlError> {
     let (scheme, rest) = match url.split_once("://") {
         Some((s, r)) => (s.to_ascii_lowercase(), r),
         None => return Err(OutboundUrlError::UnsupportedScheme(url.to_string())),
@@ -183,7 +180,7 @@ fn host_of(rest: &str) -> Option<String> {
     let mut parts = authority.split(':');
     let host = parts.next()?.to_string();
     match (parts.next(), parts.next()) {
-        (_, Some(_)) => None,                                        // host:p:q → malformed
+        (_, Some(_)) => None, // host:p:q → malformed
         (Some(port), None) if port.parse::<u16>().is_err() => None, // non-numeric port
         _ if host.is_empty() => None,
         _ => Some(host),
@@ -235,7 +232,10 @@ mod tests {
             "http://LOCALHOST:8080",
             "http://[::1]:8545",
         ] {
-            assert!(validate_outbound_url_with(url, false).is_ok(), "{url} rejected");
+            assert!(
+                validate_outbound_url_with(url, false).is_ok(),
+                "{url} rejected"
+            );
         }
     }
 
@@ -269,7 +269,10 @@ mod tests {
             "http://",                 // empty host
             "http://user@127.0.0.1:1", // userinfo smuggling → fail closed
         ] {
-            assert!(validate_outbound_url_with(url, false).is_err(), "{url} accepted");
+            assert!(
+                validate_outbound_url_with(url, false).is_err(),
+                "{url} accepted"
+            );
         }
     }
 
@@ -300,7 +303,10 @@ mod tests {
 
     #[test]
     fn host_extraction_handles_ports_paths_and_brackets() {
-        assert_eq!(host_of("127.0.0.1:8545/x?y#z").as_deref(), Some("127.0.0.1"));
+        assert_eq!(
+            host_of("127.0.0.1:8545/x?y#z").as_deref(),
+            Some("127.0.0.1")
+        );
         assert_eq!(host_of("[::1]:8545/ipfs").as_deref(), Some("::1"));
         assert_eq!(host_of("[::1]").as_deref(), Some("::1"));
         assert_eq!(host_of("host:notaport"), None);

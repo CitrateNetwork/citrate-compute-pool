@@ -36,8 +36,7 @@ fn spec() -> PipelineJobSpec {
 async fn stage_fault_then_reassign_resumes_pipeline() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "warn".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "warn".into()),
         )
         .try_init();
 

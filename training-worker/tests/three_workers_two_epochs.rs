@@ -21,8 +21,8 @@
 use std::sync::Arc;
 
 use citrate_training_worker::{
-    chain::JobChainState, ChainClient, DeterministicTinyModel, InProcessTransport,
-    MockChainClient, TrainingJobSpec, Transport, Worker, WorkerConfig, WorkerOutcome,
+    chain::JobChainState, ChainClient, DeterministicTinyModel, InProcessTransport, MockChainClient,
+    TrainingJobSpec, Transport, Worker, WorkerConfig, WorkerOutcome,
 };
 use ethereum_types::{Address, H256};
 
@@ -44,8 +44,7 @@ fn make_spec() -> TrainingJobSpec {
 async fn three_workers_two_epochs_two_steps_end_to_end() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "warn".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "warn".into()),
         )
         .try_init();
 
@@ -135,12 +134,7 @@ async fn three_workers_two_epochs_two_steps_end_to_end() {
             .epoch_roots
             .get(&epoch)
             .expect("epoch root should exist");
-        assert_ne!(
-            *root,
-            H256::zero(),
-            "epoch {} root must be non-zero",
-            epoch
-        );
+        assert_ne!(*root, H256::zero(), "epoch {} root must be non-zero", epoch);
     }
 
     // Sanity: the two epoch roots differ. The DeterministicTinyModel

@@ -97,7 +97,10 @@ fn main() -> anyhow::Result<()> {
     std::fs::create_dir_all(root.join("datasets"))?;
     std::fs::create_dir_all(store.model_dir(&model_hash))?;
     std::os::unix::fs::symlink(&corpus, store.dataset_dir(&dataset_hash))?;
-    std::os::unix::fs::symlink(&weights_src, store.model_dir(&model_hash).join("model.safetensors"))?;
+    std::os::unix::fs::symlink(
+        &weights_src,
+        store.model_dir(&model_hash).join("model.safetensors"),
+    )?;
     let sidecar = if f32_cpu {
         SIDECAR.replace("\"dtype\": \"bf16\"", "\"dtype\": \"f32\"")
     } else {
@@ -109,7 +112,10 @@ fn main() -> anyhow::Result<()> {
     println!("\n2. resolving artifacts (this VERIFIES both hashes)");
     let artifacts = store.resolve(&model_hash, &dataset_hash)?;
     println!("   architecture    = {}", artifacts.architecture.as_str());
-    println!("   commitment_grid = {}", artifacts.commitment_grid.as_str());
+    println!(
+        "   commitment_grid = {}",
+        artifacts.commitment_grid.as_str()
+    );
     println!(
         "   shape           = d={} vocab={} seq_len={} dtype={}",
         artifacts.shape.d, artifacts.shape.vocab, artifacts.shape.seq_len, artifacts.shape.dtype
@@ -162,11 +168,19 @@ fn main() -> anyhow::Result<()> {
     let mut moved = 0usize;
     for t in &step.gradients {
         let n = t.data.len();
-        let l2 = t.data.iter().map(|v| (*v as f64) * (*v as f64)).sum::<f64>().sqrt();
+        let l2 = t
+            .data
+            .iter()
+            .map(|v| (*v as f64) * (*v as f64))
+            .sum::<f64>()
+            .sqrt();
         if l2 > 0.0 {
             moved += 1;
         }
-        println!("   layer {:<2} {:>10} params   ||delta||2 = {:.6e}", t.layer_index, n, l2);
+        println!(
+            "   layer {:<2} {:>10} params   ||delta||2 = {:.6e}",
+            t.layer_index, n, l2
+        );
     }
     println!(
         "   {} of {} buckets moved — a step that moved nothing would be a red flag",
@@ -179,24 +193,47 @@ fn main() -> anyhow::Result<()> {
     // zone list from the model's own parameter names gives the mapping.
     let zone_names: Vec<String> = {
         let probe: Vec<(String, Vec<f32>)> = [
-            "zone_SM.wq", "zone_CB.wq", "zone_HP.wq", "zone_PF.wq", "zone_CX.wq",
+            "zone_SM.wq",
+            "zone_CB.wq",
+            "zone_HP.wq",
+            "zone_PF.wq",
+            "zone_CX.wq",
             "embedding.weight",
         ]
         .iter()
         .map(|n| ((*n).to_string(), vec![0.0f32]))
         .collect();
-        zone_deltas(&probe, &probe)?.into_iter().map(|z| z.zone).collect()
+        zone_deltas(&probe, &probe)?
+            .into_iter()
+            .map(|z| z.zone)
+            .collect()
     };
     println!("\n   layer -> zone, and whether it moved:");
     for t in &step.gradients {
-        let l2 = t.data.iter().map(|v| (*v as f64) * (*v as f64)).sum::<f64>().sqrt();
-        let zone = zone_names.get(t.layer_index).map(|s| s.as_str()).unwrap_or("?");
-        let label = if zone == SHARED { "embedding+readout" } else { zone };
+        let l2 = t
+            .data
+            .iter()
+            .map(|v| (*v as f64) * (*v as f64))
+            .sum::<f64>()
+            .sqrt();
+        let zone = zone_names
+            .get(t.layer_index)
+            .map(|s| s.as_str())
+            .unwrap_or("?");
+        let label = if zone == SHARED {
+            "embedding+readout"
+        } else {
+            zone
+        };
         println!(
             "      layer {:<2} {:<18} {}",
             t.layer_index,
             label,
-            if l2 > 0.0 { format!("moved  ||d||2={l2:.4e}") } else { "*** ZERO ***".into() }
+            if l2 > 0.0 {
+                format!("moved  ||d||2={l2:.4e}")
+            } else {
+                "*** ZERO ***".into()
+            }
         );
     }
 
@@ -227,7 +264,11 @@ fn main() -> anyhow::Result<()> {
         format!("{commit:?}"),
     )?;
     println!("   node_id       = {}", signed.node_id);
-    println!("   reward_weight = {} raw = {:.4}", weight.raw(), weight.to_f32());
+    println!(
+        "   reward_weight = {} raw = {:.4}",
+        weight.raw(),
+        weight.to_f32()
+    );
     println!(
         "   verifies      = {}",
         RecoveringVerifier.verify(&signed.node_id, &signed.message(), &signed.signature)
