@@ -42,19 +42,19 @@ hex = "0.4"
 # NAT, the chain and this worker are on one grid BY CONSTRUCTION rather than by
 # three matching reimplementations. Pinned by rev: the grid is a consensus
 # surface for the challenge path, so it must not float.
-citrate-fed-types = { git = "https://github.com/CitrateNetwork/citrate-fed-types.git", rev = "dbbfbff29a5053aa8324a866d52215c2f2281c31" }
+citrate-fed-types = { git = "https://github.com/CitrateNetwork/citrate-fed-types.git", rev = "7000687c75c83cf40376c84f0062b99634457f57" }
 
 # NAT — the model the co-op trains. Pinned by rev: the parameter NAMES are the
 # contract `zone_delta` attributes against, so an unpinned bump could silently
 # reroute a zone's delta.
-nat-candle = { git = "ssh://git@github.com/CitrateNetwork/nat.git", rev = "52dd6b0b", optional = true }
-nat-types  = { git = "ssh://git@github.com/CitrateNetwork/nat.git", rev = "52dd6b0b", optional = true }
-nat-data   = { git = "ssh://git@github.com/CitrateNetwork/nat.git", rev = "52dd6b0b", optional = true }
+nat-candle = { git = "ssh://git@github.com/CitrateNetwork/nat.git", rev = "0f51255269e48028724f42a291b45d440feb477a", optional = true }
+nat-types  = { git = "ssh://git@github.com/CitrateNetwork/nat.git", rev = "0f51255269e48028724f42a291b45d440feb477a", optional = true }
+nat-data   = { git = "ssh://git@github.com/CitrateNetwork/nat.git", rev = "0f51255269e48028724f42a291b45d440feb477a", optional = true }
 # The federated seam (signing, gather, settlement). Deliberately a SEPARATE
 # feature from `nat`: it pulls no Candle, so a node can sign and settle
 # contributions without building the trainer.
-nat-federated = { git = "ssh://git@github.com/CitrateNetwork/nat.git", rev = "52dd6b0b", optional = true }
-nat-train  = { git = "ssh://git@github.com/CitrateNetwork/nat.git", rev = "52dd6b0b", optional = true }
+nat-federated = { git = "ssh://git@github.com/CitrateNetwork/nat.git", rev = "0f51255269e48028724f42a291b45d440feb477a", optional = true }
+nat-train  = { git = "ssh://git@github.com/CitrateNetwork/nat.git", rev = "0f51255269e48028724f42a291b45d440feb477a", optional = true }
 parking_lot = { workspace = true }
 ethereum-types = "0.14"
 

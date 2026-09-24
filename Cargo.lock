@@ -577,7 +577,7 @@ dependencies = [
 [[package]]
 name = "citrate-fed-types"
 version = "0.1.0"
-source = "git+https://github.com/CitrateNetwork/citrate-fed-types.git?rev=dbbfbff29a5053aa8324a866d52215c2f2281c31#dbbfbff29a5053aa8324a866d52215c2f2281c31"
+source = "git+https://github.com/CitrateNetwork/citrate-fed-types.git?rev=7000687c75c83cf40376c84f0062b99634457f57#7000687c75c83cf40376c84f0062b99634457f57"
 dependencies = [
  "serde",
  "sha2",
@@ -1090,7 +1090,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2884,12 +2884,13 @@ dependencies = [
 [[package]]
 name = "nat-candle"
 version = "0.0.1"
-source = "git+ssh://git@github.com/CitrateNetwork/nat.git?rev=52dd6b0b#52dd6b0bc05d47c039bd17761893b4728ad9c6d1"
+source = "git+ssh://git@github.com/CitrateNetwork/nat.git?rev=0f51255269e48028724f42a291b45d440feb477a#0f51255269e48028724f42a291b45d440feb477a"
 dependencies = [
  "candle-core",
  "candle-nn",
  "nat-core",
  "nat-data",
+ "nat-provenance",
  "nat-sidecar",
  "nat-train",
  "nat-types",
@@ -2898,7 +2899,7 @@ dependencies = [
 [[package]]
 name = "nat-core"
 version = "0.0.1"
-source = "git+ssh://git@github.com/CitrateNetwork/nat.git?rev=52dd6b0b#52dd6b0bc05d47c039bd17761893b4728ad9c6d1"
+source = "git+ssh://git@github.com/CitrateNetwork/nat.git?rev=0f51255269e48028724f42a291b45d440feb477a#0f51255269e48028724f42a291b45d440feb477a"
 dependencies = [
  "nat-mcp",
  "nat-provenance",
@@ -2910,7 +2911,7 @@ dependencies = [
 [[package]]
 name = "nat-data"
 version = "0.0.1"
-source = "git+ssh://git@github.com/CitrateNetwork/nat.git?rev=52dd6b0b#52dd6b0bc05d47c039bd17761893b4728ad9c6d1"
+source = "git+ssh://git@github.com/CitrateNetwork/nat.git?rev=0f51255269e48028724f42a291b45d440feb477a#0f51255269e48028724f42a291b45d440feb477a"
 dependencies = [
  "nat-types",
  "serde",
@@ -2921,7 +2922,7 @@ dependencies = [
 [[package]]
 name = "nat-federated"
 version = "0.0.1"
-source = "git+ssh://git@github.com/CitrateNetwork/nat.git?rev=52dd6b0b#52dd6b0bc05d47c039bd17761893b4728ad9c6d1"
+source = "git+ssh://git@github.com/CitrateNetwork/nat.git?rev=0f51255269e48028724f42a291b45d440feb477a#0f51255269e48028724f42a291b45d440feb477a"
 dependencies = [
  "citrate-fed-types",
  "nat-train",
@@ -2932,7 +2933,7 @@ dependencies = [
 [[package]]
 name = "nat-mcp"
 version = "0.0.1"
-source = "git+ssh://git@github.com/CitrateNetwork/nat.git?rev=52dd6b0b#52dd6b0bc05d47c039bd17761893b4728ad9c6d1"
+source = "git+ssh://git@github.com/CitrateNetwork/nat.git?rev=0f51255269e48028724f42a291b45d440feb477a#0f51255269e48028724f42a291b45d440feb477a"
 dependencies = [
  "nat-types",
  "serde",
@@ -2941,7 +2942,7 @@ dependencies = [
 [[package]]
 name = "nat-provenance"
 version = "0.0.1"
-source = "git+ssh://git@github.com/CitrateNetwork/nat.git?rev=52dd6b0b#52dd6b0bc05d47c039bd17761893b4728ad9c6d1"
+source = "git+ssh://git@github.com/CitrateNetwork/nat.git?rev=0f51255269e48028724f42a291b45d440feb477a#0f51255269e48028724f42a291b45d440feb477a"
 dependencies = [
  "ciborium",
  "nat-types",
@@ -2952,7 +2953,7 @@ dependencies = [
 [[package]]
 name = "nat-sidecar"
 version = "0.0.1"
-source = "git+ssh://git@github.com/CitrateNetwork/nat.git?rev=52dd6b0b#52dd6b0bc05d47c039bd17761893b4728ad9c6d1"
+source = "git+ssh://git@github.com/CitrateNetwork/nat.git?rev=0f51255269e48028724f42a291b45d440feb477a#0f51255269e48028724f42a291b45d440feb477a"
 dependencies = [
  "nat-types",
  "serde",
@@ -2963,7 +2964,7 @@ dependencies = [
 [[package]]
 name = "nat-train"
 version = "0.0.1"
-source = "git+ssh://git@github.com/CitrateNetwork/nat.git?rev=52dd6b0b#52dd6b0bc05d47c039bd17761893b4728ad9c6d1"
+source = "git+ssh://git@github.com/CitrateNetwork/nat.git?rev=0f51255269e48028724f42a291b45d440feb477a#0f51255269e48028724f42a291b45d440feb477a"
 dependencies = [
  "nat-core",
  "nat-types",
@@ -2975,7 +2976,7 @@ dependencies = [
 [[package]]
 name = "nat-types"
 version = "0.0.1"
-source = "git+ssh://git@github.com/CitrateNetwork/nat.git?rev=52dd6b0b#52dd6b0bc05d47c039bd17761893b4728ad9c6d1"
+source = "git+ssh://git@github.com/CitrateNetwork/nat.git?rev=0f51255269e48028724f42a291b45d440feb477a#0f51255269e48028724f42a291b45d440feb477a"
 dependencies = [
  "citrate-fed-types",
  "serde",
@@ -3925,7 +3926,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -5064,7 +5065,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
