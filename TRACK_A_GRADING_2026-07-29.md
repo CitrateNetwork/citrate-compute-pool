@@ -105,12 +105,12 @@ placeholder training would write fake patronage into a real ledger.
 ## A-4 — the brief's blocker is right; its repo location is not
 
 **Correction:** the brief says `citrate-coop` "is NOT cloned locally". In fact
-`Citrate-Labs/citrate-coop/` exists and is **tracked inside the parent monorepo**
+`citrate-coop/` exists and is **tracked inside the parent monorepo**
 — it has no `.git` of its own and is not a clone of `CitrateNetwork/citrate-coop`
 (which is a separate remote, last updated 2026-07-28).
 
 That matters operationally: work done in the local directory commits to
-`Citrate-Labs`, not to the coop repo, and the two can silently diverge. Decide
+the parent monorepo, not to the coop repo, and the two can silently diverge. Decide
 which is canonical before writing code there.
 
 The EIP-170 blocker on `CitrateCooperativeFactory` was not re-measured here.

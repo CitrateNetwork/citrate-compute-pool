@@ -24,10 +24,10 @@ description  = "Citrate compute pool — federated training coordinator + worker
 long-description = """
 Two-binary distribution for the Citrate Compute Pool: pool-coordinator runs the on-chain learning pool side, and training-worker is the GPU-host daemon that joins pools and contributes gradients. Intended for ML operators who want to monetise spare compute against on-chain learning bounties.
 """
-authors  = ["Citrate Labs <support@citrate.ai>"]
+authors  = ["Citrate Inc. <support@citrate.ai>"]
 homepage = "https://citrate.ai"
 category = "DeveloperTool"
-copyright = "© 2026 Citrate Labs. BUSL-1.1."
+copyright = "© 2026 Citrate Inc. BUSL-1.1."
 # Output formats. cargo-packager skips formats whose toolchain isn't
 # present on the build host: Linux runners produce deb + appimage,
 # macOS produces app + dmg, Windows produces msi + nsis. (rpm landed
