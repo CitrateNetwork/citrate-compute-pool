@@ -53,9 +53,8 @@ pub struct JobRecord {
     /// a fresh key from the same host or /48 is not offered the job again.
     #[serde(default)]
     pub failed_by_sources: BTreeSet<String>,
-    /// PBA-L3b-001: after a lapse the job is offered only to established
-    /// workers (vouched, or with a delivered result) until this unix second, so
-    /// a squatter's next fresh key cannot win the race for it.
+    /// After a lapse the job is offered only to vouched workers until this unix
+    /// second, so the next unvouched key cannot win the race for it.
     #[serde(default)]
     pub held_until: u64,
 }
@@ -79,8 +78,8 @@ pub struct WorkerRecord {
     /// No new lease before this unix second. Set when a lease lapses.
     #[serde(default)]
     pub cooldown_until: u64,
-    /// Results this worker has had accepted. A worker with one is
-    /// "established" and gets first claim on a lapsed job (PBA-L3b-001).
+    /// Results this worker has had accepted. Informational only: submissions
+    /// are not verified, so this grants no scheduling priority.
     #[serde(default)]
     pub delivered: u32,
 }
@@ -142,10 +141,15 @@ pub const SOURCE_SLOT_STALE_SECS: u64 = 86_400;
 /// Overridable with `CITRATE_COORDINATOR_MAX_LEASES_PER_SOURCE`.
 pub const DEFAULT_MAX_LEASES_PER_SOURCE: usize = 4;
 
-/// How long a lapsed job is reserved for established workers. Longer than the
-/// worker client's maximum idle poll interval (300 s), so an established
-/// worker that is polling will see it.
+/// How long a lapsed job is reserved for vouched workers. Longer than the
+/// worker client's maximum idle poll interval (300 s), so a vouched worker
+/// that is polling will see it.
 pub const LAPSE_HOLD_SECS: u64 = 900;
+
+/// A vouched worker seen within this many seconds counts as active. A busy
+/// vouched worker heartbeats every few minutes, so this only lapses when no
+/// vouched machine is running at all.
+pub const VOUCHED_ACTIVE_SECS: u64 = 3_600;
 
 /// Bound on the persisted `sources` map.
 pub const MAX_SOURCES: usize = MAX_WORKERS;
@@ -177,8 +181,12 @@ pub struct Policy {
     /// itself, and nothing on the coordinator can re-run it, so a self-reported
     /// H-01 is a claim, not evidence. Anyone could mint a key, claim H-01 and
     /// lease the ladder. The top tier is therefore granted only to vouched
-    /// addresses; an unvouched H-01 claim is treated as `Federated`.
+    /// addresses.
     pub trusted_h01: BTreeSet<H160>,
+    /// Highest tier an unvouched worker may be granted (`Probe` by default;
+    /// an operator may open `Federated`, never `H01`). Work above it goes only
+    /// to vouched addresses.
+    pub open_tier: Capability,
     /// See [`DEFAULT_MAX_WORKERS_PER_SOURCE`].
     pub max_workers_per_source: usize,
     /// See `coordinator_protocol::LEASE_RENEW_WINDOW_SECS`.
@@ -191,6 +199,7 @@ impl Default for Policy {
     fn default() -> Self {
         Self {
             trusted_h01: BTreeSet::new(),
+            open_tier: Capability::Probe,
             max_workers_per_source: DEFAULT_MAX_WORKERS_PER_SOURCE,
             max_leases_per_source: DEFAULT_MAX_LEASES_PER_SOURCE,
             lease_window_secs:
@@ -202,10 +211,10 @@ impl Default for Policy {
 impl Policy {
     /// The capability the coordinator actually grants for a claimed one.
     pub fn effective_capability(&self, id: &H160, claimed: Capability) -> Capability {
-        if claimed == Capability::H01 && !self.trusted_h01.contains(id) {
-            return Capability::Federated;
+        if self.trusted_h01.contains(id) {
+            return claimed;
         }
-        claimed
+        claimed.min(self.open_tier).min(Capability::Federated)
     }
 
     pub fn is_trusted(&self, id: &H160) -> bool {
@@ -278,6 +287,8 @@ pub enum SubmitError {
     LeaseExpired { expired_at: u64, now: u64 },
     #[error("job is not in a submittable state")]
     NotLeased,
+    #[error("the current policy no longer allows this worker this job's tier")]
+    TierRevoked,
 }
 
 impl State {
@@ -585,7 +596,9 @@ impl State {
                 return Err(LeaseError::AtLeaseCap);
             }
         }
-        let established = trusted || self.workers.get(&worker).is_some_and(|w| w.delivered > 0);
+        // Only vouched workers get first claim on a lapsed job: an accepted
+        // submission is not verified, so it earns no priority.
+        let established = trusted;
         let cap = self.policy.effective_capability(&worker, claimed);
 
         let pick = self
@@ -595,7 +608,7 @@ impl State {
             .filter(|r| cap.satisfies(r.spec.requires))
             .filter(|r| !r.failed_by.contains(&worker))
             .filter(|r| trusted || !r.failed_by_sources.contains(&group))
-            .filter(|r| established || r.held_until <= now)
+            .filter(|r| established || !self.reserved_for_vouched(r, now))
             .max_by(|a, b| {
                 a.spec
                     .requires
@@ -624,13 +637,69 @@ impl State {
         Ok(rec.spec.clone())
     }
 
+    /// May `worker` hold a job requiring `requires` under the current policy?
+    fn tier_allowed(&self, worker: &H160, requires: Capability) -> bool {
+        self.workers.get(worker).is_some_and(|w| {
+            self.policy
+                .effective_capability(worker, w.capability)
+                .satisfies(requires)
+        })
+    }
+
+    /// Return a job whose lease the current policy no longer allows to the
+    /// pool. Not a no-show: the worker is not penalised and may be offered
+    /// the job again if the policy allows it later.
+    fn revoke_lease(&mut self, job: &JobId) {
+        if let Some(rec) = self.jobs.get_mut(job) {
+            rec.status = JobStatus::Pending;
+        }
+    }
+
+    /// Revoke every lease the current policy no longer allows (called at
+    /// boot, so a policy tightened across a restart applies to work already
+    /// out). Returns the requeued jobs.
+    pub fn revoke_out_of_policy(&mut self) -> Vec<JobId> {
+        let revoked: Vec<JobId> = self
+            .jobs
+            .iter()
+            .filter_map(|(id, r)| match r.status {
+                JobStatus::Leased { worker, .. }
+                    if !self.tier_allowed(&worker, r.spec.requires) =>
+                {
+                    Some(id.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        for id in &revoked {
+            self.revoke_lease(id);
+        }
+        revoked
+    }
+
+    /// Is a pending job reserved for vouched workers at `now`? After a lapse
+    /// it is for [`LAPSE_HOLD_SECS`], and for as long after that as any
+    /// vouched worker is active (seen within [`VOUCHED_ACTIVE_SECS`]), so a
+    /// busy vouched fleet is waited for rather than the job going back to the
+    /// open pool.
+    fn reserved_for_vouched(&self, rec: &JobRecord, now: u64) -> bool {
+        if rec.held_until == 0 {
+            return false;
+        }
+        if rec.held_until > now {
+            return true;
+        }
+        self.workers.iter().any(|(id, w)| {
+            self.policy.is_trusted(id) && now.saturating_sub(w.last_seen) < VOUCHED_ACTIVE_SECS
+        })
+    }
+
     /// Extend a live lease by one heartbeat window, never past its deadline.
     /// Returns the new expiry. Only the leaseholder may renew, and only while
     /// the lease is still live: a lapsed lease has already gone back to the
     /// pool, and renewing it would take it from whoever picked it up.
     pub fn renew(&mut self, worker: H160, job: &JobId, now: u64) -> Result<u64, SubmitError> {
-        let window = self.policy.lease_window_secs;
-        let rec = self.jobs.get_mut(job).ok_or(SubmitError::UnknownJob)?;
+        let rec = self.jobs.get(job).ok_or(SubmitError::UnknownJob)?;
         let JobStatus::Leased {
             worker: holder,
             expires_at,
@@ -648,6 +717,13 @@ impl State {
                 now,
             });
         }
+        let requires = rec.spec.requires;
+        if !self.tier_allowed(&worker, requires) {
+            self.revoke_lease(job);
+            return Err(SubmitError::TierRevoked);
+        }
+        let window = self.policy.lease_window_secs;
+        let rec = self.jobs.get_mut(job).ok_or(SubmitError::UnknownJob)?;
         let hard = if deadline == 0 { expires_at } else { deadline };
         let extended = now.saturating_add(window).min(hard).max(expires_at);
         rec.status = JobStatus::Leased {
@@ -675,6 +751,22 @@ impl State {
         result: String,
         now: u64,
     ) -> Result<(), SubmitError> {
+        let rec = self.jobs.get(job).ok_or(SubmitError::UnknownJob)?;
+        if let JobStatus::Leased {
+            worker: holder,
+            expires_at,
+            ..
+        } = rec.status
+        {
+            if holder == worker
+                && expires_at > now
+                && !self.tier_allowed(&worker, rec.spec.requires)
+            {
+                self.revoke_lease(job);
+                return Err(SubmitError::TierRevoked);
+            }
+        }
+        let trusted = self.policy.is_trusted(&worker);
         let rec = self.jobs.get_mut(job).ok_or(SubmitError::UnknownJob)?;
         match rec.status {
             JobStatus::Leased {
@@ -696,10 +788,14 @@ impl State {
                 let mut group = None;
                 if let Some(w) = self.workers.get_mut(&worker) {
                     w.last_seen = now;
-                    // A delivered result clears the no-show record.
-                    w.noshows = 0;
                     w.delivered = w.delivered.saturating_add(1);
-                    group = Some(source_group(&w.source));
+                    // Results are not verified, so only a vouched worker's
+                    // delivery clears the no-show record (its own and its
+                    // network's); an unvouched one leaves the back-off intact.
+                    if trusted {
+                        w.noshows = 0;
+                        group = Some(source_group(&w.source));
+                    }
                 }
                 if let Some(src) = group.and_then(|g| self.sources.get_mut(&g)) {
                     src.noshows = 0;

@@ -327,6 +327,7 @@ impl Wallet {
         self.below_modern_kdf
     }
 
+    // BEGIN SHARED-KEYSTORE (PBA-L4-010)
     /// Emit the warnings gathered while loading. Call once logging is
     /// initialised: the wallet is loaded before the tracing subscriber (and
     /// before any thread) exists, so nothing can be logged at load time.
@@ -341,6 +342,7 @@ impl Wallet {
             );
         }
     }
+    // END SHARED-KEYSTORE
 
     /// Build from a hex-encoded private key.
     pub fn from_hex(hex_key: &str) -> Result<Self, WalletError> {
@@ -799,6 +801,10 @@ mod tests {
     /// One test (not two) because both halves mutate the same process env vars.
     #[test]
     fn pba_l4_010_from_env_removes_the_secret_from_the_environment() {
+        // Serialise with every other test that touches the process env.
+        let _env = crate::ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         std::env::remove_var(ENV_KEYSTORE_PATH);
         std::env::set_var(ENV_PRIVATE_KEY_HEX, TEST_HEX);
         let w = Wallet::from_env().expect("load from raw hex env");
@@ -886,8 +892,46 @@ mod tests {
         let path = write_keystore("pw");
         let w = Wallet::from_keystore(path.to_str().unwrap(), "pw").expect("load");
         assert_eq!(w.below_modern_kdf(), Some(MIN_PBKDF2_ITERS));
-        w.log_load_warnings();
-        assert_eq!(Wallet::from_hex(TEST_HEX).unwrap().below_modern_kdf(), None);
+        let out = logged(|| w.log_load_warnings());
+        assert!(
+            out.contains("below-modern PBKDF2"),
+            "warning not logged: {out:?}"
+        );
+        assert!(
+            out.contains(&format!("iterations={MIN_PBKDF2_ITERS}")),
+            "{out:?}"
+        );
+        let clean = Wallet::from_hex(TEST_HEX).unwrap();
+        assert_eq!(clean.below_modern_kdf(), None);
+        assert_eq!(
+            logged(|| clean.log_load_warnings()),
+            "",
+            "a clean key logs nothing"
+        );
         let _ = std::fs::remove_file(path);
+    }
+
+    /// Run `f` under a tracing subscriber that captures its output.
+    fn logged(f: impl FnOnce()) -> String {
+        #[derive(Clone, Default)]
+        struct Captured(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for Captured {
+            fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(b);
+                Ok(b.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let cap = Captured::default();
+        let sink = cap.clone();
+        let sub = tracing_subscriber::fmt()
+            .with_writer(move || sink.clone())
+            .with_ansi(false)
+            .finish();
+        tracing::subscriber::with_default(sub, f);
+        let bytes = cap.0.lock().unwrap().clone();
+        String::from_utf8(bytes).unwrap()
     }
 }

@@ -121,3 +121,8 @@ pub use pipeline::{
     PipelineJobId, PipelineJobSpec, PipelineRequestId, PipelineRequestSnapshot,
     PipelineRequestState, PipelineWorker, StageIndex, StageRole,
 };
+
+/// Serialises tests that mutate the process environment (env is
+/// process-global and `set_var`/`remove_var` race with concurrent reads).
+#[cfg(test)]
+pub(crate) static ENV_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());

@@ -17,6 +17,9 @@
 //! - `CITRATE_COORDINATOR_H01_WORKERS` — comma-separated worker addresses the
 //!   operator has vetted for H-01 (ladder) work. A self-reported H-01 probe from
 //!   any other key is granted `federated`. Unset means nobody is granted H-01.
+//! - `CITRATE_COORDINATOR_OPEN_TIER` — highest tier granted to unvouched
+//!   workers: `probe` (default) or `federated`. `CITRATE_COORDINATOR_H01_WORKERS`
+//!   lists the vouched addresses, which may take any tier.
 //! - `CITRATE_COORDINATOR_MAX_WORKERS_PER_SOURCE` — distinct unvouched keys one
 //!   client address may register (default 16).
 //! - `CITRATE_COORDINATOR_MAX_LEASES_PER_SOURCE` — live leases unvouched
@@ -52,6 +55,7 @@ async fn main() -> anyhow::Result<()> {
     }
     tracing::info!(
         h01_workers = policy.trusted_h01.len(),
+        open_tier = ?policy.open_tier,
         max_workers_per_source = policy.max_workers_per_source,
         lease_window_secs = policy.lease_window_secs,
         max_leases_per_source = policy.max_leases_per_source,
@@ -102,6 +106,15 @@ fn policy_from_env() -> anyhow::Result<Policy> {
     if let Ok(raw) = std::env::var("CITRATE_COORDINATOR_H01_WORKERS") {
         policy.trusted_h01 = citrate_training_coordinator::state::parse_address_list(&raw)
             .map_err(|e| anyhow::anyhow!("CITRATE_COORDINATOR_H01_WORKERS: {e}"))?;
+    }
+    if let Ok(raw) = std::env::var("CITRATE_COORDINATOR_OPEN_TIER") {
+        policy.open_tier = match raw.trim() {
+            "probe" => citrate_training_coordinator::Capability::Probe,
+            "federated" => citrate_training_coordinator::Capability::Federated,
+            other => anyhow::bail!(
+                "CITRATE_COORDINATOR_OPEN_TIER={other:?}: expected \"probe\" or \"federated\""
+            ),
+        };
     }
     if let Ok(raw) = std::env::var("CITRATE_COORDINATOR_MAX_WORKERS_PER_SOURCE") {
         let n: usize = raw.trim().parse().map_err(|e| {

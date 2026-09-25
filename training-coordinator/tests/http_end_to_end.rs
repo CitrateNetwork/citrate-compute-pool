@@ -25,7 +25,14 @@ const KEY_A: &str = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf
 const KEY_B: &str = "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d";
 
 fn tmp(name: &str) -> std::path::PathBuf {
-    let d = std::env::temp_dir().join(format!("citrate-coord-http-{name}"));
+    // Unique per process and call, so two suite runs on one host (or two
+    // tests sharing a name) never share a state file.
+    static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = N.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let d = std::env::temp_dir().join(format!(
+        "citrate-coord-http-{name}-{}-{n}",
+        std::process::id()
+    ));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).unwrap();
     d.join("state.json")
@@ -587,7 +594,7 @@ async fn pba_l3b_001_fresh_h01_keys_cannot_squat_the_ladder_over_http() {
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
-        assert_eq!(json_of(res).await["capability"], "federated");
+        assert_eq!(json_of(res).await["capability"], "probe");
         let res = router(c.clone())
             .oneshot(post("/v1/lease", lease_body(&k)))
             .await
@@ -815,7 +822,7 @@ async fn pba_l3b_001_second_concurrent_lease_is_refused_over_http() {
 }
 
 /// Drive the real client through one job of `job_ms` against a coordinator
-/// with a `window_secs` renewal window, heartbeating every 200 ms. `blocking`
+/// with a `window_secs` renewal window, heartbeating every 2 s. `blocking`
 /// models the job as synchronous CPU work (`std::thread::sleep`, no await
 /// point), which is what the real candle executor is.
 async fn run_one_heartbeated_job(
@@ -834,43 +841,49 @@ async fn run_one_heartbeated_job(
     )
     .unwrap();
     let client = fast_client(serve(c.clone()).await, KEY_A)
-        .with_heartbeat_every(std::time::Duration::from_millis(200));
+        // Every heartbeat fsyncs the coordinator's state file; a 2 s cadence
+        // keeps the test from saturating a busy disk with syncs.
+        .with_heartbeat_every(std::time::Duration::from_secs(2));
     client
         .register(&probe("candle-cpu", "f32", 7_137.0, true))
         .await
         .unwrap();
     let ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let r = ran.clone();
-    client
-        .poll_loop(
-            move |_job| {
-                let r = r.clone();
-                async move {
-                    if blocking {
-                        std::thread::sleep(std::time::Duration::from_millis(job_ms));
-                    } else {
-                        tokio::time::sleep(std::time::Duration::from_millis(job_ms)).await;
-                    }
-                    r.store(true, std::sync::atomic::Ordering::SeqCst);
-                    Ok("{}".to_string())
+    let run = client.poll_loop(
+        move |_job| {
+            let r = r.clone();
+            async move {
+                if blocking {
+                    std::thread::sleep(std::time::Duration::from_millis(job_ms));
+                } else {
+                    tokio::time::sleep(std::time::Duration::from_millis(job_ms)).await;
                 }
-            },
-            {
-                let r = ran.clone();
-                move || !r.load(std::sync::atomic::Ordering::SeqCst)
-            },
-        )
+                r.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok("{}".to_string())
+            }
+        },
+        {
+            let r = ran.clone();
+            move || !r.load(std::sync::atomic::Ordering::SeqCst)
+        },
+    );
+    // Never hang the suite: a lost lease makes the poll loop spin forever.
+    tokio::time::timeout(std::time::Duration::from_secs(60), run)
         .await
+        .expect("poll loop did not finish within 60 s")
         .unwrap();
     c.snapshot().counts().done
 }
 
 /// The real client heartbeats a running job, and that is what keeps the lease:
-/// a 7 s job against a 4 s window is only accepted if heartbeats landed.
+/// an 18 s job against a 15 s window is only accepted if heartbeats landed
+/// (the window is generous because each heartbeat fsyncs the state file, which
+/// can stall for seconds on a busy shared disk).
 #[tokio::test]
 async fn pba_l3b_001_the_real_client_heartbeats_while_a_job_runs() {
     assert_eq!(
-        run_one_heartbeated_job("client-hb", 4, 7_000, false).await,
+        run_one_heartbeated_job("client-hb", 15, 18_000, false).await,
         1,
         "the heartbeated lease must still be live when the result is submitted"
     );
@@ -883,7 +896,7 @@ async fn pba_l3b_001_the_real_client_heartbeats_while_a_job_runs() {
 #[tokio::test]
 async fn pba_l3b_001_a_blocking_job_is_still_heartbeated() {
     assert_eq!(
-        run_one_heartbeated_job("client-hb-blocking", 4, 7_000, true).await,
+        run_one_heartbeated_job("client-hb-blocking", 15, 18_000, true).await,
         1,
         "a synchronous job lost its lease: heartbeats never fired"
     );
@@ -893,7 +906,7 @@ async fn pba_l3b_001_a_blocking_job_is_still_heartbeated() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn pba_l3b_001_a_blocking_job_is_still_heartbeated_multi_thread() {
     assert_eq!(
-        run_one_heartbeated_job("client-hb-blocking-mt", 4, 7_000, true).await,
+        run_one_heartbeated_job("client-hb-blocking-mt", 15, 18_000, true).await,
         1,
         "a synchronous job lost its lease: heartbeats never fired"
     );
@@ -934,4 +947,42 @@ async fn pba_l3b_001_a_full_source_cannot_drain_the_registration_budget() {
         StatusCode::OK,
         "honest onboarding denied by one host"
     );
+}
+
+/// A coordinator restarted with a tighter tier policy requeues leases the new
+/// policy no longer allows, and persists that.
+#[tokio::test]
+async fn tier_restart_with_a_tighter_policy_requeues_disallowed_leases() {
+    let path = tmp("tier-restart");
+    let open = Policy {
+        open_tier: Capability::Federated,
+        ..Policy::default()
+    };
+    let first = Arc::new(Coordinator::open_with(Store::new(&path), open).unwrap());
+    first
+        .add_job(
+            JobSpec::new("f", Capability::Federated, serde_json::json!({})).with_lease_secs(9999),
+        )
+        .unwrap();
+    let fast = probe("candle-cuda", "f32", 71_098.0, true);
+    router(first.clone())
+        .oneshot(post("/v1/register", register_body(KEY_A, &fast)))
+        .await
+        .unwrap();
+    let res = router(first.clone())
+        .oneshot(post("/v1/lease", lease_body(KEY_A)))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    drop(first);
+
+    let second = Arc::new(Coordinator::open_with(Store::new(&path), Policy::default()).unwrap());
+    let c = second.snapshot().counts();
+    assert_eq!(
+        (c.leased, c.pending),
+        (0, 1),
+        "the federated lease is requeued at boot"
+    );
+    let on_disk = Store::new(&path).load().unwrap().counts();
+    assert_eq!((on_disk.leased, on_disk.pending), (0, 1), "and persisted");
 }

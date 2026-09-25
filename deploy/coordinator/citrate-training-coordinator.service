@@ -21,6 +21,8 @@ Environment=RUST_LOG=info
 # nobody is granted H-01, so set this to the fleet's worker addresses on deploy.
 #Environment=CITRATE_COORDINATOR_H01_WORKERS=0x...,0x...
 #Environment=CITRATE_COORDINATOR_MAX_WORKERS_PER_SOURCE=16
+# Highest tier granted to unvouched workers: probe (default) or federated.
+#Environment=CITRATE_COORDINATOR_OPEN_TIER=probe
 
 ExecStart=/usr/local/bin/citrate-training-coordinator
 

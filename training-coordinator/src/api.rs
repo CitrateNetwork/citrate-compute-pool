@@ -109,6 +109,15 @@ impl Coordinator {
     pub fn open_with(store: Store, policy: Policy) -> std::io::Result<Self> {
         let mut state = store.load()?;
         state.policy = policy;
+        // A policy tightened across a restart applies to leases already out.
+        let revoked = state.revoke_out_of_policy();
+        if !revoked.is_empty() {
+            tracing::info!(
+                ?revoked,
+                "requeued leases the current tier policy no longer allows"
+            );
+            store.save(&state)?;
+        }
         Ok(Self {
             state: Mutex::new(state),
             store,
