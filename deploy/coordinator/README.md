@@ -175,9 +175,12 @@ party can hold:
 |---|---|
 | H-01 (ladder) work only for vetted addresses | `CITRATE_COORDINATOR_H01_WORKERS=0x…,0x…` (unset = nobody gets H-01; an unvouched H-01 probe is granted `federated`) |
 | Identities per client address (IPv6 per /64) | `CITRATE_COORDINATOR_MAX_WORKERS_PER_SOURCE` (default 16; vouched machines are exempt) |
-| New identities per hour, all sources | 60/h, burst 30 (compile-time) |
+| New identities per hour, all sources | 60/h, burst 30 (compile-time); a registration refused by the per-address cap does not spend it |
 | Concurrent leases per identity | 1 |
-| No-show penalty | a lapsed lease costs a 1 h cool-down, doubling per consecutive no-show up to 7 days; a delivered result resets it |
+| No-show penalty | a lapsed lease costs the key a 1 h cool-down, doubling per consecutive no-show up to 7 days; a delivered result resets it. The history survives the key's record being evicted or its slot reclaimed |
+| Source-group penalty | a lapse by an unvouched worker also (a) excludes its source group (IPv4 address, IPv6 /48) from that job and (b) puts the whole group on the same doubling cool-down, so a fresh key from the same network does not escape |
+| Leases per source group | `CITRATE_COORDINATOR_MAX_LEASES_PER_SOURCE` (default 4; vouched machines are exempt) |
+| Lapsed-job hold | for 15 min after a lapse, the job goes only to established workers (vouched, or with a delivered result) |
 | Lease lifetime without a heartbeat | 15 min, extendable up to the job's `lease_secs` |
 
 The client address is taken from `X-Forwarded-For` only when the TCP peer is
@@ -185,6 +188,9 @@ loopback, i.e. from Caddy, which overwrites that header with the real client
 address (it trusts no inbound value unless `trusted_proxies` is set, and this
 fragment does not set it). Do not add `trusted_proxies` without revisiting
 `api::source_of`.
+
+A network whose workers let a lease lapse is not offered that job again, and a
+lapsed job goes to established workers first.
 
 **Before deploying this version:** upgrade the fleet's workers first (older
 workers do not heartbeat and would lose long jobs after 15 minutes), then set

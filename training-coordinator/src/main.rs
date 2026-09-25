@@ -19,6 +19,8 @@
 //!   any other key is granted `federated`. Unset means nobody is granted H-01.
 //! - `CITRATE_COORDINATOR_MAX_WORKERS_PER_SOURCE` — distinct unvouched keys one
 //!   client address may register (default 16).
+//! - `CITRATE_COORDINATOR_MAX_LEASES_PER_SOURCE` — live leases unvouched
+//!   workers of one source group (IPv4 address, IPv6 /48) may hold (default 4).
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -52,6 +54,7 @@ async fn main() -> anyhow::Result<()> {
         h01_workers = policy.trusted_h01.len(),
         max_workers_per_source = policy.max_workers_per_source,
         lease_window_secs = policy.lease_window_secs,
+        max_leases_per_source = policy.max_leases_per_source,
         "admission policy"
     );
     let coord = Arc::new(Coordinator::open_with(Store::new(&state_path), policy)?);
@@ -109,6 +112,16 @@ fn policy_from_env() -> anyhow::Result<Policy> {
             "CITRATE_COORDINATOR_MAX_WORKERS_PER_SOURCE must be > 0"
         );
         policy.max_workers_per_source = n;
+    }
+    if let Ok(raw) = std::env::var("CITRATE_COORDINATOR_MAX_LEASES_PER_SOURCE") {
+        let n: usize = raw.trim().parse().map_err(|e| {
+            anyhow::anyhow!("CITRATE_COORDINATOR_MAX_LEASES_PER_SOURCE={raw:?}: {e}")
+        })?;
+        anyhow::ensure!(
+            n > 0,
+            "CITRATE_COORDINATOR_MAX_LEASES_PER_SOURCE must be > 0"
+        );
+        policy.max_leases_per_source = n;
     }
     Ok(policy)
 }

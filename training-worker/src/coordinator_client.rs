@@ -249,6 +249,12 @@ impl CoordinatorClient {
     /// job is *not* submitted, so the lease expires and the coordinator hands the
     /// work to someone else — which is the correct outcome for a machine that
     /// cannot do it, and is why the coordinator tracks `failed_by`.
+    ///
+    /// The job runs on a blocking-pool thread, not in this task. Real jobs are
+    /// synchronous CPU work (candle training) with no await point, so running
+    /// them in the same task as the heartbeat timer would starve the heartbeat
+    /// until the job finished and every long job would lose its lease
+    /// (PBA-L3b-001 verifier finding). Must be called from a Tokio runtime.
     pub async fn poll_loop<F, Fut>(
         &self,
         mut run: F,
@@ -256,7 +262,7 @@ impl CoordinatorClient {
     ) -> Result<(), ClientError>
     where
         F: FnMut(JobSpec) -> Fut,
-        Fut: std::future::Future<Output = anyhow::Result<String>>,
+        Fut: std::future::Future<Output = anyhow::Result<String>> + Send + 'static,
     {
         let mut wait = self.backoff.initial;
         while should_continue() {
@@ -269,7 +275,7 @@ impl CoordinatorClient {
                     // Run the job while heartbeating its lease. The first tick
                     // of `interval` fires immediately; skip it, the lease is
                     // fresh.
-                    let work = run(job);
+                    let work = run_off_the_async_threads(run(job));
                     tokio::pin!(work);
                     let mut beat = tokio::time::interval(self.heartbeat_every);
                     beat.tick().await;
@@ -309,6 +315,21 @@ impl CoordinatorClient {
             }
         }
         Ok(())
+    }
+}
+
+/// Drive `fut` to completion on a blocking-pool thread, so a job that blocks
+/// its thread (synchronous training) cannot starve the caller's task. The
+/// future still has the runtime's timers and I/O through the handle. A panic
+/// in the job becomes an `Err`, so the lease simply lapses.
+async fn run_off_the_async_threads<Fut>(fut: Fut) -> anyhow::Result<String>
+where
+    Fut: std::future::Future<Output = anyhow::Result<String>> + Send + 'static,
+{
+    let handle = tokio::runtime::Handle::current();
+    match tokio::task::spawn_blocking(move || handle.block_on(fut)).await {
+        Ok(r) => r,
+        Err(e) => Err(anyhow::anyhow!("job task failed: {e}")),
     }
 }
 

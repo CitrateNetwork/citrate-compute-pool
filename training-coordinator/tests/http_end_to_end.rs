@@ -814,23 +814,27 @@ async fn pba_l3b_001_second_concurrent_lease_is_refused_over_http() {
     assert_eq!(c.snapshot().counts().leased, 1);
 }
 
-/// The real client heartbeats a running job, and that is what keeps the lease.
-/// With a 2-second renewal window and a 3.5-second job, a client that did not
-/// heartbeat would find its lease lapsed at submit time (the submission would be
-/// refused and `done` would stay 0). Heartbeating every 100 ms keeps it live.
-#[tokio::test]
-async fn pba_l3b_001_the_real_client_heartbeats_while_a_job_runs() {
+/// Drive the real client through one job of `job_ms` against a coordinator
+/// with a `window_secs` renewal window, heartbeating every 200 ms. `blocking`
+/// models the job as synchronous CPU work (`std::thread::sleep`, no await
+/// point), which is what the real candle executor is.
+async fn run_one_heartbeated_job(
+    name: &str,
+    window_secs: u64,
+    job_ms: u64,
+    blocking: bool,
+) -> usize {
     let policy = Policy {
-        lease_window_secs: 2,
+        lease_window_secs: window_secs,
         ..Policy::default()
     };
-    let c = Arc::new(Coordinator::open_with(Store::new(tmp("client-hb")), policy).unwrap());
+    let c = Arc::new(Coordinator::open_with(Store::new(tmp(name)), policy).unwrap());
     c.add_job(
         JobSpec::new("slow", Capability::Probe, serde_json::json!({})).with_lease_secs(172_800),
     )
     .unwrap();
     let client = fast_client(serve(c.clone()).await, KEY_A)
-        .with_heartbeat_every(std::time::Duration::from_millis(100));
+        .with_heartbeat_every(std::time::Duration::from_millis(200));
     client
         .register(&probe("candle-cpu", "f32", 7_137.0, true))
         .await
@@ -842,7 +846,11 @@ async fn pba_l3b_001_the_real_client_heartbeats_while_a_job_runs() {
             move |_job| {
                 let r = r.clone();
                 async move {
-                    tokio::time::sleep(std::time::Duration::from_millis(3_500)).await;
+                    if blocking {
+                        std::thread::sleep(std::time::Duration::from_millis(job_ms));
+                    } else {
+                        tokio::time::sleep(std::time::Duration::from_millis(job_ms)).await;
+                    }
                     r.store(true, std::sync::atomic::Ordering::SeqCst);
                     Ok("{}".to_string())
                 }
@@ -854,9 +862,76 @@ async fn pba_l3b_001_the_real_client_heartbeats_while_a_job_runs() {
         )
         .await
         .unwrap();
+    c.snapshot().counts().done
+}
+
+/// The real client heartbeats a running job, and that is what keeps the lease:
+/// a 7 s job against a 4 s window is only accepted if heartbeats landed.
+#[tokio::test]
+async fn pba_l3b_001_the_real_client_heartbeats_while_a_job_runs() {
     assert_eq!(
-        c.snapshot().counts().done,
+        run_one_heartbeated_job("client-hb", 4, 7_000, false).await,
         1,
         "the heartbeated lease must still be live when the result is submitted"
+    );
+}
+
+/// Verifier PoC `verify_blocking_job_never_heartbeats`, as the regression. The
+/// real executor is synchronous and never yields; before the fix the heartbeat
+/// shared its task and never fired, so every long job lapsed at the window.
+/// Runs on the default current-thread runtime, the harshest case.
+#[tokio::test]
+async fn pba_l3b_001_a_blocking_job_is_still_heartbeated() {
+    assert_eq!(
+        run_one_heartbeated_job("client-hb-blocking", 4, 7_000, true).await,
+        1,
+        "a synchronous job lost its lease: heartbeats never fired"
+    );
+}
+
+/// Same, on a multi-thread runtime (what `#[tokio::main]` builds for the worker).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pba_l3b_001_a_blocking_job_is_still_heartbeated_multi_thread() {
+    assert_eq!(
+        run_one_heartbeated_job("client-hb-blocking-mt", 4, 7_000, true).await,
+        1,
+        "a synchronous job lost its lease: heartbeats never fired"
+    );
+}
+
+/// Verifier PoC `verify_one_host_drains_global_registration_budget`, as the
+/// regression: 40 attempts from one full host must not spend the global
+/// new-identity budget, so an honest newcomer elsewhere still gets in.
+#[tokio::test]
+async fn pba_l3b_001_a_full_source_cannot_drain_the_registration_budget() {
+    let c = coordinator("budget-drain", vec![]);
+    let body = |k: &str| register_body(k, &probe("candle-cpu", "f32", 7_000.0, true));
+    let cap = Policy::default().max_workers_per_source as u64;
+    for i in 0..40u64 {
+        let res = router(c.clone())
+            .oneshot(from_peer(
+                post("/v1/register", body(&throwaway(i))),
+                "203.0.113.7:1",
+            ))
+            .await
+            .unwrap();
+        let want = if i < cap {
+            StatusCode::OK
+        } else {
+            StatusCode::TOO_MANY_REQUESTS
+        };
+        assert_eq!(res.status(), want, "attempt {i}");
+    }
+    let res = router(c.clone())
+        .oneshot(from_peer(
+            post("/v1/register", body(KEY_B)),
+            "198.51.100.1:1",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        res.status(),
+        StatusCode::OK,
+        "honest onboarding denied by one host"
     );
 }

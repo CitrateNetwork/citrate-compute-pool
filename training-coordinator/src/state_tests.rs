@@ -40,7 +40,9 @@ fn with(jobs: &[(&str, Capability)], workers: &[(u8, Capability)]) -> State {
         if *c == Capability::H01 {
             s.policy.trusted_h01.insert(addr(*b));
         }
-        s.register(&worker(*b, *c), "src", 0).unwrap();
+        // One network per machine, so the source-group rules (PBA-L3b-001)
+        // only bite in the tests written for them.
+        s.register(&worker(*b, *c), &format!("src-{b}"), 0).unwrap();
     }
     s
 }
@@ -112,7 +114,8 @@ fn an_expired_lease_returns_the_job_to_the_pool() {
     s.lease(addr(1), 0).unwrap();
     // lease_secs is 100, so at 101 it is gone.
     assert_eq!(s.expire_leases(101), vec![JobId("j".into())]);
-    assert_eq!(s.lease(addr(2), 102).unwrap().id.0, "j");
+    // After the lapsed-job hold (PBA-L3b-001) anyone may take it again.
+    assert_eq!(s.lease(addr(2), 101 + LAPSE_HOLD_SECS).unwrap().id.0, "j");
 }
 
 #[test]
@@ -147,13 +150,15 @@ fn a_job_that_keeps_expiring_returns_to_the_pool_rather_than_quarantining() {
     let mut s = State::default();
     s.add_job(job("bad", Capability::Probe).with_max_attempts(2));
     for b in 1..=3u8 {
-        s.register(&worker(b, Capability::Probe), "src", 0).unwrap();
+        s.register(&worker(b, Capability::Probe), &format!("src-{b}"), 0)
+            .unwrap();
     }
     let mut t = 0u64;
     for b in 1..=2u8 {
         s.lease(addr(b), t).unwrap();
         t += 101;
         s.expire_leases(t);
+        t += LAPSE_HOLD_SECS;
     }
     assert_eq!(
         s.jobs[&JobId("bad".into())].status,
@@ -187,6 +192,7 @@ fn distinct_fresh_keys_cannot_quarantine_a_job_by_leasing_and_expiring() {
         s.lease(fresh, t).unwrap();
         t += 200;
         s.expire_leases(t);
+        t += LAPSE_HOLD_SECS;
     }
 
     // The job must never become terminal, and must still be leasable.
@@ -437,43 +443,230 @@ fn pba_l3b_001_honest_worker_gets_the_ladder_while_a_fresh_key_squatter_rotates(
     );
 }
 
-/// Tripwire, below the vouched tier. For `Federated` work there is no operator
-/// vetting, so the bound comes from the other layers: a lease that is not
-/// heartbeated lapses after one renewal window, a lapsed key cools down and is
-/// excluded from that job, and one source can hold only
-/// `max_workers_per_source` identities. A squatter minting a fresh key every
-/// cycle from one host runs out of identities, and the honest worker (polling
-/// second every cycle) gets the job within `max_workers_per_source + 1` cycles.
+/// Time-stepped (300 s) simulation of a squatter that always acts first: it
+/// heartbeats its lease while it can, and the moment the lease is gone it
+/// registers a fresh key from `source_of(n)` and polls before anyone else. An
+/// honest worker polls every step (300 s is the client's maximum idle
+/// interval). Returns how long, in seconds, the honest worker waited for its
+/// first lease, or `None` if it never got one within `steps`.
+fn heartbeating_squatter_sim(
+    s: &mut State,
+    honest: H160,
+    source_of: impl Fn(u64) -> String,
+    steps: u64,
+) -> Option<u64> {
+    let job = JobId("co-train".into());
+    let start = 1_000u64;
+    let mut now = start;
+    let mut current: Option<H160> = None;
+    let mut next_key = 0u64;
+    s.register(&h01_claim(honest), "198.51.100.1", now).unwrap();
+    for _ in 0..steps {
+        let holding = matches!(current, Some(a) if s.renew(a, &job, now).is_ok());
+        if !holding {
+            next_key += 1;
+            let a = H160::from_low_u64_be(10_000 + next_key);
+            current = None;
+            if s.register(&h01_claim(a), &source_of(next_key), now).is_ok()
+                && s.lease(a, now).is_ok()
+            {
+                current = Some(a);
+            }
+        }
+        if s.lease(honest, now).is_ok() {
+            return Some(now - start);
+        }
+        now += 300;
+    }
+    None
+}
+
+/// One lease deadline plus the lapsed-job hold plus one poll interval.
+const SQUAT_BOUND_SECS: u64 = 172_800 + LAPSE_HOLD_SECS + 300;
+
+/// Tripwire (verifier PoC `bypass_single_host_heartbeating_squatter_federated`,
+/// inverted). One host, a fresh key every cycle, heartbeating each lease to the
+/// 48 h deadline. Before: 60 cycles (120 days), honest 0 leases. Now the lapse
+/// excludes that host's source group from the job and puts the group on a
+/// cool-down no fresh key escapes, so the honest worker gets it at the first
+/// lapse: within one deadline plus the hold.
 #[test]
-fn pba_l3b_001_fresh_key_squatter_on_one_host_is_bounded_for_federated_work() {
+fn pba_l3b_001_heartbeating_single_host_squatter_holds_a_job_at_most_one_deadline() {
     let mut s = State::default();
     s.add_job(
         JobSpec::new("co-train", Capability::Federated, serde_json::json!({}))
             .with_lease_secs(172_800),
     );
     let honest = H160::from_low_u64_be(1);
-    let cap = s.policy.max_workers_per_source as u64;
-    let window = s.policy.lease_window_secs;
-    let mut now = 1_000u64;
-    let mut first_honest_cycle = None;
-    for round in 0..(cap + 10) {
-        let attacker = H160::from_low_u64_be(10_000 + round);
-        if s.register(&h01_claim(attacker), "203.0.113.7", now).is_ok() {
-            let _ = s.lease(attacker, now);
-        }
-        s.register(&h01_claim(honest), "198.51.100.1", now).unwrap();
-        if s.lease(honest, now).is_ok() {
-            first_honest_cycle = Some(round);
-            break;
-        }
-        // The squatter never heartbeats; one window later the lease lapses.
-        now += window + 1;
-    }
-    let got = first_honest_cycle.expect("the honest worker never obtained a lease");
+    // 120 days of 300 s steps.
+    let got = heartbeating_squatter_sim(&mut s, honest, |_| "203.0.113.7".into(), 34_560);
     assert!(
-        got <= cap,
-        "honest worker waited {got} cycles; bound is {cap} (max_workers_per_source)"
+        matches!(got, Some(w) if w <= SQUAT_BOUND_SECS),
+        "honest worker must get the job at the first lapse, waited {got:?}"
     );
+}
+
+/// The same squatter spread over distinct IPv6 /64s inside one /48 is one
+/// source group, so it is bounded the same way.
+#[test]
+fn pba_l3b_001_rotating_ipv6_64s_inside_one_48_is_one_group() {
+    let mut s = State::default();
+    s.add_job(
+        JobSpec::new("co-train", Capability::Federated, serde_json::json!({}))
+            .with_lease_secs(172_800),
+    );
+    let honest = H160::from_low_u64_be(1);
+    let got = heartbeating_squatter_sim(
+        &mut s,
+        honest,
+        |r| format!("2001:db8:1:{:x}::/64", r & 0xffff),
+        34_560,
+    );
+    assert!(matches!(got, Some(w) if w <= SQUAT_BOUND_SECS), "waited {got:?}");
+}
+
+/// Many networks: the lapsed-job hold gives an established worker the job at
+/// the first lapse.
+#[test]
+fn pba_l3b_001_multi_network_sybil_loses_to_an_established_worker_at_the_first_lapse() {
+    let mut s = State::default();
+    s.add_job(JobSpec::new("warm-up", Capability::Probe, serde_json::json!({})));
+    s.add_job(
+        JobSpec::new("co-train", Capability::Federated, serde_json::json!({}))
+            .with_lease_secs(172_800),
+    );
+    let honest = H160::from_low_u64_be(1);
+    // The honest worker earned "established" by delivering once.
+    s.register(&worker_probe(honest), "198.51.100.1", 0).unwrap();
+    let warm = s.lease(honest, 0).unwrap();
+    assert_eq!(warm.id.0, "warm-up");
+    s.submit(honest, &warm.id, "ok".into(), 1).unwrap();
+    // A squatter from 2001:db8:<round>:: grabs co-train first.
+    let got = heartbeating_squatter_sim(
+        &mut s,
+        honest,
+        |r| format!("2001:db8:{:x}:0::/64", 0x100 + r),
+        34_560,
+    );
+    assert!(matches!(got, Some(w) if w <= SQUAT_BOUND_SECS), "waited {got:?}");
+}
+
+#[test]
+fn pba_l3b_001_source_groups_fold_ipv6_to_the_48() {
+    assert_eq!(source_group("2001:db8:1:2::/64"), "2001:db8:1::/48");
+    assert_eq!(source_group("203.0.113.7"), "203.0.113.7");
+    assert_eq!(source_group("unknown"), "unknown");
+    assert_eq!(source_group("bad::/64"), "bad::/64");
+}
+
+/// A lapsed job is held for established workers; a fresh key waits out the hold.
+#[test]
+fn pba_l3b_001_a_lapsed_job_is_held_for_established_workers() {
+    let mut s = State::default();
+    s.add_job(job("j", Capability::Probe));
+    s.register(&worker_probe(addr(1)), "a", 0).unwrap();
+    s.register(&worker_probe(addr(2)), "b", 0).unwrap();
+    s.lease(addr(1), 0).unwrap();
+    s.expire_leases(100);
+    let held = s.jobs[&JobId("j".into())].held_until;
+    assert_eq!(held, 100 + LAPSE_HOLD_SECS);
+    assert_eq!(s.lease(addr(2), held - 1), Err(LeaseError::NothingAvailable));
+    assert_eq!(s.lease(addr(2), held).unwrap().id.0, "j");
+    // A vouched worker is established and is not held back.
+    let mut v = State::default();
+    v.add_job(job("j", Capability::Probe));
+    v.register(&worker_probe(addr(1)), "a", 0).unwrap();
+    v.policy.trusted_h01.insert(addr(3));
+    v.register(&worker_probe(addr(3)), "c", 0).unwrap();
+    v.lease(addr(1), 0).unwrap();
+    assert_eq!(v.lease(addr(3), 101).unwrap().id.0, "j");
+}
+
+/// One source group holds at most `max_leases_per_source` live leases however
+/// many keys it has; vouched workers do not count against it.
+#[test]
+fn pba_l3b_001_one_source_group_cannot_take_the_whole_queue() {
+    let mut s = State::default();
+    s.policy.max_leases_per_source = 2;
+    for i in 0..5 {
+        s.add_job(job(&format!("j{i}"), Capability::Probe));
+    }
+    for i in 1..=3u8 {
+        s.register(&worker_probe(addr(i)), "2001:db8:9:1::/64", 0).unwrap();
+    }
+    s.lease(addr(1), 0).unwrap();
+    s.lease(addr(2), 0).unwrap();
+    assert_eq!(s.lease(addr(3), 0), Err(LeaseError::AtLeaseCap));
+    // Another /64 in the same /48 is the same group.
+    s.register(&worker_probe(addr(4)), "2001:db8:9:2::/64", 0).unwrap();
+    assert_eq!(s.lease(addr(4), 0), Err(LeaseError::AtLeaseCap));
+    s.policy.trusted_h01.insert(addr(5));
+    s.register(&worker_probe(addr(5)), "2001:db8:9:3::/64", 0).unwrap();
+    assert!(s.lease(addr(5), 0).is_ok());
+    // A different network is unaffected.
+    s.register(&worker_probe(addr(6)), "203.0.113.9", 0).unwrap();
+    assert!(s.lease(addr(6), 0).is_ok());
+}
+
+/// A lapse puts the whole source group on a doubling cool-down, and a
+/// delivered result from that group resets its count.
+#[test]
+fn pba_l3b_001_a_lapse_cools_down_the_source_group() {
+    let mut s = State::default();
+    s.add_job(job("a", Capability::Probe));
+    s.add_job(job("b", Capability::Probe));
+    s.register(&worker_probe(addr(1)), "203.0.113.7", 0).unwrap();
+    s.register(&worker_probe(addr(2)), "203.0.113.7", 0).unwrap();
+    s.lease(addr(1), 0).unwrap();
+    let until = 101 + NOSHOW_BACKOFF_BASE_SECS;
+    s.expire_leases(101);
+    assert_eq!(s.sources["203.0.113.7"].noshows, 1);
+    assert_eq!(s.lease(addr(2), 102), Err(LeaseError::CoolingDown { until }));
+    let t = until + LAPSE_HOLD_SECS;
+    let b = s.lease(addr(2), t).unwrap();
+    assert_eq!(b.id.0, "b", "the group is excluded from the job it lapsed on");
+    s.submit(addr(2), &b.id, "ok".into(), t + 1).unwrap();
+    assert_eq!(s.sources["203.0.113.7"].noshows, 0);
+}
+
+/// Verifier PoC `noshow_history_reset_via_stale_reclaim`, inverted: a key
+/// whose stale slot was reclaimed gets its no-show history back when it
+/// registers again.
+#[test]
+fn pba_l3b_001_no_show_history_survives_slot_reclaim() {
+    let mut s = State::default();
+    s.policy.max_workers_per_source = 1;
+    s.add_job(job("a", Capability::Probe));
+    let k = addr(5);
+    s.register(&worker_probe(k), "9.9.9.9", 0).unwrap();
+    s.workers.get_mut(&k).unwrap().noshows = 6;
+    s.workers.get_mut(&k).unwrap().cooldown_until = 500_000;
+    let now = SOURCE_SLOT_STALE_SECS + 1;
+    s.register(&worker_probe(addr(6)), "9.9.9.9", now).unwrap();
+    assert!(!s.workers.contains_key(&k), "stale slot reclaimed");
+    s.register(&worker_probe(k), "9.9.9.10", now).unwrap();
+    assert_eq!(s.workers[&k].noshows, 6);
+    assert_eq!(s.workers[&k].cooldown_until, 500_000);
+    // A clean key leaves no penalty entry behind.
+    let mut c = State::default();
+    c.policy.max_workers_per_source = 1;
+    c.register(&worker_probe(addr(7)), "x", 0).unwrap();
+    c.register(&worker_probe(addr(8)), "x", SOURCE_SLOT_STALE_SECS).unwrap();
+    assert!(c.penalties.is_empty());
+}
+
+/// `admits_new` agrees with `register` and does not mutate.
+#[test]
+fn pba_l3b_001_admits_new_matches_register() {
+    let mut s = State::default();
+    s.policy.max_workers_per_source = 1;
+    s.register(&worker_probe(addr(1)), "a", 0).unwrap();
+    assert_eq!(s.admits_new(&addr(2), "a", 1), Err(RegisterError::SourceFull));
+    assert_eq!(s.admits_new(&addr(2), "b", 1), Ok(()));
+    assert_eq!(s.admits_new(&addr(2), "a", SOURCE_SLOT_STALE_SECS), Ok(()));
+    assert!(s.workers.contains_key(&addr(1)), "admits_new must not reclaim");
+    s.policy.trusted_h01.insert(addr(3));
+    assert_eq!(s.admits_new(&addr(3), "a", 1), Ok(()));
 }
 
 /// One key used to be able to lease every job in the queue by polling in a loop.
@@ -784,4 +977,92 @@ fn pba_l3b_001_each_lease_counts_one_attempt() {
     let mut s = with(&[("j", Capability::Probe)], &[(1, Capability::Probe)]);
     s.lease(addr(1), 0).unwrap();
     assert_eq!(s.jobs[&JobId("j".into())].attempts, 1);
+}
+
+/// A forgotten key keeps its history if it has either no-shows or a live
+/// cool-down; a clean key leaves nothing behind.
+#[test]
+fn pba_l3b_001_forget_keeps_any_live_penalty() {
+    let mut s = State::default();
+    for (i, (noshows, until)) in [(0u32, 500u64), (2, 0), (0, 0)].into_iter().enumerate() {
+        let id = H160::from_low_u64_be(i as u64 + 1);
+        s.register(&worker_probe(id), "a", 0).unwrap();
+        let w = s.workers.get_mut(&id).unwrap();
+        w.noshows = noshows;
+        w.cooldown_until = until;
+        s.forget_worker(&id, 100);
+    }
+    assert!(s.penalties.contains_key(&H160::from_low_u64_be(1)), "live cool-down kept");
+    assert!(s.penalties.contains_key(&H160::from_low_u64_be(2)), "no-shows kept");
+    assert!(!s.penalties.contains_key(&H160::from_low_u64_be(3)), "clean key dropped");
+    // An expired cool-down with no no-shows is clean too.
+    s.register(&worker_probe(addr(9)), "a", 0).unwrap();
+    s.workers.get_mut(&addr(9)).unwrap().cooldown_until = 100;
+    s.forget_worker(&addr(9), 100);
+    assert!(!s.penalties.contains_key(&addr(9)));
+}
+
+/// The penalty map is bounded; at the bound the entry whose cool-down ends
+/// first is dropped, and re-recording a key already present evicts nothing.
+#[test]
+fn pba_l3b_001_the_penalty_map_is_bounded() {
+    let mut s = State::default();
+    // A registered key that also already has a penalty entry (e.g. recorded
+    // while it was away), plus MAX_WORKERS - 1 others: the map is at its bound.
+    let known = addr(0xAB);
+    s.register(&worker_probe(known), "a", 0).unwrap();
+    s.penalties.insert(known, Penalty { noshows: 1, cooldown_until: 9_999 });
+    for i in 0..(MAX_WORKERS as u64 - 1) {
+        s.penalties.insert(
+            H160::from_low_u64_be(i + 1),
+            Penalty { noshows: 1, cooldown_until: 1_000 + i },
+        );
+    }
+    assert_eq!(s.penalties.len(), MAX_WORKERS);
+    // Re-recording a key already present evicts nothing.
+    s.workers.get_mut(&known).unwrap().noshows = 3;
+    s.workers.get_mut(&known).unwrap().cooldown_until = 9_999;
+    s.forget_worker(&known, 0);
+    assert_eq!(s.penalties.len(), MAX_WORKERS);
+    assert_eq!(s.penalties[&known].noshows, 3);
+    assert!(s.penalties.contains_key(&H160::from_low_u64_be(1)));
+    // A new key at the bound evicts the soonest-ending cool-down (key 1).
+    let fresh = addr(0xEE);
+    s.register(&worker_probe(fresh), "b", 0).unwrap();
+    s.workers.get_mut(&fresh).unwrap().noshows = 1;
+    s.forget_worker(&fresh, 0);
+    assert_eq!(s.penalties.len(), MAX_WORKERS);
+    assert!(s.penalties.contains_key(&fresh));
+    assert!(!s.penalties.contains_key(&H160::from_low_u64_be(1)));
+    assert!(s.penalties.contains_key(&H160::from_low_u64_be(2)));
+}
+
+/// The source map is bounded; at the bound a group not cooling down (oldest
+/// first) is dropped before any group that is, and charging a group already
+/// present evicts nothing.
+#[test]
+fn pba_l3b_001_the_source_map_is_bounded() {
+    let mut s = State::default();
+    let now = 10_000u64;
+    for i in 0..MAX_SOURCES as u64 {
+        s.sources.insert(
+            format!("g{i}"),
+            SourceRecord {
+                noshows: 1,
+                // g0 is the oldest but still cooling down; g1 is the oldest idle one.
+                cooldown_until: if i == 0 { now + 1 } else { now },
+                last_seen: i,
+            },
+        );
+    }
+    s.charge_source("g5", now);
+    assert_eq!(s.sources.len(), MAX_SOURCES);
+    assert_eq!(s.sources["g5"].noshows, 2);
+    assert_eq!(s.sources["g5"].cooldown_until, now + 2 * NOSHOW_BACKOFF_BASE_SECS);
+    assert_eq!(s.sources["g5"].last_seen, now);
+    s.charge_source("new", now);
+    assert_eq!(s.sources.len(), MAX_SOURCES);
+    assert!(s.sources.contains_key("new"));
+    assert!(s.sources.contains_key("g0"), "a cooling group is kept");
+    assert!(!s.sources.contains_key("g1"), "the oldest idle group goes");
 }

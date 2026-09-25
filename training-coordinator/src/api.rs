@@ -212,12 +212,14 @@ async fn register(
     let now = unix_now();
     let granted = c
         .mutate(|s| {
-            // PBA-L3b-001: a never-seen identity spends from the global budget.
-            if !s.workers.contains_key(&w.id)
-                && !s.policy.is_trusted(&w.id)
-                && !c.new_registrations.lock().try_take(now)
-            {
-                return Err(None);
+            // PBA-L3b-001: a never-seen identity spends from the global budget,
+            // but only once its source is known to have room, so a full source
+            // cannot drain the budget and lock out every other newcomer.
+            if !s.workers.contains_key(&w.id) && !s.policy.is_trusted(&w.id) {
+                s.admits_new(&w.id, &source, now).map_err(Some)?;
+                if !c.new_registrations.lock().try_take(now) {
+                    return Err(None);
+                }
             }
             s.register(&w, &source, now).map_err(Some)
         })
