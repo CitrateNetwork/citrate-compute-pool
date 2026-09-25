@@ -149,6 +149,8 @@ async fn async_main(
             return ExitCode::from(2);
         }
     };
+    // Loaded before logging existed; report what the load noticed now.
+    wallet.log_load_warnings();
 
     if let Err(e) = wallet.verify_address(cfg.wallet_address) {
         eprintln!("wallet key/address mismatch: {}", e);

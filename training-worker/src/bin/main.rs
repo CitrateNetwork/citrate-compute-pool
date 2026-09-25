@@ -115,6 +115,8 @@ async fn async_main(
             return ExitCode::from(2);
         }
     };
+    // Loaded before logging existed; report what the load noticed now.
+    wallet.log_load_warnings();
 
     let contract = match env_address("CITRATE_WORKER_CONTRACT") {
         Ok(a) => a,

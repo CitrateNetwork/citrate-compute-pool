@@ -166,6 +166,8 @@ async fn async_main(
 
     // Same key the worker transacts with, so a member has ONE identity.
     let wallet = wallet?;
+    // Loaded before logging existed; report what the load noticed now.
+    wallet.log_load_warnings();
     let worker_id = wallet.address();
     let client = CoordinatorClient::new(&url, wallet);
     tracing::info!(worker = ?worker_id, coordinator = %url, "starting");
