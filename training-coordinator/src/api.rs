@@ -8,15 +8,19 @@
 //!
 //! `POST /v1/register`  — a signed probe; returns the capability granted.
 //! `POST /v1/lease`     — a signed request for work; returns a job or 204.
+//! `POST /v1/heartbeat` — a signed "still working"; extends the lease by one
+//!                        renewal window, up to the job's deadline.
 //! `POST /v1/submit`    — a signed result.
 //! `GET  /v1/status`    — fleet counts. This is what alf-gateway polls to fill
 //!                        the round/training panels the portal already renders.
 
 use std::collections::HashSet;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
-use axum::extract::State as AxumState;
-use axum::http::StatusCode;
+use axum::extract::{ConnectInfo, State as AxumState};
+use axum::http::{HeaderMap, StatusCode};
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use ethereum_types::H160;
@@ -28,9 +32,53 @@ use serde::Serialize;
 /// only needs to remember that window's worth of (signer, timestamp) pairs.
 const LEASE_SEEN_CAP: usize = 10_000;
 
+/// PBA-L3b-001: new identities admitted per hour, across all sources. Refreshing
+/// an existing registration is free; only a key the coordinator has never seen
+/// spends from this budget. A volunteer fleet of tens of machines never comes
+/// near it; a script minting a key per lease cycle does.
+pub const NEW_REGISTRATIONS_PER_HOUR: u64 = 60;
+/// Burst allowance for [`NEW_REGISTRATIONS_PER_HOUR`] (a lab bringing a rack
+/// online at once).
+pub const NEW_REGISTRATION_BURST: u64 = 30;
+
+/// Token bucket for new-identity registrations. In memory: a restart refills it,
+/// which is no worse than the burst.
+#[derive(Debug)]
+struct RegistrationBudget {
+    tokens: u64,
+    last_refill: u64,
+}
+
+impl RegistrationBudget {
+    fn new() -> Self {
+        Self {
+            tokens: NEW_REGISTRATION_BURST,
+            last_refill: 0,
+        }
+    }
+
+    /// Take one token at `now` (unix seconds). `false` means over budget.
+    fn try_take(&mut self, now: u64) -> bool {
+        let per_token = 3_600 / NEW_REGISTRATIONS_PER_HOUR;
+        let earned = now.saturating_sub(self.last_refill) / per_token;
+        if earned > 0 {
+            self.tokens = self
+                .tokens
+                .saturating_add(earned)
+                .min(NEW_REGISTRATION_BURST);
+            self.last_refill = self.last_refill.saturating_add(earned * per_token);
+        }
+        if self.tokens == 0 {
+            return false;
+        }
+        self.tokens -= 1;
+        true
+    }
+}
+
 use crate::attestation::{self, Attestation};
 use crate::job::JobSpec;
-use crate::state::State;
+use crate::state::{LeaseError, Policy, RegisterError, State};
 use crate::store::Store;
 use crate::submission::{recover_submitter, SignedSubmission};
 
@@ -41,6 +89,8 @@ pub struct Coordinator {
     /// replay within the freshness window (CP-B-002). In-memory only: the
     /// freshness window bounds replay across a restart, so this need not persist.
     lease_seen: Mutex<HashSet<(H160, u64)>>,
+    /// PBA-L3b-001: budget for never-seen identities.
+    new_registrations: Mutex<RegistrationBudget>,
 }
 
 impl Coordinator {
@@ -48,11 +98,18 @@ impl Coordinator {
     /// here rather than a silent fresh start, so the daemon refuses to boot
     /// having forgotten which machines are mid-job.
     pub fn open(store: Store) -> std::io::Result<Self> {
-        let state = store.load()?;
+        Self::open_with(store, Policy::default())
+    }
+
+    /// As [`Coordinator::open`], with an operator [`Policy`] (PBA-L3b-001).
+    pub fn open_with(store: Store, policy: Policy) -> std::io::Result<Self> {
+        let mut state = store.load()?;
+        state.policy = policy;
         Ok(Self {
             state: Mutex::new(state),
             store,
             lease_seen: Mutex::new(HashSet::new()),
+            new_registrations: Mutex::new(RegistrationBudget::new()),
         })
     }
 
@@ -94,7 +151,8 @@ impl Coordinator {
 
 // The lease request and its digest come from the shared protocol.
 pub use citrate_training_worker::coordinator_protocol::{
-    lease_digest, LeaseRequest, LEASE_FRESHNESS_NANOS, LEASE_MESSAGE,
+    heartbeat_digest, lease_digest, HeartbeatRequest, HeartbeatResponse, LeaseRequest,
+    LEASE_FRESHNESS_NANOS, LEASE_MESSAGE,
 };
 
 #[derive(Debug, Serialize)]
@@ -114,62 +172,170 @@ fn err(code: StatusCode, msg: impl Into<String>) -> (StatusCode, Json<ErrorBody>
 
 type ApiError = (StatusCode, Json<ErrorBody>);
 
+/// Where a request came from, for the per-source identity cap (PBA-L3b-001).
+///
+/// The coordinator is deployed loopback-only behind Caddy, which sets
+/// `X-Forwarded-For` to the client address (it does not trust an inbound one
+/// unless `trusted_proxies` is configured). So the header is believed only when
+/// the TCP peer is loopback, and the rightmost entry is used: that is the one the
+/// local proxy wrote. A request with no peer information at all is `unknown`,
+/// never header-derived. IPv6 is folded to its /64, the unit one host controls.
+pub fn source_of(peer: Option<SocketAddr>, headers: &HeaderMap) -> String {
+    let ip = match peer {
+        Some(p) if !p.ip().is_loopback() => Some(p.ip()),
+        Some(_) => headers
+            .get("x-forwarded-for")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.rsplit(',').next())
+            .and_then(|v| v.trim().parse::<IpAddr>().ok())
+            .or(Some(IpAddr::from([127, 0, 0, 1]))),
+        None => None,
+    };
+    match ip {
+        Some(IpAddr::V6(v6)) => {
+            let s = v6.segments();
+            format!("{:x}:{:x}:{:x}:{:x}::/64", s[0], s[1], s[2], s[3])
+        }
+        Some(IpAddr::V4(v4)) => v4.to_string(),
+        None => "unknown".to_string(),
+    }
+}
+
 async fn register(
     AxumState(c): AxumState<Arc<Coordinator>>,
+    peer: Option<ConnectInfo<SocketAddr>>,
+    headers: HeaderMap,
     Json(att): Json<Attestation>,
 ) -> Result<Json<RegisterResponse>, ApiError> {
     let w = attestation::verify(&att).map_err(|e| err(StatusCode::BAD_REQUEST, e.to_string()))?;
+    let source = source_of(peer.map(|ConnectInfo(a)| a), &headers);
     let now = unix_now();
-    c.mutate(|s| s.register(&w, now)).map_err(|e| {
-        err(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("could not persist: {e}"),
-        )
-    })?;
+    let granted = c
+        .mutate(|s| {
+            // PBA-L3b-001: a never-seen identity spends from the global budget.
+            if !s.workers.contains_key(&w.id)
+                && !s.policy.is_trusted(&w.id)
+                && !c.new_registrations.lock().try_take(now)
+            {
+                return Err(None);
+            }
+            s.register(&w, &source, now).map_err(Some)
+        })
+        .map_err(|e| {
+            err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("could not persist: {e}"),
+            )
+        })?
+        .map_err(|e: Option<RegisterError>| match e {
+            None => err(
+                StatusCode::TOO_MANY_REQUESTS,
+                "too many new registrations; retry later",
+            ),
+            Some(e) => err(StatusCode::TOO_MANY_REQUESTS, e.to_string()),
+        })?;
     Ok(Json(RegisterResponse {
         worker: format!("{:?}", w.id),
-        capability: w.capability,
+        capability: granted,
     }))
+}
+
+/// Check freshness, recover the signer over `digest`, and refuse an exact
+/// replay (CP-B-002). Shared by every signed, timestamp-bound request.
+fn authenticate(
+    c: &Coordinator,
+    timestamp: u64,
+    digest: &[u8; 32],
+    signature: &[u8],
+) -> Result<H160, ApiError> {
+    if unix_now_nanos().abs_diff(timestamp) > LEASE_FRESHNESS_NANOS {
+        return Err(err(
+            StatusCode::UNAUTHORIZED,
+            "request timestamp is outside the freshness window",
+        ));
+    }
+    let who = citrate_training_worker::wallet::Wallet::recover_address(digest, signature)
+        .map_err(|_| err(StatusCode::UNAUTHORIZED, "signature does not recover"))?;
+    if !c.note_lease_seen(who, timestamp) {
+        return Err(err(
+            StatusCode::UNAUTHORIZED,
+            "request already used (replay)",
+        ));
+    }
+    Ok(who)
+}
+
+fn too_many(until: u64, now: u64, msg: String) -> Response {
+    let mut r = err(StatusCode::TOO_MANY_REQUESTS, msg).into_response();
+    if let Ok(v) = until.saturating_sub(now).max(1).to_string().parse() {
+        r.headers_mut().insert(axum::http::header::RETRY_AFTER, v);
+    }
+    r
 }
 
 async fn lease(
     AxumState(c): AxumState<Arc<Coordinator>>,
     Json(req): Json<LeaseRequest>,
-) -> Result<(StatusCode, Json<Option<JobSpec>>), ApiError> {
+) -> Response {
     // CP-B-002: reject a stale or far-future timestamp so a captured request is
     // usable only inside a short window, then recover the signer over the SAME
     // timestamp it signed, then refuse an exact replay within that window.
-    if unix_now_nanos().abs_diff(req.timestamp) > LEASE_FRESHNESS_NANOS {
-        return Err(err(
-            StatusCode::UNAUTHORIZED,
-            "lease request timestamp is outside the freshness window",
-        ));
-    }
-    let who = citrate_training_worker::wallet::Wallet::recover_address(
+    let who = match authenticate(
+        &c,
+        req.timestamp,
         &lease_digest(req.timestamp),
         &req.signature,
-    )
-    .map_err(|_| err(StatusCode::UNAUTHORIZED, "signature does not recover"))?;
-    if !c.note_lease_seen(who, req.timestamp) {
-        return Err(err(
-            StatusCode::UNAUTHORIZED,
-            "lease request already used (replay)",
-        ));
-    }
+    ) {
+        Ok(w) => w,
+        Err(e) => return e.into_response(),
+    };
     let now = unix_now();
-    let got = c.mutate(|s| s.lease(who, now)).map_err(|e| {
-        err(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("could not persist: {e}"),
-        )
-    })?;
+    let got = match c.mutate(|s| s.lease(who, now)) {
+        Ok(g) => g,
+        Err(e) => {
+            return err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("could not persist: {e}"),
+            )
+            .into_response()
+        }
+    };
     match got {
-        Ok(spec) => Ok((StatusCode::OK, Json(Some(spec)))),
+        Ok(spec) => (StatusCode::OK, Json(Some(spec))).into_response(),
         // Nothing to do is not an error — it is the steady state of a fleet with
         // more machines than queued work, and workers poll on it.
-        Err(crate::state::LeaseError::NothingAvailable) => Ok((StatusCode::NO_CONTENT, Json(None))),
-        Err(e) => Err(err(StatusCode::FORBIDDEN, e.to_string())),
+        Err(LeaseError::NothingAvailable) => {
+            (StatusCode::NO_CONTENT, Json(None::<JobSpec>)).into_response()
+        }
+        Err(e @ LeaseError::CoolingDown { until }) => too_many(until, now, e.to_string()),
+        Err(e @ LeaseError::AtLeaseCap) => err(StatusCode::CONFLICT, e.to_string()).into_response(),
+        Err(e @ LeaseError::UnknownWorker) => {
+            err(StatusCode::FORBIDDEN, e.to_string()).into_response()
+        }
     }
+}
+
+async fn heartbeat(
+    AxumState(c): AxumState<Arc<Coordinator>>,
+    Json(req): Json<HeartbeatRequest>,
+) -> Result<Json<HeartbeatResponse>, ApiError> {
+    let who = authenticate(
+        &c,
+        req.timestamp,
+        &heartbeat_digest(&req.job, req.timestamp),
+        &req.signature,
+    )?;
+    let now = unix_now();
+    let expires_at = c
+        .mutate(|s| s.renew(who, &req.job, now))
+        .map_err(|e| {
+            err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("could not persist: {e}"),
+            )
+        })?
+        .map_err(|e| err(StatusCode::CONFLICT, e.to_string()))?;
+    Ok(Json(HeartbeatResponse { expires_at }))
 }
 
 async fn submit(
@@ -219,6 +385,7 @@ pub fn router(c: Arc<Coordinator>) -> Router {
     Router::new()
         .route("/v1/register", post(register))
         .route("/v1/lease", post(lease))
+        .route("/v1/heartbeat", post(heartbeat))
         .route("/v1/submit", post(submit))
         .route("/v1/status", get(status))
         .with_state(c)

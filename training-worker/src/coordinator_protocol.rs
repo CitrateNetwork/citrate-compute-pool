@@ -146,6 +146,37 @@ pub fn lease_digest(timestamp: u64) -> [u8; 32] {
     keccak(&[LEASE_MESSAGE, b"\n", &timestamp.to_be_bytes()])
 }
 
+/// What a worker signs to keep a lease alive (PBA-L3b-001). Domain-separated
+/// from every other digest, bound to the job and to the moment it was signed, so
+/// a captured heartbeat can neither be replayed outside the freshness window nor
+/// be repurposed to renew a different job or to ask for new work.
+pub const HEARTBEAT_MESSAGE: &[u8] = b"citrate-training-heartbeat/1";
+
+/// How far past "now" one heartbeat carries a lease, in seconds (PBA-L3b-001).
+///
+/// A lease used to last its whole `JobSpec::lease_secs` (50 hours for the big
+/// ladder rungs), so a key that leased and walked away held the job for two days.
+/// Now a lease lives only this long unless its holder keeps heartbeating, capped
+/// at the job's `lease_secs` as a hard deadline. A machine that is switched off
+/// mid-job releases the work within this window instead of within two days.
+pub const LEASE_RENEW_WINDOW_SECS: u64 = 900;
+
+/// How often the worker client heartbeats a running job. Well inside
+/// [`LEASE_RENEW_WINDOW_SECS`] so two consecutive missed heartbeats (a flaky
+/// domestic link) still do not lose the lease.
+pub const HEARTBEAT_INTERVAL_SECS: u64 = 240;
+
+/// `keccak256("citrate-training-heartbeat/1\n" || job_id || "\n" || timestamp_be)`.
+pub fn heartbeat_digest(job: &JobId, timestamp: u64) -> [u8; 32] {
+    keccak(&[
+        HEARTBEAT_MESSAGE,
+        b"\n",
+        job.0.as_bytes(),
+        b"\n",
+        &timestamp.to_be_bytes(),
+    ])
+}
+
 /// `keccak256("citrate-training-submission/1\n" || job_id || "\n" || payload)`.
 ///
 /// The newline separators make the encoding unambiguous for the job ids in use
@@ -181,6 +212,27 @@ pub struct LeaseRequest {
     pub timestamp: u64,
     #[serde(with = "hex_bytes")]
     pub signature: Vec<u8>,
+}
+
+/// A signed "still working on it" for a leased job (PBA-L3b-001). Freshness and
+/// replay rules are the lease request's: the timestamp must be inside
+/// [`LEASE_FRESHNESS_NANOS`] of the coordinator clock and an exact replay is
+/// refused.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct HeartbeatRequest {
+    pub job: JobId,
+    /// Unix nanoseconds when signed. Defaults to 0, which always fails the
+    /// freshness check.
+    #[serde(default)]
+    pub timestamp: u64,
+    #[serde(with = "hex_bytes")]
+    pub signature: Vec<u8>,
+}
+
+/// The coordinator's answer to a heartbeat: the lease's new expiry.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct HeartbeatResponse {
+    pub expires_at: u64,
 }
 
 /// A result as returned by a worker.
@@ -236,14 +288,18 @@ mod tests {
     /// Each digest must be distinct from the others over the same input, so no
     /// message type can be reinterpreted as another.
     #[test]
-    fn the_three_digests_are_domain_separated_from_each_other() {
+    fn the_four_digests_are_domain_separated_from_each_other() {
         let job = JobId("x".into());
         let a = attestation_digest("x");
         let l = lease_digest(0);
         let s = submission_digest(&job, "");
+        let h = heartbeat_digest(&job, 0);
         assert_ne!(a, l);
         assert_ne!(a, s);
         assert_ne!(l, s);
+        assert_ne!(h, a);
+        assert_ne!(h, l);
+        assert_ne!(h, s);
     }
 
     /// A submission digest must not collide with the naive concatenation an

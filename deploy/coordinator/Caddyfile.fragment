@@ -8,6 +8,9 @@ coordinator.citrate.ai {
 	# The coordinator itself is loopback-only (see the systemd unit). Every route
 	# it serves authenticates by recovering the signer from the request, so there
 	# is no API key here to configure and nothing to rotate.
+	# Caddy sets X-Forwarded-For to the real client address and, with no
+	# `trusted_proxies`, ignores any inbound value. The coordinator relies on that
+	# for its per-source identity cap (PBA-L3b-001): keep it that way.
 	reverse_proxy 127.0.0.1:8088
 
 	# A worker polls on a long cadence and a job can take hours, but no single

@@ -16,6 +16,11 @@ Environment=CITRATE_COORDINATOR_BIND=127.0.0.1:8088
 Environment=CITRATE_COORDINATOR_STATE=/var/lib/citrate-coordinator/state.json
 Environment=CITRATE_COORDINATOR_JOBS=/var/lib/citrate-coordinator/jobs.json
 Environment=RUST_LOG=info
+# PBA-L3b-001: addresses vetted for H-01 (ladder) work, comma-separated. A
+# self-reported H-01 probe from any other key is granted `federated`. Unset means
+# nobody is granted H-01, so set this to the fleet's worker addresses on deploy.
+#Environment=CITRATE_COORDINATOR_H01_WORKERS=0x...,0x...
+#Environment=CITRATE_COORDINATOR_MAX_WORKERS_PER_SOURCE=16
 
 ExecStart=/usr/local/bin/citrate-training-coordinator
 

@@ -11,11 +11,21 @@
 //! deliberately, for now: a fleet of five machines does not need a job-authoring
 //! API, and not having one means there is no privileged write path to secure.
 //! Jobs already recorded keep their state; only unseen ids are added.
+//!
+//! Admission policy (PBA-L3b-001):
+//!
+//! - `CITRATE_COORDINATOR_H01_WORKERS` — comma-separated worker addresses the
+//!   operator has vetted for H-01 (ladder) work. A self-reported H-01 probe from
+//!   any other key is granted `federated`. Unset means nobody is granted H-01.
+//! - `CITRATE_COORDINATOR_MAX_WORKERS_PER_SOURCE` — distinct unvouched keys one
+//!   client address may register (default 16).
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use citrate_training_coordinator::api::{router, Coordinator};
 use citrate_training_coordinator::job::JobSpec;
+use citrate_training_coordinator::state::Policy;
 use citrate_training_coordinator::store::Store;
 
 #[tokio::main]
@@ -31,7 +41,20 @@ async fn main() -> anyhow::Result<()> {
     let bind =
         std::env::var("CITRATE_COORDINATOR_BIND").unwrap_or_else(|_| "127.0.0.1:8088".into());
 
-    let coord = Arc::new(Coordinator::open(Store::new(&state_path))?);
+    let policy = policy_from_env()?;
+    if policy.trusted_h01.is_empty() {
+        tracing::warn!(
+            "CITRATE_COORDINATOR_H01_WORKERS is unset: no worker will be granted H-01 \
+             (self-reported probes are not trusted for the ladder, PBA-L3b-001)"
+        );
+    }
+    tracing::info!(
+        h01_workers = policy.trusted_h01.len(),
+        max_workers_per_source = policy.max_workers_per_source,
+        lease_window_secs = policy.lease_window_secs,
+        "admission policy"
+    );
+    let coord = Arc::new(Coordinator::open_with(Store::new(&state_path), policy)?);
 
     if let Ok(jobs_path) = std::env::var("CITRATE_COORDINATOR_JOBS") {
         let raw = std::fs::read_to_string(&jobs_path)?;
@@ -62,6 +85,30 @@ async fn main() -> anyhow::Result<()> {
 
     let listener = tokio::net::TcpListener::bind(&bind).await?;
     tracing::info!(%bind, "listening");
-    axum::serve(listener, router(coord)).await?;
+    // Connect info feeds the per-source identity cap (PBA-L3b-001).
+    axum::serve(
+        listener,
+        router(coord).into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await?;
     Ok(())
+}
+
+fn policy_from_env() -> anyhow::Result<Policy> {
+    let mut policy = Policy::default();
+    if let Ok(raw) = std::env::var("CITRATE_COORDINATOR_H01_WORKERS") {
+        policy.trusted_h01 = citrate_training_coordinator::state::parse_address_list(&raw)
+            .map_err(|e| anyhow::anyhow!("CITRATE_COORDINATOR_H01_WORKERS: {e}"))?;
+    }
+    if let Ok(raw) = std::env::var("CITRATE_COORDINATOR_MAX_WORKERS_PER_SOURCE") {
+        let n: usize = raw.trim().parse().map_err(|e| {
+            anyhow::anyhow!("CITRATE_COORDINATOR_MAX_WORKERS_PER_SOURCE={raw:?}: {e}")
+        })?;
+        anyhow::ensure!(
+            n > 0,
+            "CITRATE_COORDINATOR_MAX_WORKERS_PER_SOURCE must be > 0"
+        );
+        policy.max_workers_per_source = n;
+    }
+    Ok(policy)
 }

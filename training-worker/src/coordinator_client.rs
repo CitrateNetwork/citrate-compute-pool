@@ -25,19 +25,21 @@
 //!   * **Backoff is bounded and deterministic** (no jitter, no RNG) so it is
 //!     testable, and resets the moment work arrives.
 //!
-//! ## What it deliberately does not do
+//! ## Heartbeats
 //!
-//! There is no lease renewal. A long job's lease is sized by the coordinator when
-//! the job is authored (`JobSpec::lease_secs`), so a 48-hour rung is leased for
-//! longer than it takes rather than being kept alive by heartbeats. Renewal is
-//! the better design once jobs outlive their estimates, and it needs a route that
-//! does not exist yet — noted rather than half-built.
+//! A lease lives only `LEASE_RENEW_WINDOW_SECS` unless renewed (PBA-L3b-001), so
+//! while a job runs the poll loop heartbeats it every `HEARTBEAT_INTERVAL_SECS`.
+//! `JobSpec::lease_secs` is now the job's hard deadline rather than how long a
+//! silent machine keeps the work: a machine switched off mid-job releases it
+//! within minutes, not days. A failed heartbeat is logged and retried on the
+//! next tick; one miss does not lose the lease.
 
 use std::time::Duration;
 
 use crate::coordinator_protocol::{
-    attestation_digest, lease_digest, submission_digest, Attestation, JobId, JobSpec, LeaseRequest,
-    RegisterResponse, SignedSubmission,
+    attestation_digest, heartbeat_digest, lease_digest, submission_digest, Attestation,
+    HeartbeatRequest, HeartbeatResponse, JobId, JobSpec, LeaseRequest, RegisterResponse,
+    SignedSubmission, HEARTBEAT_INTERVAL_SECS,
 };
 use crate::wallet::Wallet;
 
@@ -84,6 +86,14 @@ pub struct CoordinatorClient {
     http: reqwest::Client,
     wallet: Wallet,
     backoff: Backoff,
+    heartbeat_every: Duration,
+}
+
+fn unix_nanos() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0)
 }
 
 impl CoordinatorClient {
@@ -99,7 +109,14 @@ impl CoordinatorClient {
             http: crate::outbound::redirect_safe_client(Duration::from_secs(30)),
             wallet,
             backoff: Backoff::default(),
+            heartbeat_every: Duration::from_secs(HEARTBEAT_INTERVAL_SECS),
         }
+    }
+
+    /// Override the heartbeat cadence (tests; an operator never needs to).
+    pub fn with_heartbeat_every(mut self, every: Duration) -> Self {
+        self.heartbeat_every = every;
+        self
     }
 
     pub fn with_backoff(mut self, b: Backoff) -> Self {
@@ -160,10 +177,7 @@ impl CoordinatorClient {
     pub async fn lease(&self) -> Result<Option<JobSpec>, ClientError> {
         // CP-B-002: bind the request to the current time so a captured lease body
         // is not a forever-replayable bearer credential.
-        let timestamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos() as u64)
-            .unwrap_or(0);
+        let timestamp = unix_nanos();
         let req = LeaseRequest {
             timestamp,
             signature: self.sign(&lease_digest(timestamp))?,
@@ -185,6 +199,29 @@ impl CoordinatorClient {
             Ok(j) => Ok(j),
             Err(e) => Err(ClientError::Malformed(e.to_string())),
         }
+    }
+
+    /// Keep a leased job's lease alive (PBA-L3b-001). Returns the new expiry
+    /// (unix seconds) the coordinator granted.
+    pub async fn heartbeat(&self, job: &JobId) -> Result<u64, ClientError> {
+        let timestamp = unix_nanos();
+        let req = HeartbeatRequest {
+            job: job.clone(),
+            timestamp,
+            signature: self.sign(&heartbeat_digest(job, timestamp))?,
+        };
+        let res = self.post("/v1/heartbeat", &req).await?;
+        let status = res.status();
+        if !status.is_success() {
+            return Err(ClientError::Rejected {
+                status: status.as_u16(),
+                body: res.text().await.unwrap_or_default(),
+            });
+        }
+        res.json::<HeartbeatResponse>()
+            .await
+            .map(|r| r.expires_at)
+            .map_err(|e| ClientError::Malformed(e.to_string()))
     }
 
     /// Return a result, signed so the coordinator can recover who produced it.
@@ -229,7 +266,24 @@ impl CoordinatorClient {
                     wait = self.backoff.initial;
                     let id = job.id.clone();
                     tracing::info!(job = %id, "leased");
-                    match run(job).await {
+                    // Run the job while heartbeating its lease. The first tick
+                    // of `interval` fires immediately; skip it, the lease is
+                    // fresh.
+                    let work = run(job);
+                    tokio::pin!(work);
+                    let mut beat = tokio::time::interval(self.heartbeat_every);
+                    beat.tick().await;
+                    let outcome = loop {
+                        tokio::select! {
+                            r = &mut work => break r,
+                            _ = beat.tick() => {
+                                if let Err(e) = self.heartbeat(&id).await {
+                                    tracing::warn!(job = %id, error = %e, "heartbeat failed; will retry");
+                                }
+                            }
+                        }
+                    };
+                    match outcome {
                         Ok(payload) => match self.submit(&id, &payload).await {
                             Ok(()) => tracing::info!(job = %id, "submitted"),
                             // Nothing to retry against: the lease is either gone
