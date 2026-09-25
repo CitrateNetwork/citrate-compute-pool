@@ -46,27 +46,31 @@ pub const NEW_REGISTRATION_BURST: u64 = 30;
 #[derive(Debug)]
 struct RegistrationBudget {
     tokens: u64,
-    last_refill: u64,
+    /// Start of the current refill interval. `None` until the first request,
+    /// so intervals are measured from that request rather than from epoch
+    /// minute boundaries (which made the burst depend on the wall clock).
+    last_refill: Option<u64>,
 }
 
 impl RegistrationBudget {
     fn new() -> Self {
         Self {
             tokens: NEW_REGISTRATION_BURST,
-            last_refill: 0,
+            last_refill: None,
         }
     }
 
     /// Take one token at `now` (unix seconds). `false` means over budget.
     fn try_take(&mut self, now: u64) -> bool {
         let per_token = 3_600 / NEW_REGISTRATIONS_PER_HOUR;
-        let earned = now.saturating_sub(self.last_refill) / per_token;
+        let last = *self.last_refill.get_or_insert(now);
+        let earned = now.saturating_sub(last) / per_token;
         if earned > 0 {
             self.tokens = self
                 .tokens
                 .saturating_add(earned)
                 .min(NEW_REGISTRATION_BURST);
-            self.last_refill = self.last_refill.saturating_add(earned * per_token);
+            self.last_refill = Some(last.saturating_add(earned * per_token));
         }
         if self.tokens == 0 {
             return false;
@@ -430,5 +434,24 @@ mod tests {
             assert!(b.try_take(later));
         }
         assert!(!b.try_take(later));
+    }
+
+    /// The burst does not depend on where the first request falls relative
+    /// to a wall-clock minute: a full burst taken across what would have been
+    /// a minute boundary still yields exactly the burst.
+    #[test]
+    fn registration_budget_burst_is_independent_of_the_wall_clock() {
+        let per_token = 3_600 / NEW_REGISTRATIONS_PER_HOUR;
+        for start in [0, 1, per_token - 1, 1_790_000_039] {
+            let mut b = RegistrationBudget::new();
+            let mut granted = 0;
+            for i in 0..(NEW_REGISTRATION_BURST + 5) {
+                // Requests one second apart, crossing epoch minute boundaries.
+                if b.try_take(start + i.min(per_token - 1)) {
+                    granted += 1;
+                }
+            }
+            assert_eq!(granted, NEW_REGISTRATION_BURST, "start {start}");
+        }
     }
 }
