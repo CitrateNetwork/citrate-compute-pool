@@ -760,3 +760,28 @@ fn pba_l3b_001_the_vouched_list_parses_strictly() {
     assert!(parse_address_list("0x1234").is_err());
     assert!(parse_address_list("0xzz00000000000000000000000000000000000000").is_err());
 }
+
+/// Kills cargo-mutants survivors: a lease that has already lapsed (expiry ==
+/// now) does not protect its holder's source slot, and `attempts` counts leases.
+#[test]
+fn pba_l3b_001_a_lapsed_lease_does_not_protect_a_source_slot() {
+    let mut s = State::default();
+    s.policy.max_workers_per_source = 1;
+    s.add_job(job("j", Capability::Probe));
+    s.register(&worker_probe(addr(1)), "a", 0).unwrap();
+    let later = SOURCE_SLOT_STALE_SECS;
+    s.jobs.get_mut(&JobId("j".into())).unwrap().status = JobStatus::Leased {
+        worker: addr(1),
+        expires_at: later,
+        deadline: later,
+    };
+    s.register(&worker_probe(addr(2)), "a", later).unwrap();
+    assert!(!s.workers.contains_key(&addr(1)));
+}
+
+#[test]
+fn pba_l3b_001_each_lease_counts_one_attempt() {
+    let mut s = with(&[("j", Capability::Probe)], &[(1, Capability::Probe)]);
+    s.lease(addr(1), 0).unwrap();
+    assert_eq!(s.jobs[&JobId("j".into())].attempts, 1);
+}

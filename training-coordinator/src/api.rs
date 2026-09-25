@@ -404,3 +404,29 @@ fn unix_now_nanos() -> u64 {
         .map(|d| d.as_nanos() as u64)
         .unwrap_or(0)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// PBA-L3b-001: the new-identity budget spends its burst, then earns one
+    /// token per `3600 / NEW_REGISTRATIONS_PER_HOUR` seconds, never above the burst.
+    #[test]
+    fn registration_budget_refills_at_the_configured_rate() {
+        let per_token = 3_600 / NEW_REGISTRATIONS_PER_HOUR;
+        let mut b = RegistrationBudget::new();
+        for _ in 0..NEW_REGISTRATION_BURST {
+            assert!(b.try_take(0));
+        }
+        assert!(!b.try_take(0), "burst exhausted");
+        assert!(!b.try_take(per_token - 1), "no token before one interval");
+        assert!(b.try_take(per_token), "one token after one interval");
+        assert!(!b.try_take(per_token), "and only one");
+        // A long idle period refills to the burst, not beyond.
+        let later = per_token * 10 * NEW_REGISTRATION_BURST;
+        for _ in 0..NEW_REGISTRATION_BURST {
+            assert!(b.try_take(later));
+        }
+        assert!(!b.try_take(later));
+    }
+}
