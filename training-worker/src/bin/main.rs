@@ -65,8 +65,27 @@ use citrate_training_worker::{
 /// exhaust memory.
 const SEEN_EVENTS_CAP: usize = 10_000;
 
-#[tokio::main]
-async fn main() -> ExitCode {
+/// Load the wallet before the Tokio runtime (and its worker threads) exists:
+/// `Wallet::from_env` removes the secret from the environment, and
+/// `std::env::remove_var` is only sound while the process is single-threaded
+/// (PBA-L4-010).
+fn main() -> ExitCode {
+    let wallet = Wallet::from_env();
+    match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => rt.block_on(async_main(wallet)),
+        Err(e) => {
+            eprintln!("could not start the async runtime: {e}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+async fn async_main(
+    wallet: Result<Wallet, citrate_training_worker::wallet::WalletError>,
+) -> ExitCode {
     init_tracing();
 
     let mode = match env::var("CITRATE_WORKER_MODE").as_deref() {
@@ -85,7 +104,7 @@ async fn main() -> ExitCode {
         }
     };
 
-    let wallet = match Wallet::from_env() {
+    let wallet = match wallet {
         Ok(w) => w,
         Err(e) => {
             eprintln!("wallet load failed: {}", e);

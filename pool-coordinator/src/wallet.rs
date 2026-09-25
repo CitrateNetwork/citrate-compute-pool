@@ -185,10 +185,11 @@ impl Wallet {
     pub fn from_env() -> Result<Self, WalletError> {
         // BEGIN SHARED-KEYSTORE (PBA-L4-010)
         if let Ok(path) = std::env::var(ENV_KEYSTORE_PATH) {
-            let passphrase =
-                take_env_secret(ENV_KEYSTORE_PASSPHRASE).ok_or(WalletError::MissingPassphrase)?;
-            // Never leave a raw key behind next to a keystore.
+            let passphrase = take_env_secret(ENV_KEYSTORE_PASSPHRASE);
+            // Never leave a raw key behind next to a keystore, even when the
+            // passphrase is missing and this returns an error.
             drop(take_env_secret(ENV_PRIVATE_KEY_HEX));
+            let passphrase = passphrase.ok_or(WalletError::MissingPassphrase)?;
             return Self::from_keystore(&path, &passphrase);
         }
         if let Some(hex_key) = take_env_secret(ENV_PRIVATE_KEY_HEX) {
@@ -764,6 +765,18 @@ mod tests {
         assert!(
             std::env::var_os(ENV_PRIVATE_KEY_HEX).is_none(),
             "a raw key set alongside a keystore must be cleared too"
+        );
+        // Keystore path without a passphrase: an error, and a raw key set
+        // alongside is still cleared.
+        std::env::remove_var(ENV_KEYSTORE_PASSPHRASE);
+        std::env::set_var(ENV_PRIVATE_KEY_HEX, TEST_HEX);
+        assert!(matches!(
+            Wallet::from_env(),
+            Err(WalletError::MissingPassphrase)
+        ));
+        assert!(
+            std::env::var_os(ENV_PRIVATE_KEY_HEX).is_none(),
+            "a raw key must be cleared even when the keystore load fails"
         );
         std::env::remove_var(ENV_KEYSTORE_PATH);
         let _ = std::fs::remove_file(path);

@@ -132,8 +132,21 @@ impl Executor {
     }
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+/// Load the wallet before the Tokio runtime (and its worker threads) exists:
+/// `Wallet::from_env` removes the secret from the environment, and
+/// `std::env::remove_var` is only sound while the process is single-threaded
+/// (PBA-L4-010).
+fn main() -> anyhow::Result<()> {
+    let wallet = Wallet::from_env();
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(async_main(wallet))
+}
+
+async fn async_main(
+    wallet: Result<Wallet, citrate_training_worker::wallet::WalletError>,
+) -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
@@ -152,7 +165,7 @@ async fn main() -> anyhow::Result<()> {
     })?;
 
     // Same key the worker transacts with, so a member has ONE identity.
-    let wallet = Wallet::from_env()?;
+    let wallet = wallet?;
     let worker_id = wallet.address();
     let client = CoordinatorClient::new(&url, wallet);
     tracing::info!(worker = ?worker_id, coordinator = %url, "starting");
