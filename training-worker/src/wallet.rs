@@ -7,7 +7,10 @@
 //! the Web3 SSv3 keystore format — a keystore created by the pool-
 //! coordinator daemon must unlock under the training-worker daemon
 //! and vice versa. If you edit signing or keystore handling in one
-//! copy, edit it in the other until the unification lands.
+//! copy, edit it in the other until the unification lands. The
+//! `SHARED-KEYSTORE` regions (keystore decryption, KDF floor, env-secret
+//! handling) are enforced byte-identical by
+//! `the_two_wallet_copies_share_one_keystore_implementation` (PBA-L4-010).
 //!
 //! Loads a secp256k1 private key and provides EIP-1559 transaction
 //! signing. Two load paths:
@@ -62,6 +65,69 @@ struct KeystoreKdfParams {
     dklen: u32,
 }
 
+const ENV_KEYSTORE_PATH: &str = "CITRATE_TRAINING_KEYSTORE_PATH";
+const ENV_KEYSTORE_PASSPHRASE: &str = "CITRATE_TRAINING_KEYSTORE_PASSPHRASE";
+const ENV_PRIVATE_KEY_HEX: &str = "CITRATE_TRAINING_PRIVATE_KEY_HEX";
+
+// BEGIN SHARED-KEYSTORE (PBA-L4-010) -- keep byte-identical with the other
+// copy (pool-coordinator/src/wallet.rs <-> training-worker/src/wallet.rs); the
+// `the_two_wallet_copies_share_one_keystore_implementation` test enforces it.
+
+/// Hard floor for the keystore's PBKDF2-HMAC-SHA256 iteration count. Below it
+/// the passphrase is close to unprotected against an offline guess (at `c=1`
+/// one GPU tries billions of passphrases a second), so such a keystore is
+/// refused rather than loaded with a warning. 10,000 is the oldest count any
+/// Citrate SDK has minted; the modern floor below only warns.
+pub const MIN_PBKDF2_ITERS: u32 = 10_000;
+
+/// Modern floor for PBKDF2-HMAC-SHA256 iteration counts (OWASP 2023
+/// guidance is 600k for HMAC-SHA256). Loading a legacy keystore below
+/// this floor is still permitted (backward compat, ENCRYPT-S1 WP-10)
+/// but emits a soft warning so operators know to re-mint at rotation.
+const MIN_MODERN_PBKDF2_ITERS: u32 = 600_000;
+
+/// Read a secret from the environment and remove it (PBA-L4-010).
+///
+/// The value is held in `Zeroizing` so this copy is wiped on drop, and the
+/// variable is removed so it is not inherited by child processes or read again
+/// later by anything else in the process. This does not scrub the kernel's
+/// copy of the initial environment (`/proc/<pid>/environ` on Linux); prefer the
+/// keystore path, and the raw-hex path only on testnets. Call it at startup,
+/// before other threads read the environment.
+fn take_env_secret(name: &str) -> Option<Zeroizing<String>> {
+    let value = std::env::var(name).ok().map(Zeroizing::new);
+    if value.is_some() {
+        std::env::remove_var(name);
+    }
+    value
+}
+
+/// Refuse a keystore whose KDF cost is below [`MIN_PBKDF2_ITERS`]; warn below
+/// the modern floor.
+fn check_kdf_cost(iterations: u32) -> Result<(), WalletError> {
+    if iterations < MIN_PBKDF2_ITERS {
+        return Err(WalletError::WeakKdf {
+            iterations,
+            floor: MIN_PBKDF2_ITERS,
+        });
+    }
+    // ENCRYPT-S1 WP-10: non-breaking hardening signal. Legacy
+    // keystores below the modern iteration floor still load (we do
+    // NOT reject — that would break backward compat), but we warn
+    // so the key gets re-minted with stronger params at rotation.
+    if iterations < MIN_MODERN_PBKDF2_ITERS {
+        tracing::warn!(
+            iterations,
+            floor = MIN_MODERN_PBKDF2_ITERS,
+            "keystore uses a below-modern PBKDF2 iteration count; \
+             re-mint with scrypt + AES-256 at next key rotation \
+             (ENCRYPT-S1 WP-10)"
+        );
+    }
+    Ok(())
+}
+// END SHARED-KEYSTORE
+
 #[derive(Error, Debug)]
 pub enum WalletError {
     #[error("private key hex must be 64 characters (got {0})")]
@@ -94,6 +160,8 @@ pub enum WalletError {
     UnsupportedKdfDklen(u32),
     #[error("invalid passphrase")]
     InvalidPassphrase,
+    #[error("keystore PBKDF2 iteration count {iterations} is below the floor of {floor}; re-mint the keystore")]
+    WeakKdf { iterations: u32, floor: u32 },
     #[error("sign: {0}")]
     Sign(String),
 }
@@ -125,15 +193,19 @@ impl Wallet {
     /// Returns `Err(WalletError::NoKeySource)` if neither variable
     /// set is present.
     pub fn from_env() -> Result<Self, WalletError> {
-        if let Ok(path) = std::env::var("CITRATE_TRAINING_KEYSTORE_PATH") {
-            let passphrase = std::env::var("CITRATE_TRAINING_KEYSTORE_PASSPHRASE")
-                .map_err(|_| WalletError::MissingPassphrase)?;
+        // BEGIN SHARED-KEYSTORE (PBA-L4-010)
+        if let Ok(path) = std::env::var(ENV_KEYSTORE_PATH) {
+            let passphrase =
+                take_env_secret(ENV_KEYSTORE_PASSPHRASE).ok_or(WalletError::MissingPassphrase)?;
+            // Never leave a raw key behind next to a keystore.
+            drop(take_env_secret(ENV_PRIVATE_KEY_HEX));
             return Self::from_keystore(&path, &passphrase);
         }
-        if let Ok(hex_key) = std::env::var("CITRATE_TRAINING_PRIVATE_KEY_HEX") {
+        if let Some(hex_key) = take_env_secret(ENV_PRIVATE_KEY_HEX) {
             return Self::from_hex(&hex_key);
         }
         Err(WalletError::NoKeySource)
+        // END SHARED-KEYSTORE
     }
 
     /// Load from a Web3 Secret Storage v3 keystore file. Matches the
@@ -145,6 +217,7 @@ impl Wallet {
     /// Keystores are portable: a key created in the JS CitrateWallet
     /// can be unlocked here and vice versa.
     pub fn from_keystore(path: &str, passphrase: &str) -> Result<Self, WalletError> {
+        // BEGIN SHARED-KEYSTORE (PBA-L4-010)
         let raw = std::fs::read_to_string(path)
             .map_err(|e| WalletError::KeystoreIo(format!("read {}: {}", path, e)))?;
         let file: KeystoreFile =
@@ -182,6 +255,9 @@ impl Wallet {
                 iv.len()
             )));
         }
+
+        // PBA-L4-010: hard floor (refuse), then the modern floor (warn).
+        check_kdf_cost(crypto.kdfparams.c)?;
 
         // 1. Derive 32-byte key via PBKDF2-HMAC-SHA256.
         // CP-B-005: the derived key, the decrypted plaintext and the hex round-
@@ -241,6 +317,7 @@ impl Wallet {
             wallet.verify_address(declared_addr)?;
         }
         Ok(wallet)
+        // END SHARED-KEYSTORE
     }
 
     /// Build from a hex-encoded private key.
@@ -532,13 +609,16 @@ mod tests {
     /// given passphrase. Mirrors the SDK's W-01 encryption pipeline
     /// so test fixtures are valid at both ends.
     fn build_keystore_json(passphrase: &str) -> String {
+        build_keystore_json_with_cost(passphrase, MIN_PBKDF2_ITERS)
+    }
+
+    fn build_keystore_json_with_cost(passphrase: &str, c: u32) -> String {
         use aes::cipher::{KeyIvInit, StreamCipher};
         type Aes128Ctr = ctr::Ctr128BE<aes::Aes128>;
 
         // Deterministic salt + iv (fixed values for test repeatability).
         let salt = [0x11u8; 32];
         let iv = [0x22u8; 16];
-        let c = 1024u32; // low for tests
 
         // Derive key.
         let mut derived = [0u8; 32];
@@ -664,5 +744,96 @@ mod tests {
         let signed1 = w.sign_eip1559(&tx).expect("sign1");
         let signed2 = w.sign_eip1559(&tx).expect("sign2");
         assert_eq!(tx_hash_of_signed(&signed1), tx_hash_of_signed(&signed2));
+    }
+
+    // ── PBA-L4-010 ──────────────────────────────────────────────────
+
+    #[test]
+    fn pba_l4_010_a_keystore_below_the_kdf_floor_is_refused() {
+        for c in [1u32, 1024, MIN_PBKDF2_ITERS - 1] {
+            let mut path = std::env::temp_dir();
+            path.push(format!(
+                "citrate-weak-kdf-{}-{}.json",
+                std::process::id(),
+                c
+            ));
+            std::fs::write(&path, build_keystore_json_with_cost("pw", c)).expect("write");
+            let err = Wallet::from_keystore(path.to_str().unwrap(), "pw")
+                .expect_err("a keystore below the KDF floor must be refused");
+            assert!(
+                matches!(err, WalletError::WeakKdf { iterations, floor }
+                    if iterations == c && floor == MIN_PBKDF2_ITERS),
+                "c={c}: {err:?}"
+            );
+            let _ = std::fs::remove_file(path);
+        }
+        // At the floor it loads.
+        let path = write_keystore("pw");
+        assert!(Wallet::from_keystore(path.to_str().unwrap(), "pw").is_ok());
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// One test (not two) because both halves mutate the same process env vars.
+    #[test]
+    fn pba_l4_010_from_env_removes_the_secret_from_the_environment() {
+        std::env::remove_var(ENV_KEYSTORE_PATH);
+        std::env::set_var(ENV_PRIVATE_KEY_HEX, TEST_HEX);
+        let w = Wallet::from_env().expect("load from raw hex env");
+        assert_eq!(w.address(), Wallet::from_hex(TEST_HEX).unwrap().address());
+        assert!(
+            std::env::var_os(ENV_PRIVATE_KEY_HEX).is_none(),
+            "the raw key must not stay in the environment after load"
+        );
+
+        let path = write_keystore("hunter2");
+        std::env::set_var(ENV_KEYSTORE_PATH, &path);
+        std::env::set_var(ENV_KEYSTORE_PASSPHRASE, "hunter2");
+        std::env::set_var(ENV_PRIVATE_KEY_HEX, TEST_HEX);
+        Wallet::from_env().expect("load from keystore env");
+        assert!(
+            std::env::var_os(ENV_KEYSTORE_PASSPHRASE).is_none(),
+            "the passphrase must not stay in the environment after load"
+        );
+        assert!(
+            std::env::var_os(ENV_PRIVATE_KEY_HEX).is_none(),
+            "a raw key set alongside a keystore must be cleared too"
+        );
+        std::env::remove_var(ENV_KEYSTORE_PATH);
+        let _ = std::fs::remove_file(path);
+        assert!(matches!(Wallet::from_env(), Err(WalletError::NoKeySource)));
+    }
+
+    /// PBA-L4-010: the two wallet copies diverged once (only one warned about a
+    /// weak KDF). Until they are unified into one crate, the keystore and
+    /// env-secret code must be byte-identical between them.
+    #[test]
+    fn the_two_wallet_copies_share_one_keystore_implementation() {
+        fn shared(src: &str) -> String {
+            let mut out = String::new();
+            let mut on = false;
+            for line in src.lines() {
+                if line.trim_start().starts_with("// BEGIN SHARED-KEYSTORE") {
+                    on = true;
+                }
+                if on {
+                    out.push_str(line);
+                    out.push('\n');
+                }
+                if line.trim_start().starts_with("// END SHARED-KEYSTORE") {
+                    on = false;
+                }
+            }
+            out
+        }
+        let here = shared(include_str!("wallet.rs"));
+        let there = shared(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../pool-coordinator/src/wallet.rs"
+        )));
+        assert!(here.matches("BEGIN SHARED-KEYSTORE").count() >= 3);
+        assert_eq!(
+            here, there,
+            "wallet.rs copies diverged inside SHARED-KEYSTORE"
+        );
     }
 }
