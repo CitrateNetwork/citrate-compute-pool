@@ -77,6 +77,12 @@ impl WalletSigner {
 
     /// Load from the same env the worker already uses, so the signing identity
     /// and the transacting identity cannot drift apart.
+    ///
+    /// Like [`Wallet::from_env`] this removes the secret from the environment,
+    /// which is only sound while the process is single-threaded: call it
+    /// before starting any thread or async runtime. To also report load
+    /// warnings once logging is up, use [`Wallet::from_env`], call
+    /// [`Wallet::log_load_warnings`], then [`WalletSigner::new`].
     pub fn from_env() -> Result<Self, crate::wallet::WalletError> {
         Ok(Self::new(Wallet::from_env()?))
     }

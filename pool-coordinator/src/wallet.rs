@@ -96,9 +96,11 @@ fn take_env_secret(name: &str) -> Option<Zeroizing<String>> {
     value
 }
 
-/// Refuse a keystore whose KDF cost is below [`MIN_PBKDF2_ITERS`]; warn below
-/// the modern floor.
-fn check_kdf_cost(iterations: u32) -> Result<(), WalletError> {
+/// Refuse a keystore whose KDF cost is below [`MIN_PBKDF2_ITERS`]. Below the
+/// modern floor it loads, and the count is returned so the caller can warn once
+/// logging is up (a key is loaded before the tracing subscriber exists, so a
+/// warning emitted here would be lost).
+fn check_kdf_cost(iterations: u32) -> Result<Option<u32>, WalletError> {
     if iterations < MIN_PBKDF2_ITERS {
         return Err(WalletError::WeakKdf {
             iterations,
@@ -107,18 +109,9 @@ fn check_kdf_cost(iterations: u32) -> Result<(), WalletError> {
     }
     // ENCRYPT-S1 WP-10: non-breaking hardening signal. Legacy
     // keystores below the modern iteration floor still load (we do
-    // NOT reject — that would break backward compat), but we warn
-    // so the key gets re-minted with stronger params at rotation.
-    if iterations < MIN_MODERN_PBKDF2_ITERS {
-        tracing::warn!(
-            iterations,
-            floor = MIN_MODERN_PBKDF2_ITERS,
-            "keystore uses a below-modern PBKDF2 iteration count; \
-             re-mint with scrypt + AES-256 at next key rotation \
-             (ENCRYPT-S1 WP-10)"
-        );
-    }
-    Ok(())
+    // NOT reject — that would break backward compat); the caller warns
+    // (Wallet::log_load_warnings) so the key gets re-minted at rotation.
+    Ok((iterations < MIN_MODERN_PBKDF2_ITERS).then_some(iterations))
 }
 // END SHARED-KEYSTORE
 
@@ -162,6 +155,9 @@ pub enum WalletError {
 pub struct Wallet {
     signing_key: SigningKey,
     address: H160,
+    /// PBKDF2 iteration count of the keystore this was loaded from, when it
+    /// is below the modern floor. Reported by [`Wallet::log_load_warnings`].
+    below_modern_kdf: Option<u32>,
 }
 
 impl std::fmt::Debug for Wallet {
@@ -182,6 +178,10 @@ impl Wallet {
     ///
     /// Returns `Err(WalletError::NoKeySource)` if neither variable
     /// set is present.
+    ///
+    /// Removes the secret variables from the environment, which is only sound
+    /// while the process is single-threaded: call it before starting any
+    /// thread or async runtime.
     pub fn from_env() -> Result<Self, WalletError> {
         // BEGIN SHARED-KEYSTORE (PBA-L4-010)
         if let Ok(path) = std::env::var(ENV_KEYSTORE_PATH) {
@@ -275,7 +275,7 @@ impl Wallet {
         }
 
         // PBA-L4-010: hard floor (refuse), then the modern floor (warn).
-        check_kdf_cost(crypto.kdfparams.c)?;
+        let below_modern_kdf = check_kdf_cost(crypto.kdfparams.c)?;
 
         // 1. Derive 32-byte key via PBKDF2-HMAC-SHA256.
         // CP-B-005: the derived key, the decrypted plaintext and the hex round-
@@ -325,7 +325,8 @@ impl Wallet {
 
         // 4. Construct wallet + verify keystore-declared address.
         let hex_key = Zeroizing::new(hex::encode(&plaintext[..]));
-        let wallet = Self::from_hex(&hex_key)?;
+        let mut wallet = Self::from_hex(&hex_key)?;
+        wallet.below_modern_kdf = below_modern_kdf;
         if let Some(declared) = file.address.as_deref() {
             let cleaned = declared.trim().trim_start_matches("0x");
             let declared_addr = H160::from_slice(
@@ -336,6 +337,26 @@ impl Wallet {
         }
         Ok(wallet)
         // END SHARED-KEYSTORE
+    }
+
+    /// The keystore's PBKDF2 iteration count if it is below the modern floor.
+    pub fn below_modern_kdf(&self) -> Option<u32> {
+        self.below_modern_kdf
+    }
+
+    /// Emit the warnings gathered while loading. Call once logging is
+    /// initialised: the wallet is loaded before the tracing subscriber (and
+    /// before any thread) exists, so nothing can be logged at load time.
+    pub fn log_load_warnings(&self) {
+        if let Some(iterations) = self.below_modern_kdf {
+            tracing::warn!(
+                iterations,
+                floor = MIN_MODERN_PBKDF2_ITERS,
+                "keystore uses a below-modern PBKDF2 iteration count; \
+                 re-mint with scrypt + AES-256 at next key rotation \
+                 (ENCRYPT-S1 WP-10)"
+            );
+        }
     }
 
     /// Build from a hex-encoded private key.
@@ -357,6 +378,7 @@ impl Wallet {
         Ok(Self {
             signing_key,
             address,
+            below_modern_kdf: None,
         })
     }
 
@@ -781,5 +803,24 @@ mod tests {
         std::env::remove_var(ENV_KEYSTORE_PATH);
         let _ = std::fs::remove_file(path);
         assert!(matches!(Wallet::from_env(), Err(WalletError::NoKeySource)));
+    }
+
+    #[test]
+    fn a_below_modern_keystore_is_reported_after_load() {
+        assert_eq!(
+            check_kdf_cost(MIN_PBKDF2_ITERS).ok(),
+            Some(Some(MIN_PBKDF2_ITERS))
+        );
+        assert_eq!(
+            check_kdf_cost(MIN_MODERN_PBKDF2_ITERS - 1).ok(),
+            Some(Some(MIN_MODERN_PBKDF2_ITERS - 1))
+        );
+        assert_eq!(check_kdf_cost(MIN_MODERN_PBKDF2_ITERS).ok(), Some(None));
+        let path = write_keystore("pw");
+        let w = Wallet::from_keystore(path.to_str().unwrap(), "pw").expect("load");
+        assert_eq!(w.below_modern_kdf(), Some(MIN_PBKDF2_ITERS));
+        w.log_load_warnings();
+        assert_eq!(Wallet::from_hex(TEST_HEX).unwrap().below_modern_kdf(), None);
+        let _ = std::fs::remove_file(path);
     }
 }
