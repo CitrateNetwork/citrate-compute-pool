@@ -60,6 +60,9 @@ impl Store {
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "path has no parent"))?;
         fs::create_dir_all(dir)?;
 
+        // PBA-L3b-I02 (CodeQL path-injection lead, refuted): `self.path` comes
+        // only from the operator's CITRATE_COORDINATOR_STATE (main.rs); no
+        // request data ever reaches it.
         // Same directory, so the rename below stays within one filesystem.
         let tmp = self.path.with_extension("tmp");
         {
