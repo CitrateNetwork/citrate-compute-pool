@@ -27,10 +27,13 @@ use ethereum_types::H160;
 use parking_lot::Mutex;
 use serde::Serialize;
 
-/// Bound on the lease-replay set, mirroring the pool-coordinator's dedup cap. A
-/// captured lease request is only usable inside the freshness window, so the set
-/// only needs to remember that window's worth of (signer, timestamp) pairs.
-const LEASE_SEEN_CAP: usize = 10_000;
+/// Bound on the lease/heartbeat seen-set. A signed request is only usable
+/// inside the freshness window, so the set only needs that window's
+/// (signer, timestamp) pairs, and only for registered signers (a replayed
+/// request from an unknown key does nothing). Sized for a full registry
+/// polling at its fastest; out-of-window entries are pruned first and an
+/// in-window entry is never evicted (the request is refused instead).
+const LEASE_SEEN_CAP: usize = 250_000;
 
 /// PBA-L3b-001: new identities admitted per hour, across all sources. Refreshing
 /// an existing registration is free; only a key the coordinator has never seen
@@ -86,6 +89,21 @@ use crate::state::{LeaseError, Policy, RegisterError, State};
 use crate::store::Store;
 use crate::submission::{recover_submitter, SignedSubmission};
 
+/// Why a registration was refused inside the state lock.
+enum RegFail {
+    Replay,
+    TooSoon,
+    Budget,
+    Registry(RegisterError),
+}
+
+/// Why a signed request was refused by the seen-set.
+#[derive(Debug, PartialEq)]
+enum Seen {
+    Replay,
+    Full,
+}
+
 pub struct Coordinator {
     state: Mutex<State>,
     store: Store,
@@ -127,20 +145,23 @@ impl Coordinator {
         })
     }
 
-    /// Record that `(who, timestamp)` has asked for a lease. Returns `false` if it
-    /// was already recorded — an exact replay of a captured request, which must be
-    /// refused. Bounded like the pool-coordinator's dedup set: when full, drop the
-    /// oldest-observed half (a brute-force but deterministic eviction).
-    fn note_lease_seen(&self, who: H160, timestamp: u64) -> bool {
+    /// Record that `(who, timestamp)` has been used. `Replay` if it already
+    /// was. When the set is full, entries outside the freshness window are
+    /// dropped first; if it is still full of in-window entries the request is
+    /// refused (`Full`) rather than forgetting one that could be replayed.
+    fn note_seen(&self, who: H160, timestamp: u64, now_nanos: u64) -> Result<(), Seen> {
         let mut set = self.lease_seen.lock();
+        if set.contains(&(who, timestamp)) {
+            return Err(Seen::Replay);
+        }
         if set.len() >= LEASE_SEEN_CAP {
-            let drop_count = set.len() / 2;
-            let to_remove: Vec<_> = set.iter().take(drop_count).cloned().collect();
-            for k in to_remove {
-                set.remove(&k);
+            set.retain(|(_, ts)| ts.abs_diff(now_nanos) <= LEASE_FRESHNESS_NANOS);
+            if set.len() >= LEASE_SEEN_CAP {
+                return Err(Seen::Full);
             }
         }
-        set.insert((who, timestamp))
+        set.insert((who, timestamp));
+        Ok(())
     }
 
     /// Run `f`, then persist. If persisting fails the change is still live in
@@ -155,7 +176,11 @@ impl Coordinator {
         let mut g = self.state.lock();
         let out = f(&mut g);
         if g.take_dirty() {
-            self.store.save(&g)?;
+            if let Err(e) = self.store.save(&g) {
+                // Not persisted: keep it pending so the next request retries.
+                g.mark_dirty();
+                return Err(e);
+            }
         }
         Ok(out)
     }
@@ -243,6 +268,12 @@ async fn register(
 ) -> Result<Json<RegisterResponse>, ApiError> {
     // A registration is bound to the moment it was signed, like a lease or a
     // heartbeat: stale or repeated bodies are refused.
+    if att.timestamp == 0 {
+        return Err(err(
+            StatusCode::UPGRADE_REQUIRED,
+            "worker too old: registration requires a signed timestamp; upgrade the worker",
+        ));
+    }
     if unix_now_nanos().abs_diff(att.timestamp) > LEASE_FRESHNESS_NANOS {
         return Err(err(
             StatusCode::UNAUTHORIZED,
@@ -250,27 +281,38 @@ async fn register(
         ));
     }
     let w = attestation::verify(&att).map_err(|e| err(StatusCode::BAD_REQUEST, e.to_string()))?;
-    if !c.note_lease_seen(w.id, att.timestamp) {
-        return Err(err(
-            StatusCode::UNAUTHORIZED,
-            "registration already used (replay)",
-        ));
-    }
+    let ts = att.timestamp;
     let source = source_of(peer.map(|ConnectInfo(a)| a), &headers);
     let now = unix_now();
     let (c2, w2, source2) = (Arc::clone(&c), w.clone(), source.clone());
     let granted = c
         .mutate_off_runtime(move |s| {
+            // Checks that change nothing come first, so a refused request
+            // never causes a save.
+            if s.registration_seen(w2.id, ts) {
+                return Err(RegFail::Replay);
+            }
+            if let Some(known) = s.workers.get(&w2.id) {
+                if now
+                    < known
+                        .last_registration
+                        .saturating_add(s.policy.register_refresh_secs)
+                {
+                    return Err(RegFail::TooSoon);
+                }
+            }
             // PBA-L3b-001: a never-seen identity spends from the global budget,
             // but only once its source is known to have room, so a full source
             // cannot drain the budget and lock out every other newcomer.
             if !s.workers.contains_key(&w2.id) && !s.policy.is_trusted(&w2.id) {
-                s.admits_new(&w2.id, &source2, now).map_err(Some)?;
+                s.admits_new(&w2.id, &source2, now)
+                    .map_err(RegFail::Registry)?;
                 if !c2.new_registrations.lock().try_take(now) {
-                    return Err(None);
+                    return Err(RegFail::Budget);
                 }
             }
-            s.register(&w2, &source2, now).map_err(Some)
+            s.note_registration(w2.id, ts, unix_now_nanos());
+            s.register(&w2, &source2, now).map_err(RegFail::Registry)
         })
         .await
         .map_err(|e| {
@@ -279,12 +321,20 @@ async fn register(
                 format!("could not persist: {e}"),
             )
         })?
-        .map_err(|e: Option<RegisterError>| match e {
-            None => err(
+        .map_err(|e| match e {
+            RegFail::Budget => err(
                 StatusCode::TOO_MANY_REQUESTS,
                 "too many new registrations; retry later",
             ),
-            Some(e) => err(StatusCode::TOO_MANY_REQUESTS, e.to_string()),
+            RegFail::TooSoon => err(
+                StatusCode::TOO_MANY_REQUESTS,
+                "registered too recently; retry later",
+            ),
+            RegFail::Replay => err(
+                StatusCode::UNAUTHORIZED,
+                "registration already used (replay)",
+            ),
+            RegFail::Registry(e) => err(StatusCode::TOO_MANY_REQUESTS, e.to_string()),
         })?;
     Ok(Json(RegisterResponse {
         worker: format!("{:?}", w.id),
@@ -308,11 +358,24 @@ fn authenticate(
     }
     let who = citrate_training_worker::wallet::Wallet::recover_address(digest, signature)
         .map_err(|_| err(StatusCode::UNAUTHORIZED, "signature does not recover"))?;
-    if !c.note_lease_seen(who, timestamp) {
-        return Err(err(
-            StatusCode::UNAUTHORIZED,
-            "request already used (replay)",
-        ));
+    // Only a registered signer's requests can do anything, so only they are
+    // remembered; an unknown key cannot fill the seen-set.
+    if c.state.lock().workers.contains_key(&who) {
+        match c.note_seen(who, timestamp, unix_now_nanos()) {
+            Ok(()) => {}
+            Err(Seen::Replay) => {
+                return Err(err(
+                    StatusCode::UNAUTHORIZED,
+                    "request already used (replay)",
+                ))
+            }
+            Err(Seen::Full) => {
+                return Err(err(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "too many requests in flight; retry shortly",
+                ))
+            }
+        }
     }
     Ok(who)
 }
@@ -463,6 +526,43 @@ fn unix_now_nanos() -> u64 {
 
 #[cfg(test)]
 mod tests {
+    use crate::store::Store;
+
+    fn coord(name: &str) -> Coordinator {
+        let dir =
+            std::env::temp_dir().join(format!("citrate-coord-seen-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        Coordinator::open(Store::new(dir.join("state.json"))).unwrap()
+    }
+
+    /// The seen-set never evicts an entry still inside the freshness window:
+    /// out-of-window entries are dropped first, and if the set is still full
+    /// the request is refused instead.
+    #[test]
+    fn seen_set_keeps_in_window_entries() {
+        let c = coord("keep");
+        let now = 10 * LEASE_FRESHNESS_NANOS;
+        let a = H160::from_low_u64_be(1);
+        for i in 0..LEASE_SEEN_CAP as u64 {
+            assert_eq!(c.note_seen(a, now - i, now), Ok(()));
+        }
+        assert_eq!(
+            c.note_seen(a, now + 1, now),
+            Err(Seen::Full),
+            "full of in-window entries"
+        );
+        // Every earlier entry is still remembered.
+        assert_eq!(c.note_seen(a, now, now), Err(Seen::Replay));
+        assert_eq!(
+            c.note_seen(a, now - (LEASE_SEEN_CAP as u64 - 1), now),
+            Err(Seen::Replay)
+        );
+        // Once they fall out of the window they are pruned and room returns.
+        let later = now + 2 * LEASE_FRESHNESS_NANOS;
+        assert_eq!(c.note_seen(a, later, later), Ok(()));
+        assert!(c.lease_seen.lock().len() < 10);
+    }
     use super::*;
 
     /// PBA-L3b-001: the new-identity budget spends its burst, then earns one

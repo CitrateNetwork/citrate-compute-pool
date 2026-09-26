@@ -82,6 +82,13 @@ pub struct WorkerRecord {
     /// are not verified, so this grants no scheduling priority.
     #[serde(default)]
     pub delivered: u32,
+    /// Last registration (unix seconds); refreshes are throttled per key.
+    #[serde(default)]
+    pub last_registration: u64,
+    /// Last time this worker asked for work or heartbeated a lease (unix
+    /// seconds). A registration alone does not count.
+    #[serde(default)]
+    pub last_engaged: Option<u64>,
 }
 
 /// No-show history of a source group (PBA-L3b-001). Keys are free, a network
@@ -121,6 +128,10 @@ pub struct State {
     /// poll refreshing `last_seen` does not set it. See [`State::take_dirty`].
     #[serde(skip)]
     dirty: bool,
+    /// (signer, timestamp) of registrations accepted within the freshness
+    /// window. Persisted, so a restart does not make them acceptable again.
+    #[serde(default)]
+    pub recent_registrations: BTreeSet<(H160, u64)>,
 }
 
 /// How many unexpired leases one identity may hold at once (PBA-L3b-001). A
@@ -155,9 +166,21 @@ pub const LAPSE_HOLD_SECS: u64 = 900;
 /// vouched machine is running at all.
 pub const VOUCHED_ACTIVE_SECS: u64 = 3_600;
 
-/// Upper bound on the extended (vetted-only) reservation of a lapsed job,
-/// counted from the lapse.
-pub const RESERVATION_MAX_SECS: u64 = 30 * 86_400;
+/// Longest a lapsed job may stay reserved for vetted workers, whatever its
+/// lease length (see [`reservation_cap`]).
+pub const RESERVATION_MAX_SECS: u64 = 7 * 86_400;
+
+/// Default for [`Policy::register_refresh_secs`].
+pub const DEFAULT_REGISTER_REFRESH_SECS: u64 = 60;
+
+/// How long a lapsed job above the probe tier may stay reserved for vetted
+/// workers, counted from the lapse.
+/// `min(7 days, max(LAPSE_HOLD_SECS, 2 x lease_secs))`.
+pub fn reservation_cap(lease_secs: u64) -> u64 {
+    lease_secs
+        .saturating_mul(2)
+        .clamp(LAPSE_HOLD_SECS, RESERVATION_MAX_SECS)
+}
 
 /// Bound on the persisted `sources` map.
 pub const MAX_SOURCES: usize = MAX_WORKERS;
@@ -201,6 +224,8 @@ pub struct Policy {
     pub lease_window_secs: u64,
     /// See [`DEFAULT_MAX_LEASES_PER_SOURCE`].
     pub max_leases_per_source: usize,
+    /// Minimum seconds between two registrations of the same key.
+    pub register_refresh_secs: u64,
 }
 
 impl Default for Policy {
@@ -210,6 +235,7 @@ impl Default for Policy {
             open_tier: Capability::Probe,
             max_workers_per_source: DEFAULT_MAX_WORKERS_PER_SOURCE,
             max_leases_per_source: DEFAULT_MAX_LEASES_PER_SOURCE,
+            register_refresh_secs: DEFAULT_REGISTER_REFRESH_SECS,
             lease_window_secs:
                 citrate_training_worker::coordinator_protocol::LEASE_RENEW_WINDOW_SECS,
         }
@@ -330,10 +356,10 @@ impl State {
     ) -> Result<Capability, RegisterError> {
         let granted = self.policy.effective_capability(&w.id, w.capability);
         if let Some(e) = self.workers.get_mut(&w.id) {
-            let changed = e.capability != w.capability
-                || e.backend != w.backend
-                || e.dtype != w.dtype
-                || e.tokens_per_second != w.tokens_per_second;
+            // Only the claimed capability affects scheduling, so only it is
+            // worth a save; the descriptive fields ride along with the next one.
+            let changed = e.capability != w.capability;
+            e.last_registration = now;
             e.capability = w.capability;
             e.backend = w.backend.clone();
             e.dtype = w.dtype.clone();
@@ -375,6 +401,8 @@ impl State {
                 noshows: penalty.noshows,
                 cooldown_until: penalty.cooldown_until,
                 delivered: 0,
+                last_registration: now,
+                last_engaged: None,
             },
         );
         Ok(granted)
@@ -569,6 +597,7 @@ impl State {
         // PBA-L3b-001: a signed poll is proof of life, work or no work. Without
         // this an idle honest worker aged out and a registration flood evicted it.
         rec.last_seen = now;
+        rec.last_engaged = Some(now);
         let claimed = rec.capability;
         let group = source_group(&rec.source);
 
@@ -677,6 +706,28 @@ impl State {
     }
 
     /// Whether anything that must be persisted changed since the last call.
+    /// Record an accepted registration `(id, timestamp)`; `false` if it was
+    /// already accepted. Entries outside the freshness window are pruned.
+    pub fn note_registration(&mut self, id: H160, timestamp: u64, now_nanos: u64) -> bool {
+        let window = citrate_training_worker::coordinator_protocol::LEASE_FRESHNESS_NANOS;
+        self.recent_registrations
+            .retain(|(_, ts)| ts.abs_diff(now_nanos) <= window);
+        let inserted = self.recent_registrations.insert((id, timestamp));
+        self.dirty |= inserted;
+        inserted
+    }
+
+    /// Was `(id, timestamp)` already accepted? Non-mutating.
+    pub fn registration_seen(&self, id: H160, timestamp: u64) -> bool {
+        self.recent_registrations.contains(&(id, timestamp))
+    }
+
+    /// Mark the state as needing a save (e.g. after a failed save, so the
+    /// next request retries it).
+    pub fn mark_dirty(&mut self) {
+        self.dirty = true;
+    }
+
     pub fn take_dirty(&mut self) -> bool {
         std::mem::take(&mut self.dirty)
     }
@@ -705,9 +756,10 @@ impl State {
 
     /// Is a pending job reserved for vetted workers at `now`? After a lapse
     /// it is for [`LAPSE_HOLD_SECS`]. A job above the probe tier stays
-    /// reserved after that while a vetted worker that could take it is active
-    /// (seen within [`VOUCHED_ACTIVE_SECS`], claim satisfies the job, not in
-    /// its `failed_by`), up to [`RESERVATION_MAX_SECS`] after the lapse, so a
+    /// reserved after that while a vetted worker that could take it is engaged
+    /// (asked for work or heartbeated within [`VOUCHED_ACTIVE_SECS`]; a
+    /// registration alone does not count), its claim satisfies the job and it
+    /// is not in `failed_by`, up to [`reservation_cap`] after the lapse, so a
     /// busy vetted fleet is waited for rather than the job going back to the
     /// open pool. Probe jobs only get the plain hold.
     fn reserved_for_vouched(&self, rec: &JobRecord, now: u64) -> bool {
@@ -721,12 +773,13 @@ impl State {
             return false;
         }
         let lapsed_at = rec.held_until.saturating_sub(LAPSE_HOLD_SECS);
-        if now >= lapsed_at.saturating_add(RESERVATION_MAX_SECS) {
+        if now >= lapsed_at.saturating_add(reservation_cap(rec.spec.lease_secs)) {
             return false;
         }
         self.workers.iter().any(|(id, w)| {
             self.policy.is_trusted(id)
-                && now.saturating_sub(w.last_seen) < VOUCHED_ACTIVE_SECS
+                && w.last_engaged
+                    .is_some_and(|t| now.saturating_sub(t) < VOUCHED_ACTIVE_SECS)
                 && !rec.failed_by.contains(id)
                 && self
                     .policy
@@ -775,6 +828,7 @@ impl State {
         };
         if let Some(w) = self.workers.get_mut(&worker) {
             w.last_seen = now;
+            w.last_engaged = Some(now);
         }
         Ok(extended)
     }

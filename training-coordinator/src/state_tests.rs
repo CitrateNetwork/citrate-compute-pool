@@ -1288,9 +1288,11 @@ fn tier_revoke_out_of_policy_leases() {
     assert!(s.revoke_out_of_policy().is_empty());
 }
 
-/// Open federated tier: while a vouched worker is active (even busy on a long
-/// job), a lapsed job stays reserved for vouched workers instead of the hold
-/// expiring after 15 minutes and a fresh-network key re-taking it.
+/// Open federated tier: while a vetted worker is engaged (even busy on a long
+/// job), a lapsed job stays reserved for vetted workers for up to
+/// `reservation_cap(lease_secs)` instead of the hold expiring after 15 minutes,
+/// so a fresh-network key holds the job at most one lease in every
+/// `lease_secs + reservation_cap` window.
 #[test]
 fn tier_lapsed_job_waits_for_an_active_vouched_worker() {
     let mut s = State::default();
@@ -1302,7 +1304,7 @@ fn tier_lapsed_job_waits_for_an_active_vouched_worker() {
     assert_eq!(s.lease(honest, 0).unwrap().id.0, "a-x");
     s.add_job(fed_job("b-y"));
     let y = JobId("b-y".into());
-    let (mut now, mut k, mut squat_leases) = (0u64, 0u64, 0u32);
+    let (mut now, mut k, mut open_key_leases) = (0u64, 0u64, 0u32);
     let mut cur: Option<H160> = None;
     while now < 20 * 86_400 - 600 {
         let _ = s.renew(honest, &JobId("a-x".into()), now);
@@ -1314,19 +1316,18 @@ fn tier_lapsed_job_waits_for_an_active_vouched_worker() {
             if s.register(&h01_claim(a), &multi_network(k), now).is_ok() && s.lease(a, now).is_ok()
             {
                 cur = Some(a);
-                squat_leases += 1;
+                open_key_leases += 1;
             }
         }
         now += 300;
     }
-    assert_eq!(squat_leases, 1, "only the first lease before any lapse");
-    assert_eq!(s.jobs[&y].status, JobStatus::Pending, "reserved for the vouched worker");
-    // Once no vouched worker has been seen for VOUCHED_ACTIVE_SECS, the plain
-    // 15-minute hold applies again, so work does not stall forever.
-    let later = now + VOUCHED_ACTIVE_SECS + 1;
-    let a = H160::from_low_u64_be(99_999);
-    s.register(&h01_claim(a), "192.0.2.200", later).unwrap();
-    assert_eq!(s.lease(a, later).unwrap().id.0, "b-y");
+    let cycle = 172_800 + reservation_cap(172_800);
+    let bound = 1 + (20 * 86_400) / cycle as u32;
+    assert!(
+        open_key_leases <= bound,
+        "{open_key_leases} leases, bound {bound} (one per lease+reservation cycle)"
+    );
+    assert!(open_key_leases >= 2, "the reservation is bounded, not permanent");
 }
 
 /// Boundaries: a lapsed lease is reported as expired even when the policy
@@ -1352,10 +1353,17 @@ fn tier_boundaries() {
     let vouched = addr(0xC6);
     v.policy.trusted_h01.insert(vouched);
     v.register(&h01_claim(vouched), "192.0.2.1", 0).unwrap();
-    v.add_job(job("g", Capability::Federated));
+    // The vetted worker asks for work at 0 (nothing yet): it is engaged.
+    assert_eq!(v.lease(vouched, 0), Err(LeaseError::NothingAvailable));
+    v.add_job(fed_job("g"));
     let other = addr(0xC7);
     v.register(&h01_claim(other), "198.51.100.3", 0).unwrap();
     v.lease(other, 0).unwrap();
+    v.jobs.get_mut(&JobId("g".into())).unwrap().status = JobStatus::Leased {
+        worker: other,
+        expires_at: 100,
+        deadline: 100,
+    };
     v.expire_leases(100);
     let t = VOUCHED_ACTIVE_SECS; // vouched last seen at 0: exactly the window ago
     let fresh = addr(0xC8);
@@ -1505,8 +1513,8 @@ fn accounting_probe_jobs_return_to_the_open_pool_after_the_hold() {
     assert!(got <= 900 + LAPSE_HOLD_SECS + 300, "waited {got}");
 }
 
-/// The extended reservation is bounded: after RESERVATION_MAX_SECS past the
-/// lapse the job is open again even with an eligible vetted worker active.
+/// The extended reservation is bounded: `reservation_cap(lease_secs)` after
+/// the lapse the job is open again even with an eligible vetted worker busy.
 #[test]
 fn accounting_the_extended_reservation_is_bounded() {
     let mut s = State::default();
@@ -1519,7 +1527,7 @@ fn accounting_the_extended_reservation_is_bounded() {
     s.add_job(JobSpec::new("busy", Capability::Federated, serde_json::json!({})).with_lease_secs(90 * 86_400));
     s.register(&h01_claim(v), "198.51.100.35", 0).unwrap();
     s.lease(v, 0).unwrap();
-    s.add_job(job("f", Capability::Federated));
+    s.add_job(fed_job("f"));
     let q = addr(0x36);
     s.register(&h01_claim(q), "203.0.113.36", 0).unwrap();
     s.lease(q, 0).unwrap();
@@ -1531,7 +1539,7 @@ fn accounting_the_extended_reservation_is_bounded() {
     s.expire_leases(100);
     let open = addr(0x37);
     s.register(&h01_claim(open), "192.0.2.37", 100).unwrap();
-    let edge = 100 + RESERVATION_MAX_SECS;
+    let edge = 100 + reservation_cap(172_800);
     let _ = s.renew(v, &JobId("busy".into()), edge - 1);
     assert_eq!(s.lease(open, edge - 1), Err(LeaseError::NothingAvailable));
     let _ = s.renew(v, &JobId("busy".into()), edge);
@@ -1572,28 +1580,121 @@ fn accounting_only_real_changes_mark_the_state_dirty() {
     assert!(s.take_dirty(), "an expiry");
 }
 
-/// Each registration field a refresh can change marks the state dirty on its
-/// own, and a change on top of an already-dirty state keeps it dirty.
+/// A capability change marks the state dirty, and a refresh on top of an
+/// already-dirty state keeps it dirty.
 #[test]
 fn accounting_each_registration_field_marks_dirty() {
+    // Only the claimed capability decides scheduling, so only it forces a save.
     let base = worker_probe(addr(3));
-    let variants = [
-        RegisteredWorker { capability: Capability::Federated, ..base.clone() },
-        RegisteredWorker { backend: "candle-metal".into(), ..base.clone() },
-        RegisteredWorker { dtype: "bf16".into(), ..base.clone() },
-        RegisteredWorker { tokens_per_second: 2.0, ..base.clone() },
-    ];
-    for (i, v) in variants.iter().enumerate() {
-        let mut s = State::default();
-        s.register(&base, "z", 0).unwrap();
-        s.take_dirty();
-        s.register(v, "z", 1).unwrap();
-        assert!(s.take_dirty(), "variant {i}");
-    }
+    let mut s = State::default();
+    s.register(&base, "z", 0).unwrap();
+    s.take_dirty();
+    s.register(&RegisteredWorker { capability: Capability::Federated, ..base.clone() }, "z", 1)
+        .unwrap();
+    assert!(s.take_dirty());
     let mut s = State::default();
     s.register(&base, "z", 0).unwrap();
     s.take_dirty();
     s.add_job(job("j", Capability::Probe)); // dirty, not yet taken
-    s.register(&variants[0], "z", 1).unwrap();
-    assert!(s.take_dirty(), "a second change must not clear the flag");
+    s.register(&base, "z", 1).unwrap();
+    assert!(s.take_dirty(), "a no-op refresh must not clear the flag");
+}
+
+// ── Registration and reservation lifecycle ─────────────────────────────
+
+/// Accepted registrations are remembered across a save/load, and entries
+/// outside the freshness window are pruned.
+#[test]
+fn lifecycle_registration_set_is_persisted_and_pruned() {
+    let w = LEASE_FRESHNESS_FOR_TESTS;
+    let mut s = State::default();
+    assert!(s.note_registration(addr(1), 1_000 * w, 1_000 * w));
+    assert!(!s.note_registration(addr(1), 1_000 * w, 1_000 * w + 1), "repeat");
+    assert!(s.take_dirty(), "an accepted registration is persisted");
+    let reloaded: State = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+    let mut r = reloaded;
+    assert!(!r.note_registration(addr(1), 1_000 * w, 1_000 * w + 2), "repeat after reload");
+    // Much later, the old entry falls out of the window and is pruned.
+    assert!(r.note_registration(addr(2), 2_000 * w, 2_000 * w));
+    assert_eq!(r.recent_registrations.len(), 1);
+}
+
+const LEASE_FRESHNESS_FOR_TESTS: u64 =
+    citrate_training_worker::coordinator_protocol::LEASE_FRESHNESS_NANOS;
+
+#[test]
+fn lifecycle_reservation_cap_follows_the_lease_length() {
+    assert_eq!(reservation_cap(100), LAPSE_HOLD_SECS);
+    assert_eq!(reservation_cap(172_800), 2 * 172_800);
+    assert_eq!(reservation_cap(30 * 86_400), 7 * 86_400);
+    assert_eq!(reservation_cap(0), LAPSE_HOLD_SECS);
+}
+
+/// A vetted worker that only registers (never asks for work or heartbeats)
+/// does not keep a lapsed job reserved.
+#[test]
+fn lifecycle_registration_alone_does_not_keep_a_reservation() {
+    let mut s = State::default();
+    s.policy.open_tier = Capability::Federated;
+    let v = addr(0x91);
+    s.policy.trusted_h01.insert(v);
+    s.add_job(fed_job("f"));
+    let q = addr(0x92);
+    s.register(&h01_claim(q), "203.0.113.92", 0).unwrap();
+    s.lease(q, 0).unwrap();
+    s.jobs.get_mut(&JobId("f".into())).unwrap().status = JobStatus::Leased {
+        worker: q,
+        expires_at: 100,
+        deadline: 100,
+    };
+    s.expire_leases(100);
+    let open = addr(0x93);
+    s.register(&h01_claim(open), "192.0.2.93", 100).unwrap();
+    let t = 100 + LAPSE_HOLD_SECS;
+    // The vetted key re-registers right up to t but never polls for work.
+    s.register(&h01_claim(v), "198.51.100.91", t).unwrap();
+    assert_eq!(s.lease(open, t).unwrap().id.0, "f");
+}
+
+#[test]
+fn lifecycle_mark_dirty_sets_the_flag() {
+    let mut s = State::default();
+    assert!(!s.take_dirty());
+    s.mark_dirty();
+    assert!(s.take_dirty());
+    assert!(!s.take_dirty());
+}
+
+/// A capability change is persisted; a throughput-only change is not.
+#[test]
+fn lifecycle_only_capability_changes_force_a_save() {
+    let base = worker_probe(addr(4));
+    let mut s = State::default();
+    s.register(&base, "z", 0).unwrap();
+    s.take_dirty();
+    s.register(&RegisteredWorker { tokens_per_second: 5.0, ..base.clone() }, "z", 100)
+        .unwrap();
+    assert!(!s.take_dirty(), "throughput-only change");
+    assert_eq!(s.workers[&addr(4)].tokens_per_second, 5.0, "kept in memory");
+    s.register(&RegisteredWorker { capability: Capability::Federated, ..base }, "z", 200)
+        .unwrap();
+    assert!(s.take_dirty(), "capability change");
+    assert_eq!(s.workers[&addr(4)].last_registration, 200);
+}
+
+/// A change recorded on top of pending unsaved changes keeps them pending.
+#[test]
+fn lifecycle_changes_on_a_dirty_state_stay_dirty() {
+    let base = worker_probe(addr(5));
+    let mut s = State::default();
+    s.register(&base, "z", 0).unwrap();
+    s.take_dirty();
+    s.mark_dirty();
+    s.register(&RegisteredWorker { capability: Capability::Federated, ..base }, "z", 100)
+        .unwrap();
+    assert!(s.take_dirty(), "a capability change on a dirty state");
+    s.mark_dirty();
+    let w = LEASE_FRESHNESS_FOR_TESTS;
+    assert!(s.note_registration(addr(5), 10 * w, 10 * w));
+    assert!(s.take_dirty(), "an accepted registration on a dirty state");
 }

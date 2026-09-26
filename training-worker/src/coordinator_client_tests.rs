@@ -96,7 +96,9 @@ fn client(url: String) -> CoordinatorClient {
 #[tokio::test]
 async fn register_posts_the_probe_verbatim_with_a_recoverable_signature() {
     let probe = r#"{"schema":"nat.divergence-probe/1","backend":"candle-cuda"}"#;
-    let srv = StubServer::start(vec![(200, r#"{"worker":"0xabc","capability":"h01"}"#)]).await;
+    let me = format!("{:?}", wallet().address());
+    let reply = format!(r#"{{"worker":"{me}","capability":"h01"}}"#);
+    let srv = StubServer::start(vec![(200, Box::leak(reply.into_boxed_str()))]).await;
     let r = client(srv.url()).register(probe).await.unwrap();
     assert_eq!(r.capability, Capability::H01);
 
@@ -308,4 +310,21 @@ async fn an_idle_worker_backs_off_instead_of_spinning() {
     // 5ms + 10ms + 20ms + 20ms of sleeping, so it cannot have spun through.
     assert!(started.elapsed() >= Duration::from_millis(50), "did not back off");
     assert!(srv.hit_count() >= 4);
+}
+
+/// The coordinator must register the address this worker signs as. A
+/// different one means the two sides disagree about the signing format (for
+/// example a coordinator older than this worker), and every later request
+/// would be refused, so registration fails loudly instead.
+#[tokio::test]
+async fn register_refuses_a_response_for_a_different_address() {
+    let probe = r#"{"schema":"nat.divergence-probe/1","backend":"candle-cuda"}"#;
+    let srv = StubServer::start(vec![(
+        200,
+        r#"{"worker":"0xdbea000000000000000000000000000000000001","capability":"h01"}"#,
+    )])
+    .await;
+    let err = client(srv.url()).register(probe).await.expect_err("must refuse");
+    let msg = err.to_string();
+    assert!(msg.contains("registered a different address"), "{msg}");
 }

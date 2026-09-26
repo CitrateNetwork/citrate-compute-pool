@@ -53,6 +53,12 @@ pub enum ClientError {
     Signing(String),
     #[error("unexpected response from the coordinator: {0}")]
     Malformed(String),
+    #[error(
+        "the coordinator registered a different address ({got}) than this worker signs as \
+         ({expected}); the worker and coordinator disagree on the registration format \
+         (a coordinator older than this worker?). Upgrade the coordinator."
+    )]
+    IdentityMismatch { expected: String, got: String },
 }
 
 /// Polling cadence. Starts eager and backs off to a cap so an idle fleet does not
@@ -169,9 +175,25 @@ impl CoordinatorClient {
                 body: res.text().await.unwrap_or_default(),
             });
         }
-        res.json::<RegisterResponse>()
+        let reg = res
+            .json::<RegisterResponse>()
             .await
-            .map_err(|e| ClientError::Malformed(e.to_string()))
+            .map_err(|e| ClientError::Malformed(e.to_string()))?;
+        // The coordinator must have registered the address this key signs as;
+        // anything else means the two sides disagree on the registration
+        // format and every later request would be refused.
+        let expected = self.wallet.address();
+        let got = hex::decode(reg.worker.trim().trim_start_matches("0x"))
+            .ok()
+            .filter(|b| b.len() == 20)
+            .map(|b| ethereum_types::H160::from_slice(&b));
+        if got != Some(expected) {
+            return Err(ClientError::IdentityMismatch {
+                expected: format!("{expected:?}"),
+                got: reg.worker,
+            });
+        }
+        Ok(reg)
     }
 
     /// Ask for work. `Ok(None)` means there is none — which is a normal answer,

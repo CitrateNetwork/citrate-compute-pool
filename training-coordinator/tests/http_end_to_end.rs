@@ -618,7 +618,13 @@ async fn pba_l3b_001_fresh_h01_keys_cannot_squat_the_ladder_over_http() {
 #[tokio::test]
 async fn pba_l3b_001_new_identity_registration_is_rate_limited() {
     use citrate_training_coordinator::api::NEW_REGISTRATION_BURST;
-    let c = coordinator("reg-budget", vec![]);
+    // The final refresh below re-registers a key immediately, so the per-key
+    // refresh interval is off here (it has its own test).
+    let policy = Policy {
+        register_refresh_secs: 0,
+        ..Policy::default()
+    };
+    let c = Arc::new(Coordinator::open_with(Store::new(tmp("reg-budget")), policy).unwrap());
     let body = probe("candle-cpu", "f32", 7_786.0, true);
     let mut limited = None;
     for i in 0..(NEW_REGISTRATION_BURST + 5) {
@@ -990,11 +996,18 @@ async fn tier_restart_with_a_tighter_policy_requeues_disallowed_leases() {
 /// worker's claim or its live lease.
 #[tokio::test]
 async fn registration_is_fresh_and_single_use() {
-    let c = coordinator_trusting(
-        "reg-fresh",
-        vec![JobSpec::new("ladder", Capability::H01, serde_json::json!({})).with_lease_secs(9999)],
-        &[KEY_A],
-    );
+    // Re-registering the same key back to back is part of this test, so the
+    // per-key refresh interval is off here (it has its own test).
+    let mut policy = Policy {
+        register_refresh_secs: 0,
+        ..Policy::default()
+    };
+    policy
+        .trusted_h01
+        .insert(Wallet::from_hex(KEY_A).unwrap().address());
+    let c = Arc::new(Coordinator::open_with(Store::new(tmp("reg-fresh")), policy).unwrap());
+    c.add_job(JobSpec::new("ladder", Capability::H01, serde_json::json!({})).with_lease_secs(9999))
+        .unwrap();
     let earlier = register_body(KEY_A, &probe("candle-cpu", "f32", 1.0, true));
     let res = router(c.clone())
         .oneshot(post("/v1/register", earlier.clone()))
@@ -1048,7 +1061,8 @@ async fn registration_is_fresh_and_single_use() {
         .oneshot(post("/v1/register", legacy))
         .await
         .unwrap();
-    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    // No timestamp at all: an older worker, told to upgrade.
+    assert_eq!(res.status(), StatusCode::UPGRADE_REQUIRED);
 }
 
 /// Requests that change nothing do not rewrite the state file.
@@ -1095,4 +1109,111 @@ async fn persistence_requests_that_change_nothing_do_not_rewrite_state() {
     }
     let m1 = std::fs::metadata(&path).unwrap().modified().unwrap();
     assert_eq!(m0, m1, "no-op requests rewrote the state file");
+}
+
+/// A worker from before registration carried a timestamp is told plainly
+/// that it must be upgraded, not that its clock is off.
+#[tokio::test]
+async fn lifecycle_an_old_worker_is_told_to_upgrade() {
+    let c = coordinator("old-worker", vec![]);
+    let body = probe("candle-cpu", "f32", 7_000.0, true);
+    let legacy = serde_json::json!({
+        "probe_json": body,
+        "signature": hex_sig(KEY_B, &attestation_digest(&body, 0)),
+    });
+    let res = router(c)
+        .oneshot(post("/v1/register", legacy))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::UPGRADE_REQUIRED);
+    let msg = json_of(res).await["error"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert!(msg.contains("worker too old"), "{msg}");
+    assert!(msg.contains("upgrade the worker"), "{msg}");
+}
+
+/// Registrations accepted before a restart stay single-use after it.
+#[tokio::test]
+async fn lifecycle_registration_stays_single_use_across_a_restart() {
+    let path = tmp("reg-restart");
+    let first = Arc::new(Coordinator::open_with(Store::new(&path), Policy::default()).unwrap());
+    let body = register_body(KEY_A, &probe("candle-cpu", "f32", 7_000.0, true));
+    let res = router(first.clone())
+        .oneshot(post("/v1/register", body.clone()))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    drop(first);
+    let second = Arc::new(Coordinator::open_with(Store::new(&path), Policy::default()).unwrap());
+    let res = router(second)
+        .oneshot(post("/v1/register", body))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+}
+
+/// One key cannot re-register faster than the refresh interval.
+#[tokio::test]
+async fn lifecycle_registration_refresh_is_throttled_per_key() {
+    let c = coordinator("reg-throttle", vec![]);
+    let slow = probe("candle-cpu", "f32", 7_000.0, true);
+    let other = probe("candle-cpu", "f32", 7_001.0, true);
+    let res = router(c.clone())
+        .oneshot(post("/v1/register", register_body(KEY_A, &slow)))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let res = router(c.clone())
+        .oneshot(post("/v1/register", register_body(KEY_A, &other)))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::TOO_MANY_REQUESTS);
+    // Another key is unaffected.
+    let res = router(c.clone())
+        .oneshot(post("/v1/register", register_body(KEY_B, &slow)))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+}
+
+/// A failed save leaves the change pending, and the next request persists it.
+#[tokio::test]
+async fn lifecycle_a_failed_save_is_retried() {
+    let dir = tmp("save-retry");
+    let path = dir.clone();
+    let parent = path.parent().unwrap().to_path_buf();
+    let c = Arc::new(Coordinator::open_with(Store::new(&path), Policy::default()).unwrap());
+    c.add_job(JobSpec::new("j", Capability::Probe, serde_json::json!({})))
+        .unwrap();
+    let res = router(c.clone())
+        .oneshot(post(
+            "/v1/register",
+            register_body(KEY_A, &probe("candle-cpu", "f32", 7_000.0, true)),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    // Make the state directory unwritable by replacing it with a file.
+    std::fs::remove_dir_all(&parent).unwrap();
+    std::fs::write(&parent, b"not a directory").unwrap();
+    let res = router(c.clone())
+        .oneshot(post("/v1/lease", lease_body(KEY_A)))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    // Disk back; a request that changes nothing itself still flushes it.
+    std::fs::remove_file(&parent).unwrap();
+    std::fs::create_dir_all(&parent).unwrap();
+    let res = router(c.clone())
+        .oneshot(post("/v1/lease", lease_body(KEY_A)))
+        .await
+        .unwrap();
+    assert_ne!(res.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let on_disk = Store::new(&path).load().unwrap().counts();
+    assert_eq!(
+        on_disk.leased, 1,
+        "the lease granted before the failed save was persisted"
+    );
 }
