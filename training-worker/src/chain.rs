@@ -53,6 +53,10 @@ pub enum ChainError {
     ReplacementNotJoined,
     #[error("coordinator still active within timeout")]
     CoordinatorStillActive,
+    #[error("caller is neither the job requester nor governance")]
+    NotRequesterOrGovernance,
+    #[error("job not stalled; STALL_EXPIRY_BLOCKS since last activity not elapsed")]
+    NotStalled,
     #[error("self-challenge not allowed")]
     SelfChallenge,
     #[error("target not joined")]
@@ -91,6 +95,15 @@ pub enum ChainError {
 /// The on-chain constant is `1 ether`; in workspace fixed-point that's
 /// 1e18 wei, which fits in `u128`.
 pub const CHALLENGE_BOND: u128 = 1_000_000_000_000_000_000;
+
+/// `ComputePoolTraining.STALL_EXPIRY_BLOCKS`: blocks of total inactivity after
+/// which the requester or a joined worker may expire a Training job.
+pub const STALL_EXPIRY_BLOCKS: u64 = 50_400;
+
+/// Requester recorded by [`MockChainClient::create_job`].
+pub const MOCK_REQUESTER: WorkerAddress = WorkerAddress::repeat_byte(0xA0);
+/// Governance address of the mock contract.
+pub const MOCK_GOVERNANCE: WorkerAddress = WorkerAddress::repeat_byte(0x60);
 
 /// Summary of a training job's on-chain state as seen by a worker.
 #[derive(Clone, Debug)]
@@ -167,16 +180,30 @@ pub trait ChainClient: Send + Sync {
     /// called too early.
     async fn finalize(&self, job_id: JobId) -> Result<(), ChainError>;
 
-    /// Reassign a stalled coordinator. Caller must be a joined
-    /// worker; reassignment is only accepted if the last coordinator
-    /// activity was more than `coordination_timeout` blocks ago.
-    /// Triggers a liveness slash on the old coordinator. Mirrors
-    /// `ComputePoolTraining.reassignCoordinator`.
+    /// Reassign a stalled coordinator. Mirrors
+    /// `ComputePoolTraining.reassignCoordinator`: the caller must be the
+    /// job's requester or governance (a worker cannot appoint the
+    /// coordinator), the replacement must be a joined worker, and the
+    /// last activity must be more than COORDINATION_TIMEOUT blocks ago.
+    /// The old coordinator is liveness-slashed only when governance
+    /// makes the call. Workers use [`ChainClient::expire_stalled_training`].
     async fn reassign_coordinator(
         &self,
         job_id: JobId,
         caller: WorkerAddress,
         new_coordinator: WorkerAddress,
+    ) -> Result<(), ChainError>;
+
+    /// Expire a Training job whose coordinator has made no progress for
+    /// [`STALL_EXPIRY_BLOCKS`]. Mirrors
+    /// `ComputePoolTraining.expireStalledTraining`: callable by the
+    /// requester or any joined worker; the job moves to Awaiting with the
+    /// challenge window starting now, and is then finalized normally.
+    /// This is the worker-side exit from a stalled coordinator.
+    async fn expire_stalled_training(
+        &self,
+        job_id: JobId,
+        caller: WorkerAddress,
     ) -> Result<(), ChainError>;
 
     /// Open a challenge against a worker's step commitment. The
@@ -519,6 +546,31 @@ impl ChainClient for MockChainClient {
         Ok(())
     }
 
+    async fn expire_stalled_training(
+        &self,
+        job_id: JobId,
+        caller: WorkerAddress,
+    ) -> Result<(), ChainError> {
+        let mut state = self.inner.lock();
+        let block = state.block_number;
+        let job = state
+            .jobs
+            .get_mut(&job_id)
+            .ok_or(ChainError::UnknownJob(job_id))?;
+        if job.state != JobChainState::Training {
+            return Err(ChainError::WrongState("not training".into()));
+        }
+        if caller != MOCK_REQUESTER && !job.joined.contains(&caller) {
+            return Err(ChainError::NotRequesterOrGovernance);
+        }
+        if block <= job.last_activity_block + STALL_EXPIRY_BLOCKS {
+            return Err(ChainError::NotStalled);
+        }
+        job.state = JobChainState::Awaiting;
+        job.all_epochs_committed_block = block;
+        Ok(())
+    }
+
     async fn reassign_coordinator(
         &self,
         job_id: JobId,
@@ -534,8 +586,10 @@ impl ChainClient for MockChainClient {
         if job.state != JobChainState::Training {
             return Err(ChainError::WrongState("not training".into()));
         }
-        if !job.joined.contains(&caller) {
-            return Err(ChainError::CallerNotJoined);
+        // Only the requester or governance appoints the coordinator; a
+        // joined worker's exit is `expire_stalled_training`.
+        if caller != MOCK_REQUESTER && caller != MOCK_GOVERNANCE {
+            return Err(ChainError::NotRequesterOrGovernance);
         }
         if !job.joined.contains(&new_coordinator) {
             return Err(ChainError::ReplacementNotJoined);
@@ -543,8 +597,11 @@ impl ChainClient for MockChainClient {
         if block <= job.last_activity_block + COORDINATION_TIMEOUT {
             return Err(ChainError::CoordinatorStillActive);
         }
-        if let Some(old) = job.coordinator {
-            job.liveness_slashed.insert(old);
+        // The liveness slash applies only when governance adjudicates.
+        if caller == MOCK_GOVERNANCE {
+            if let Some(old) = job.coordinator {
+                job.liveness_slashed.insert(old);
+            }
         }
         job.coordinator = Some(new_coordinator);
         job.last_activity_block = block;
@@ -897,18 +954,119 @@ mod tests {
         // Too early.
         chain.advance_blocks(50).await;
         let err = chain
-            .reassign_coordinator(job_id, w2, w3)
+            .reassign_coordinator(job_id, MOCK_REQUESTER, w3)
             .await
             .unwrap_err();
         assert!(matches!(err, ChainError::CoordinatorStillActive));
 
-        // Past timeout.
+        // Past timeout: the requester swaps without a slash.
         chain.advance_blocks(60).await;
-        chain.reassign_coordinator(job_id, w2, w3).await.unwrap();
-
+        chain
+            .reassign_coordinator(job_id, MOCK_REQUESTER, w3)
+            .await
+            .unwrap();
         let snap = chain.snapshot(job_id).await.unwrap();
         assert_eq!(snap.coordinator, Some(w3), "coordinator swapped");
-        assert!(chain.was_liveness_slashed(job_id, w1));
+        assert!(!chain.was_liveness_slashed(job_id, w1));
+
+        // Governance swap after another stall slashes the stalled one.
+        chain.advance_blocks(101).await;
+        chain
+            .reassign_coordinator(job_id, MOCK_GOVERNANCE, w2)
+            .await
+            .unwrap();
+        assert!(chain.was_liveness_slashed(job_id, w3));
+    }
+
+    #[tokio::test]
+    async fn joined_worker_cannot_reassign_coordinator() {
+        let chain = MockChainClient::new();
+        let job_id = chain.create_job(spec());
+        let (w1, w2, w3) = (
+            Address::repeat_byte(1),
+            Address::repeat_byte(2),
+            Address::repeat_byte(3),
+        );
+        for w in [w1, w2, w3] {
+            chain
+                .join_training_job(job_id, w, spec().per_worker_stake)
+                .await
+                .unwrap();
+        }
+        chain.close_recruitment(job_id, w1).await.unwrap();
+        chain.advance_blocks(200).await;
+        let err = chain
+            .reassign_coordinator(job_id, w2, w2)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ChainError::NotRequesterOrGovernance));
+        assert_eq!(chain.snapshot(job_id).await.unwrap().coordinator, Some(w1));
+    }
+
+    #[tokio::test]
+    async fn expire_stalled_training_after_stall_expiry() {
+        let chain = MockChainClient::new();
+        let job_id = chain.create_job(spec());
+        let (w1, w2) = (Address::repeat_byte(1), Address::repeat_byte(2));
+        for w in [w1, w2, Address::repeat_byte(3)] {
+            chain
+                .join_training_job(job_id, w, spec().per_worker_stake)
+                .await
+                .unwrap();
+        }
+        chain.close_recruitment(job_id, w1).await.unwrap();
+
+        // Exactly STALL_EXPIRY_BLOCKS since activity: still not stalled.
+        chain.advance_blocks(STALL_EXPIRY_BLOCKS).await;
+        let err = chain.expire_stalled_training(job_id, w2).await.unwrap_err();
+        assert!(matches!(err, ChainError::NotStalled));
+        chain.advance_blocks(1).await;
+
+        // An outsider cannot expire it.
+        let err = chain
+            .expire_stalled_training(job_id, Address::repeat_byte(0xEE))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ChainError::NotRequesterOrGovernance));
+
+        chain.expire_stalled_training(job_id, w2).await.unwrap();
+        let snap = chain.snapshot(job_id).await.unwrap();
+        assert_eq!(snap.state, JobChainState::Awaiting);
+        // Nothing is paid before the challenge window runs from expiry.
+        let err = chain.finalize(job_id).await.unwrap_err();
+        assert!(matches!(err, ChainError::ChallengeWindowOpen));
+        chain
+            .advance_blocks(spec().challenge_window_blocks as u64)
+            .await;
+        chain.finalize(job_id).await.unwrap();
+        // Expiry is one-shot.
+        let err = chain.expire_stalled_training(job_id, w2).await.unwrap_err();
+        assert!(matches!(err, ChainError::WrongState(_)));
+    }
+
+    #[tokio::test]
+    async fn requester_can_expire_stalled_training() {
+        let chain = MockChainClient::new();
+        let job_id = chain.create_job(spec());
+        for w in [1u8, 2, 3] {
+            chain
+                .join_training_job(job_id, Address::repeat_byte(w), spec().per_worker_stake)
+                .await
+                .unwrap();
+        }
+        chain
+            .close_recruitment(job_id, Address::repeat_byte(1))
+            .await
+            .unwrap();
+        chain.advance_blocks(STALL_EXPIRY_BLOCKS + 1).await;
+        chain
+            .expire_stalled_training(job_id, MOCK_REQUESTER)
+            .await
+            .unwrap();
+        assert_eq!(
+            chain.snapshot(job_id).await.unwrap().state,
+            JobChainState::Awaiting
+        );
     }
 
     #[tokio::test]
@@ -932,7 +1090,13 @@ mod tests {
             .reassign_coordinator(job_id, outsider, w3)
             .await
             .unwrap_err();
-        assert!(matches!(err, ChainError::CallerNotJoined));
+        assert!(matches!(err, ChainError::NotRequesterOrGovernance));
+        // The replacement must still be a joined worker.
+        let err = chain
+            .reassign_coordinator(job_id, MOCK_REQUESTER, outsider)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ChainError::ReplacementNotJoined));
     }
 
     #[tokio::test]
