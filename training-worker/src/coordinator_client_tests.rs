@@ -108,7 +108,11 @@ async fn register_posts_the_probe_verbatim_with_a_recoverable_signature() {
     // And the signature recovers to us, which is what the coordinator will check.
     let sig = hex::decode(sent["signature"].as_str().unwrap().trim_start_matches("0x")).unwrap();
     assert_eq!(
-        Wallet::recover_address(&attestation_digest(probe), &sig).unwrap(),
+        Wallet::recover_address(
+            &attestation_digest(probe, sent["timestamp"].as_u64().unwrap()),
+            &sig
+        )
+        .unwrap(),
         wallet().address()
     );
 }

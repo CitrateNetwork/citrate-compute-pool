@@ -118,6 +118,7 @@ impl Coordinator {
             );
             store.save(&state)?;
         }
+        state.take_dirty();
         Ok(Self {
             state: Mutex::new(state),
             store,
@@ -146,11 +147,31 @@ impl Coordinator {
     /// memory, and the error is returned so the caller can refuse the request —
     /// reporting success for a lease that would vanish on restart is worse than
     /// reporting failure for one that was granted.
+    ///
+    /// Only persists when `f` changed something that must survive a restart
+    /// ([`State::take_dirty`]): a refused request or a poll that only
+    /// refreshes `last_seen` costs no serialisation and no fsync.
     fn mutate<T>(&self, f: impl FnOnce(&mut State) -> T) -> std::io::Result<T> {
         let mut g = self.state.lock();
         let out = f(&mut g);
-        self.store.save(&g)?;
+        if g.take_dirty() {
+            self.store.save(&g)?;
+        }
         Ok(out)
+    }
+
+    /// [`Coordinator::mutate`] on the blocking pool, so a slow disk (the
+    /// save fsyncs) stalls only this request and never the async runtime that
+    /// serves every other worker's heartbeat.
+    async fn mutate_off_runtime<T: Send + 'static>(
+        self: &Arc<Self>,
+        f: impl FnOnce(&mut State) -> T + Send + 'static,
+    ) -> std::io::Result<T> {
+        let me = Arc::clone(self);
+        match tokio::task::spawn_blocking(move || me.mutate(f)).await {
+            Ok(r) => r,
+            Err(e) => Err(std::io::Error::other(e.to_string())),
+        }
     }
 
     pub fn snapshot(&self) -> State {
@@ -220,22 +241,38 @@ async fn register(
     headers: HeaderMap,
     Json(att): Json<Attestation>,
 ) -> Result<Json<RegisterResponse>, ApiError> {
+    // A registration is bound to the moment it was signed, like a lease or a
+    // heartbeat: stale or repeated bodies are refused.
+    if unix_now_nanos().abs_diff(att.timestamp) > LEASE_FRESHNESS_NANOS {
+        return Err(err(
+            StatusCode::UNAUTHORIZED,
+            "registration timestamp is outside the freshness window",
+        ));
+    }
     let w = attestation::verify(&att).map_err(|e| err(StatusCode::BAD_REQUEST, e.to_string()))?;
+    if !c.note_lease_seen(w.id, att.timestamp) {
+        return Err(err(
+            StatusCode::UNAUTHORIZED,
+            "registration already used (replay)",
+        ));
+    }
     let source = source_of(peer.map(|ConnectInfo(a)| a), &headers);
     let now = unix_now();
+    let (c2, w2, source2) = (Arc::clone(&c), w.clone(), source.clone());
     let granted = c
-        .mutate(|s| {
+        .mutate_off_runtime(move |s| {
             // PBA-L3b-001: a never-seen identity spends from the global budget,
             // but only once its source is known to have room, so a full source
             // cannot drain the budget and lock out every other newcomer.
-            if !s.workers.contains_key(&w.id) && !s.policy.is_trusted(&w.id) {
-                s.admits_new(&w.id, &source, now).map_err(Some)?;
-                if !c.new_registrations.lock().try_take(now) {
+            if !s.workers.contains_key(&w2.id) && !s.policy.is_trusted(&w2.id) {
+                s.admits_new(&w2.id, &source2, now).map_err(Some)?;
+                if !c2.new_registrations.lock().try_take(now) {
                     return Err(None);
                 }
             }
-            s.register(&w, &source, now).map_err(Some)
+            s.register(&w2, &source2, now).map_err(Some)
         })
+        .await
         .map_err(|e| {
             err(
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -305,7 +342,7 @@ async fn lease(
         Err(e) => return e.into_response(),
     };
     let now = unix_now();
-    let got = match c.mutate(|s| s.lease(who, now)) {
+    let got = match c.mutate_off_runtime(move |s| s.lease(who, now)).await {
         Ok(g) => g,
         Err(e) => {
             return err(
@@ -341,8 +378,10 @@ async fn heartbeat(
         &req.signature,
     )?;
     let now = unix_now();
+    let job = req.job.clone();
     let expires_at = c
-        .mutate(|s| s.renew(who, &req.job, now))
+        .mutate_off_runtime(move |s| s.renew(who, &job, now))
+        .await
         .map_err(|e| {
             err(
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -359,7 +398,9 @@ async fn submit(
 ) -> Result<StatusCode, ApiError> {
     let who = recover_submitter(&sub).map_err(|e| err(StatusCode::UNAUTHORIZED, e.to_string()))?;
     let now = unix_now();
-    c.mutate(|s| s.submit(who, &sub.job, sub.payload.clone(), now))
+    let (job, payload) = (sub.job.clone(), sub.payload.clone());
+    c.mutate_off_runtime(move |s| s.submit(who, &job, payload, now))
+        .await
         .map_err(|e| {
             err(
                 StatusCode::INTERNAL_SERVER_ERROR,

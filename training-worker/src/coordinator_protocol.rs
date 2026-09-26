@@ -117,14 +117,27 @@ fn keccak(parts: &[&[u8]]) -> [u8; 32] {
     d
 }
 
-/// `keccak256(probe_json)` — what a worker signs to register.
+/// Domain tag for the registration digest.
+pub const REGISTER_MESSAGE: &[u8] = b"citrate-training-register/1";
+
+/// `keccak256("citrate-training-register/1\n" || timestamp_be || "\n" || probe_json)`
+/// — what a worker signs to register.
 ///
-/// Deliberately over the probe bytes **verbatim**, with no envelope. JSON does
-/// not round-trip byte-for-byte (key order, number formatting), so a digest over
-/// a re-serialization would fail for honest workers whose file is a byte off from
-/// what the verifier would have produced.
-pub fn attestation_digest(probe_json: &str) -> [u8; 32] {
-    keccak(&[probe_json.as_bytes()])
+/// Over the probe bytes **verbatim**: JSON does not round-trip byte-for-byte
+/// (key order, number formatting), so a digest over a re-serialization would
+/// fail for honest workers whose file is a byte off from what the verifier
+/// would have produced. Bound to the moment it was signed, like a lease
+/// request: the coordinator applies the same freshness window
+/// ([`LEASE_FRESHNESS_NANOS`]) and refuses an exact repeat, so a registration
+/// is never a reusable credential.
+pub fn attestation_digest(probe_json: &str, timestamp: u64) -> [u8; 32] {
+    keccak(&[
+        REGISTER_MESSAGE,
+        b"\n",
+        &timestamp.to_be_bytes(),
+        b"\n",
+        probe_json.as_bytes(),
+    ])
 }
 
 /// What a worker signs to ask for work. Domain-separated by `LEASE_MESSAGE`, and
@@ -195,6 +208,10 @@ pub fn submission_digest(job: &JobId, payload: &str) -> [u8; 32] {
 pub struct Attestation {
     /// The probe document exactly as signed — see [`attestation_digest`].
     pub probe_json: String,
+    /// Unix nanoseconds when signed. Defaults to 0, which always fails the
+    /// freshness check, so a body without it is refused.
+    #[serde(default)]
+    pub timestamp: u64,
     /// 65-byte recoverable secp256k1 signature.
     #[serde(with = "hex_bytes")]
     pub signature: Vec<u8>,
@@ -290,7 +307,7 @@ mod tests {
     #[test]
     fn the_four_digests_are_domain_separated_from_each_other() {
         let job = JobId("x".into());
-        let a = attestation_digest("x");
+        let a = attestation_digest("x", 0);
         let l = lease_digest(0);
         let s = submission_digest(&job, "");
         let h = heartbeat_digest(&job, 0);
@@ -300,6 +317,8 @@ mod tests {
         assert_ne!(h, a);
         assert_ne!(h, l);
         assert_ne!(h, s);
+        // The timestamp is bound: the same probe signed at two moments differs.
+        assert_ne!(attestation_digest("x", 0), attestation_digest("x", 1));
     }
 
     /// A submission digest must not collide with the naive concatenation an

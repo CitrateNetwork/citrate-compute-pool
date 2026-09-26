@@ -15,9 +15,9 @@ use citrate_training_coordinator::state::Policy;
 use citrate_training_coordinator::store::Store;
 use citrate_training_coordinator::submission::submission_digest;
 use citrate_training_coordinator::JobId;
+use citrate_training_worker::coordinator_protocol::attestation_digest;
 use citrate_training_worker::wallet::Wallet;
 use http_body_util::BodyExt;
-use sha3::{Digest, Keccak256};
 use tower::ServiceExt;
 
 // Anvil account #0 / #1 — well-known throwaways, NOT real keys.
@@ -56,14 +56,6 @@ fn hex_sig(key: &str, digest: &[u8; 32]) -> String {
     )
 }
 
-fn keccak(b: &[u8]) -> [u8; 32] {
-    let mut h = Keccak256::new();
-    h.update(b);
-    let mut d = [0u8; 32];
-    d.copy_from_slice(&h.finalize());
-    d
-}
-
 fn post(path: &str, body: serde_json::Value) -> Request<Body> {
     Request::builder()
         .method("POST")
@@ -98,10 +90,14 @@ fn coordinator_trusting(name: &str, jobs: Vec<JobSpec>, keys: &[&str]) -> Arc<Co
     c
 }
 
+/// A fresh, timestamp-bound registration, signed the way the worker client
+/// signs it.
 fn register_body(key: &str, body: &str) -> serde_json::Value {
+    let ts = unix_nanos();
     serde_json::json!({
         "probe_json": body,
-        "signature": hex_sig(key, &keccak(body.as_bytes())),
+        "timestamp": ts,
+        "signature": hex_sig(key, &attestation_digest(body, ts)),
     })
 }
 
@@ -985,4 +981,118 @@ async fn tier_restart_with_a_tighter_policy_requeues_disallowed_leases() {
     );
     let on_disk = Store::new(&path).load().unwrap().counts();
     assert_eq!((on_disk.leased, on_disk.pending), (0, 1), "and persisted");
+}
+
+// ── Registration freshness and persistence ────────────────────────────
+
+/// A registration is bound to a fresh timestamp: an exact repeat of a
+/// earlier body, or a stale one, is refused, so it cannot lower a vetted
+/// worker's claim or its live lease.
+#[tokio::test]
+async fn registration_is_fresh_and_single_use() {
+    let c = coordinator_trusting(
+        "reg-fresh",
+        vec![JobSpec::new("ladder", Capability::H01, serde_json::json!({})).with_lease_secs(9999)],
+        &[KEY_A],
+    );
+    let earlier = register_body(KEY_A, &probe("candle-cpu", "f32", 1.0, true));
+    let res = router(c.clone())
+        .oneshot(post("/v1/register", earlier.clone()))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let fast = probe("candle-cuda", "f32", 71_098.0, true);
+    let res = router(c.clone())
+        .oneshot(post("/v1/register", register_body(KEY_A, &fast)))
+        .await
+        .unwrap();
+    assert_eq!(json_of(res).await["capability"], "h01");
+    let res = router(c.clone())
+        .oneshot(post("/v1/lease", lease_body(KEY_A)))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    // The earlier body again: refused.
+    let res = router(c.clone())
+        .oneshot(post("/v1/register", earlier))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    let res = router(c.clone())
+        .oneshot(post("/v1/heartbeat", heartbeat_body(KEY_A, "ladder")))
+        .await
+        .unwrap();
+    assert_eq!(
+        res.status(),
+        StatusCode::OK,
+        "the vetted lease is untouched"
+    );
+    // A stale or missing timestamp is refused outright.
+    let body = probe("candle-cpu", "f32", 7_000.0, true);
+    let stale_ts = 1_000_000_000u64;
+    let stale = serde_json::json!({
+        "probe_json": body,
+        "timestamp": stale_ts,
+        "signature": hex_sig(KEY_B, &attestation_digest(&body, stale_ts)),
+    });
+    let res = router(c.clone())
+        .oneshot(post("/v1/register", stale))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    let legacy = serde_json::json!({
+        "probe_json": body,
+        "signature": hex_sig(KEY_B, &attestation_digest(&body, 0)),
+    });
+    let res = router(c.clone())
+        .oneshot(post("/v1/register", legacy))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+}
+
+/// Requests that change nothing do not rewrite the state file.
+#[tokio::test]
+async fn persistence_requests_that_change_nothing_do_not_rewrite_state() {
+    let path = tmp("no-op-save");
+    let c = Arc::new(Coordinator::open_with(Store::new(&path), Policy::default()).unwrap());
+    for i in 0..50 {
+        c.add_job(JobSpec::new(
+            format!("j{i}"),
+            Capability::H01,
+            serde_json::json!({"pad": "x".repeat(500)}),
+        ))
+        .unwrap();
+    }
+    let res = router(c.clone())
+        .oneshot(post(
+            "/v1/register",
+            register_body(KEY_B, &probe("candle-cpu", "f32", 7_000.0, true)),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let m0 = std::fs::metadata(&path).unwrap().modified().unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    let stranger = "0x1111111111111111111111111111111111111111111111111111111111111111";
+    for _ in 0..10 {
+        let res = router(c.clone())
+            .oneshot(post("/v1/lease", lease_body(stranger)))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::FORBIDDEN);
+        // A registered worker with nothing it may do: 204, nothing to persist.
+        let res = router(c.clone())
+            .oneshot(post("/v1/lease", lease_body(KEY_B)))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NO_CONTENT);
+        let res = router(c.clone())
+            .oneshot(post("/v1/heartbeat", heartbeat_body(stranger, "j0")))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::CONFLICT);
+    }
+    let m1 = std::fs::metadata(&path).unwrap().modified().unwrap();
+    assert_eq!(m0, m1, "no-op requests rewrote the state file");
 }

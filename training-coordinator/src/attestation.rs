@@ -160,8 +160,11 @@ pub fn verify(a: &Attestation) -> Result<RegisteredWorker, AttestError> {
     let probe: ProbeReport =
         serde_json::from_value(v).map_err(|e| AttestError::NotJson(e.to_string()))?;
 
-    let id = Wallet::recover_address(&attestation_digest(&a.probe_json), &a.signature)
-        .map_err(|_| AttestError::BadSignature)?;
+    let id = Wallet::recover_address(
+        &attestation_digest(&a.probe_json, a.timestamp),
+        &a.signature,
+    )
+    .map_err(|_| AttestError::BadSignature)?;
 
     Ok(RegisteredWorker {
         id,

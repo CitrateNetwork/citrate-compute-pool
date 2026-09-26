@@ -155,9 +155,11 @@ impl CoordinatorClient {
     /// `probe_json` must be the bytes as produced by nat's `divergence_probe` —
     /// passed through unmodified, because the signature covers them verbatim.
     pub async fn register(&self, probe_json: &str) -> Result<RegisterResponse, ClientError> {
+        let timestamp = unix_nanos();
         let att = Attestation {
             probe_json: probe_json.to_string(),
-            signature: self.sign(&attestation_digest(probe_json))?,
+            timestamp,
+            signature: self.sign(&attestation_digest(probe_json, timestamp))?,
         };
         let res = self.post("/v1/register", &att).await?;
         let status = res.status();

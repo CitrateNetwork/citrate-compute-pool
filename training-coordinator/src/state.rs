@@ -117,6 +117,10 @@ pub struct State {
     /// boot (see [`crate::api::Coordinator::open_with`]).
     #[serde(skip)]
     pub policy: Policy,
+    /// Set by every change that must be persisted; bookkeeping such as a
+    /// poll refreshing `last_seen` does not set it. See [`State::take_dirty`].
+    #[serde(skip)]
+    dirty: bool,
 }
 
 /// How many unexpired leases one identity may hold at once (PBA-L3b-001). A
@@ -150,6 +154,10 @@ pub const LAPSE_HOLD_SECS: u64 = 900;
 /// vouched worker heartbeats every few minutes, so this only lapses when no
 /// vouched machine is running at all.
 pub const VOUCHED_ACTIVE_SECS: u64 = 3_600;
+
+/// Upper bound on the extended (vetted-only) reservation of a lapsed job,
+/// counted from the lapse.
+pub const RESERVATION_MAX_SECS: u64 = 30 * 86_400;
 
 /// Bound on the persisted `sources` map.
 pub const MAX_SOURCES: usize = MAX_WORKERS;
@@ -293,6 +301,7 @@ pub enum SubmitError {
 
 impl State {
     pub fn add_job(&mut self, spec: JobSpec) {
+        self.dirty = true;
         self.jobs.insert(
             spec.id.clone(),
             JobRecord {
@@ -321,13 +330,19 @@ impl State {
     ) -> Result<Capability, RegisterError> {
         let granted = self.policy.effective_capability(&w.id, w.capability);
         if let Some(e) = self.workers.get_mut(&w.id) {
+            let changed = e.capability != w.capability
+                || e.backend != w.backend
+                || e.dtype != w.dtype
+                || e.tokens_per_second != w.tokens_per_second;
             e.capability = w.capability;
             e.backend = w.backend.clone();
             e.dtype = w.dtype.clone();
             e.tokens_per_second = w.tokens_per_second;
             e.last_seen = now;
+            self.dirty |= changed;
             return Ok(granted);
         }
+        self.dirty = true;
 
         let holders = self.leaseholders(now);
         if !self.policy.is_trusted(&w.id) {
@@ -514,6 +529,7 @@ impl State {
             // while, so a squatter's next fresh key cannot win it back.
             rec.held_until = now.saturating_add(LAPSE_HOLD_SECS);
             freed.push(id.clone());
+            self.dirty = true;
             // PBA-L3b-001: a lapsed lease also costs the worker. A key that
             // leases and walks away waits out a doubling cool-down before it
             // may lease anything again...
@@ -629,6 +645,7 @@ impl State {
         // PBA-L3b-001: the lease lives one heartbeat window, extendable up to
         // the job's own `lease_secs` by heartbeats (see [`State::renew`]).
         let deadline = now.saturating_add(rec.spec.lease_secs);
+        self.dirty = true;
         rec.status = JobStatus::Leased {
             worker,
             expires_at: now.saturating_add(rec.spec.lease_secs.min(window)),
@@ -638,12 +655,15 @@ impl State {
     }
 
     /// May `worker` hold a job requiring `requires` under the current policy?
+    ///
+    /// This is the *operator policy* check only: the worker's own claimed
+    /// capability is not consulted. A worker changing its own claim mid-lease
+    /// does not release the lease (it runs to its deadline and a lapse is
+    /// charged as usual); only a policy change requeues work for free.
     fn tier_allowed(&self, worker: &H160, requires: Capability) -> bool {
-        self.workers.get(worker).is_some_and(|w| {
-            self.policy
-                .effective_capability(worker, w.capability)
-                .satisfies(requires)
-        })
+        self.policy
+            .effective_capability(worker, Capability::H01)
+            .satisfies(requires)
     }
 
     /// Return a job whose lease the current policy no longer allows to the
@@ -652,7 +672,13 @@ impl State {
     fn revoke_lease(&mut self, job: &JobId) {
         if let Some(rec) = self.jobs.get_mut(job) {
             rec.status = JobStatus::Pending;
+            self.dirty = true;
         }
+    }
+
+    /// Whether anything that must be persisted changed since the last call.
+    pub fn take_dirty(&mut self) -> bool {
+        std::mem::take(&mut self.dirty)
     }
 
     /// Revoke every lease the current policy no longer allows (called at
@@ -677,11 +703,13 @@ impl State {
         revoked
     }
 
-    /// Is a pending job reserved for vouched workers at `now`? After a lapse
-    /// it is for [`LAPSE_HOLD_SECS`], and for as long after that as any
-    /// vouched worker is active (seen within [`VOUCHED_ACTIVE_SECS`]), so a
-    /// busy vouched fleet is waited for rather than the job going back to the
-    /// open pool.
+    /// Is a pending job reserved for vetted workers at `now`? After a lapse
+    /// it is for [`LAPSE_HOLD_SECS`]. A job above the probe tier stays
+    /// reserved after that while a vetted worker that could take it is active
+    /// (seen within [`VOUCHED_ACTIVE_SECS`], claim satisfies the job, not in
+    /// its `failed_by`), up to [`RESERVATION_MAX_SECS`] after the lapse, so a
+    /// busy vetted fleet is waited for rather than the job going back to the
+    /// open pool. Probe jobs only get the plain hold.
     fn reserved_for_vouched(&self, rec: &JobRecord, now: u64) -> bool {
         if rec.held_until == 0 {
             return false;
@@ -689,8 +717,21 @@ impl State {
         if rec.held_until > now {
             return true;
         }
+        if rec.spec.requires == Capability::Probe {
+            return false;
+        }
+        let lapsed_at = rec.held_until.saturating_sub(LAPSE_HOLD_SECS);
+        if now >= lapsed_at.saturating_add(RESERVATION_MAX_SECS) {
+            return false;
+        }
         self.workers.iter().any(|(id, w)| {
-            self.policy.is_trusted(id) && now.saturating_sub(w.last_seen) < VOUCHED_ACTIVE_SECS
+            self.policy.is_trusted(id)
+                && now.saturating_sub(w.last_seen) < VOUCHED_ACTIVE_SECS
+                && !rec.failed_by.contains(id)
+                && self
+                    .policy
+                    .effective_capability(id, w.capability)
+                    .satisfies(rec.spec.requires)
         })
     }
 
@@ -726,6 +767,7 @@ impl State {
         let rec = self.jobs.get_mut(job).ok_or(SubmitError::UnknownJob)?;
         let hard = if deadline == 0 { expires_at } else { deadline };
         let extended = now.saturating_add(window).min(hard).max(expires_at);
+        self.dirty = true;
         rec.status = JobStatus::Leased {
             worker,
             expires_at: extended,
@@ -784,6 +826,7 @@ impl State {
                     });
                 }
                 rec.status = JobStatus::Done { worker, at: now };
+                self.dirty = true;
                 rec.result = Some(result);
                 let mut group = None;
                 if let Some(w) = self.workers.get_mut(&worker) {

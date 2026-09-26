@@ -1367,3 +1367,233 @@ fn tier_boundaries() {
     );
     assert_eq!(v.lease(fresh, t).unwrap().id.0, "g");
 }
+
+// ── Lease accounting ───────────────────────────────────────────────────
+
+/// A worker changing its own claimed capability does not release its lease:
+/// only an operator policy change requeues work for free. The lease runs to
+/// its deadline and a lapse is charged as usual, so the job goes to the
+/// vetted worker.
+#[test]
+fn accounting_own_claim_change_does_not_release_the_lease() {
+    let mut s = State::default();
+    s.policy.open_tier = Capability::Federated;
+    let v = addr(0x77);
+    s.policy.trusted_h01.insert(v);
+    s.add_job(JobSpec::new("co", Capability::Federated, serde_json::json!({})).with_lease_secs(172_800));
+    let id = JobId("co".into());
+    let a = addr(0xF1);
+    let src = "203.0.113.200";
+    s.register(&h01_claim(a), src, 0).unwrap();
+    assert_eq!(s.lease(a, 0).unwrap().id.0, "co");
+    s.register(&h01_claim(v), "198.51.100.77", 0).unwrap();
+    let mut now = 0u64;
+    let mut vetted_got_it_at = None;
+    while now < 120 * 86_400 {
+        now += 300;
+        if s.lease(v, now).is_ok() {
+            vetted_got_it_at = Some(now);
+            break;
+        }
+        if let JobStatus::Leased { deadline, worker, .. } = s.jobs[&id].status {
+            if worker == a && deadline.saturating_sub(now) <= 600 {
+                // Near the deadline, the key lowers its own claim and heartbeats.
+                s.register(&worker_probe(a), src, now).unwrap();
+                assert!(s.renew(a, &id, now).is_ok(), "own claim change must not revoke");
+                s.register(&h01_claim(a), src, now).unwrap();
+                let _ = s.lease(a, now);
+            } else if worker == a {
+                let _ = s.renew(a, &id, now);
+            }
+        } else {
+            let _ = s.lease(a, now);
+        }
+    }
+    let got = vetted_got_it_at.expect("the vetted worker never got the job");
+    assert!(got <= 172_800 + LAPSE_HOLD_SECS + 300, "waited {got}");
+    assert_eq!(s.workers[&a].noshows, 1, "the lapse was charged");
+}
+
+/// An operator policy change still requeues without a charge (unchanged).
+#[test]
+fn accounting_policy_change_still_requeues_free() {
+    let mut s = State::default();
+    s.policy.open_tier = Capability::Federated;
+    s.add_job(fed_job("f"));
+    let a = addr(0xF2);
+    s.register(&h01_claim(a), "203.0.113.201", 0).unwrap();
+    s.lease(a, 0).unwrap();
+    s.policy.open_tier = Capability::Probe;
+    assert_eq!(s.renew(a, &JobId("f".into()), 10), Err(SubmitError::TierRevoked));
+    assert_eq!(s.workers[&a].noshows, 0);
+    // A vetted worker losing its vetting is also a policy change.
+    let mut t = State::default();
+    let v = addr(0xF3);
+    t.policy.trusted_h01.insert(v);
+    t.add_job(job("ladder", Capability::H01));
+    t.register(&h01_claim(v), "198.51.100.8", 0).unwrap();
+    t.lease(v, 0).unwrap();
+    t.policy.trusted_h01.clear();
+    assert_eq!(t.renew(v, &JobId("ladder".into()), 10), Err(SubmitError::TierRevoked));
+}
+
+/// A vetted worker already in a job's failed_by, or one whose claim cannot
+/// take the job, does not keep the job reserved: the open worker gets it once
+/// the plain hold ends.
+#[test]
+fn accounting_only_eligible_vetted_workers_extend_a_reservation() {
+    // (a) the only vetted worker lapsed this job itself.
+    let mut s = State::default();
+    s.policy.open_tier = Capability::Federated;
+    let v = addr(0x55);
+    s.policy.trusted_h01.insert(v);
+    s.add_job(JobSpec::new("f", Capability::Federated, serde_json::json!({})).with_lease_secs(100));
+    s.register(&h01_claim(v), "198.51.100.55", 0).unwrap();
+    assert_eq!(s.lease(v, 0).unwrap().id.0, "f");
+    s.expire_leases(1_000);
+    let open = addr(0x56);
+    s.register(&h01_claim(open), "203.0.113.56", 1_000).unwrap();
+    let t = 1_000 + LAPSE_HOLD_SECS;
+    let _ = s.lease(v, t); // still polling, still active
+    assert_eq!(s.lease(open, t).unwrap().id.0, "f");
+
+    // (b) the only vetted worker claims a tier below the job.
+    let mut s = State::default();
+    s.policy.open_tier = Capability::Federated;
+    let v = addr(0x65);
+    s.policy.trusted_h01.insert(v);
+    s.add_job(job("f", Capability::Federated));
+    let q = addr(0x66);
+    s.register(&h01_claim(q), "203.0.113.66", 0).unwrap();
+    s.lease(q, 0).unwrap();
+    s.expire_leases(200);
+    s.register(&worker_probe(v), "198.51.100.65", 200).unwrap();
+    let open = addr(0x67);
+    s.register(&h01_claim(open), "192.0.2.67", 200).unwrap();
+    let t = 200 + LAPSE_HOLD_SECS;
+    let _ = s.lease(v, t);
+    assert_eq!(s.lease(open, t).unwrap().id.0, "f");
+}
+
+/// Default policy: a probe job lapsed by an open worker goes back to the open
+/// pool after the plain hold, even while a vetted worker is busy elsewhere.
+#[test]
+fn accounting_probe_jobs_return_to_the_open_pool_after_the_hold() {
+    let mut s = State::default();
+    let v = addr(0x45);
+    s.policy.trusted_h01.insert(v);
+    s.add_job(JobSpec::new("long", Capability::Federated, serde_json::json!({})).with_lease_secs(20 * 86_400));
+    s.register(&h01_claim(v), "198.51.100.45", 0).unwrap();
+    assert_eq!(s.lease(v, 0).unwrap().id.0, "long");
+    s.add_job(JobSpec::new("p", Capability::Probe, serde_json::json!({})).with_lease_secs(3_600));
+    let a = addr(0x46);
+    s.register(&worker_probe(a), "203.0.113.46", 0).unwrap();
+    assert_eq!(s.lease(a, 0).unwrap().id.0, "p");
+    let honest = addr(0x47);
+    s.register(&worker_probe(honest), "192.0.2.47", 0).unwrap();
+    let mut now = 0;
+    let mut got = None;
+    while now < 20 * 86_400 - 600 {
+        now += 300;
+        let _ = s.renew(v, &JobId("long".into()), now);
+        if s.lease(honest, now).is_ok() {
+            got = Some(now);
+            break;
+        }
+    }
+    let got = got.expect("the probe job never returned to the open pool");
+    assert!(got <= 900 + LAPSE_HOLD_SECS + 300, "waited {got}");
+}
+
+/// The extended reservation is bounded: after RESERVATION_MAX_SECS past the
+/// lapse the job is open again even with an eligible vetted worker active.
+#[test]
+fn accounting_the_extended_reservation_is_bounded() {
+    let mut s = State::default();
+    s.policy.open_tier = Capability::Federated;
+    // Long renewal window so the vetted worker's sparse heartbeats below keep
+    // its own long lease live (it stays active and eligible throughout).
+    s.policy.lease_window_secs = 90 * 86_400;
+    let v = addr(0x35);
+    s.policy.trusted_h01.insert(v);
+    s.add_job(JobSpec::new("busy", Capability::Federated, serde_json::json!({})).with_lease_secs(90 * 86_400));
+    s.register(&h01_claim(v), "198.51.100.35", 0).unwrap();
+    s.lease(v, 0).unwrap();
+    s.add_job(job("f", Capability::Federated));
+    let q = addr(0x36);
+    s.register(&h01_claim(q), "203.0.113.36", 0).unwrap();
+    s.lease(q, 0).unwrap();
+    s.jobs.get_mut(&JobId("f".into())).unwrap().status = JobStatus::Leased {
+        worker: q,
+        expires_at: 100,
+        deadline: 100,
+    };
+    s.expire_leases(100);
+    let open = addr(0x37);
+    s.register(&h01_claim(open), "192.0.2.37", 100).unwrap();
+    let edge = 100 + RESERVATION_MAX_SECS;
+    let _ = s.renew(v, &JobId("busy".into()), edge - 1);
+    assert_eq!(s.lease(open, edge - 1), Err(LeaseError::NothingAvailable));
+    let _ = s.renew(v, &JobId("busy".into()), edge);
+    assert_eq!(s.lease(open, edge).unwrap().id.0, "f");
+}
+
+/// Bookkeeping-only changes (a poll refreshing last_seen, a refused request)
+/// do not mark the state dirty; real changes do.
+#[test]
+fn accounting_only_real_changes_mark_the_state_dirty() {
+    let mut s = with(&[("j", Capability::Probe)], &[(1, Capability::Probe)]);
+    s.take_dirty();
+    assert_eq!(s.lease(addr(9), 1), Err(LeaseError::UnknownWorker));
+    assert!(!s.take_dirty(), "unknown worker");
+    let mut e = with(&[], &[(1, Capability::Probe)]);
+    e.take_dirty();
+    assert_eq!(e.lease(addr(1), 5), Err(LeaseError::NothingAvailable));
+    assert!(!e.take_dirty(), "empty poll");
+    assert_eq!(s.lease(addr(1), 2).unwrap().id.0, "j");
+    assert!(s.take_dirty(), "a granted lease");
+    assert!(s.renew(addr(1), &JobId("j".into()), 3).is_ok());
+    assert!(s.take_dirty(), "a renewal");
+    assert_eq!(s.renew(addr(9), &JobId("j".into()), 3), Err(SubmitError::NotLeaseholder));
+    assert!(!s.take_dirty(), "a refused renewal");
+    s.submit(addr(1), &JobId("j".into()), "r".into(), 4).unwrap();
+    assert!(s.take_dirty(), "a submission");
+    s.add_job(job("k", Capability::Probe));
+    assert!(s.take_dirty(), "a new job");
+    s.register(&worker_probe(addr(2)), "z", 5).unwrap();
+    assert!(s.take_dirty(), "a new worker");
+    s.register(&worker_probe(addr(2)), "z", 6).unwrap();
+    assert!(!s.take_dirty(), "a refresh with nothing changed but last_seen");
+    s.register(&h01_claim(addr(2)), "z", 7).unwrap();
+    assert!(s.take_dirty(), "a claim change");
+    s.lease(addr(2), 8).unwrap();
+    s.take_dirty();
+    s.expire_leases(8 + 200);
+    assert!(s.take_dirty(), "an expiry");
+}
+
+/// Each registration field a refresh can change marks the state dirty on its
+/// own, and a change on top of an already-dirty state keeps it dirty.
+#[test]
+fn accounting_each_registration_field_marks_dirty() {
+    let base = worker_probe(addr(3));
+    let variants = [
+        RegisteredWorker { capability: Capability::Federated, ..base.clone() },
+        RegisteredWorker { backend: "candle-metal".into(), ..base.clone() },
+        RegisteredWorker { dtype: "bf16".into(), ..base.clone() },
+        RegisteredWorker { tokens_per_second: 2.0, ..base.clone() },
+    ];
+    for (i, v) in variants.iter().enumerate() {
+        let mut s = State::default();
+        s.register(&base, "z", 0).unwrap();
+        s.take_dirty();
+        s.register(v, "z", 1).unwrap();
+        assert!(s.take_dirty(), "variant {i}");
+    }
+    let mut s = State::default();
+    s.register(&base, "z", 0).unwrap();
+    s.take_dirty();
+    s.add_job(job("j", Capability::Probe)); // dirty, not yet taken
+    s.register(&variants[0], "z", 1).unwrap();
+    assert!(s.take_dirty(), "a second change must not clear the flag");
+}
