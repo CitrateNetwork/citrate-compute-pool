@@ -96,7 +96,9 @@ fn client(url: String) -> CoordinatorClient {
 #[tokio::test]
 async fn register_posts_the_probe_verbatim_with_a_recoverable_signature() {
     let probe = r#"{"schema":"nat.divergence-probe/1","backend":"candle-cuda"}"#;
-    let srv = StubServer::start(vec![(200, r#"{"worker":"0xabc","capability":"h01"}"#)]).await;
+    let me = format!("{:?}", wallet().address());
+    let reply = format!(r#"{{"worker":"{me}","capability":"h01"}}"#);
+    let srv = StubServer::start(vec![(200, Box::leak(reply.into_boxed_str()))]).await;
     let r = client(srv.url()).register(probe).await.unwrap();
     assert_eq!(r.capability, Capability::H01);
 
@@ -108,7 +110,11 @@ async fn register_posts_the_probe_verbatim_with_a_recoverable_signature() {
     // And the signature recovers to us, which is what the coordinator will check.
     let sig = hex::decode(sent["signature"].as_str().unwrap().trim_start_matches("0x")).unwrap();
     assert_eq!(
-        Wallet::recover_address(&attestation_digest(probe), &sig).unwrap(),
+        Wallet::recover_address(
+            &attestation_digest(probe, sent["timestamp"].as_u64().unwrap()),
+            &sig
+        )
+        .unwrap(),
         wallet().address()
     );
 }
@@ -304,4 +310,42 @@ async fn an_idle_worker_backs_off_instead_of_spinning() {
     // 5ms + 10ms + 20ms + 20ms of sleeping, so it cannot have spun through.
     assert!(started.elapsed() >= Duration::from_millis(50), "did not back off");
     assert!(srv.hit_count() >= 4);
+}
+
+/// The coordinator must register the address this worker signs as. A
+/// different one means the two sides disagree about the signing format (for
+/// example a coordinator older than this worker), and every later request
+/// would be refused, so registration fails loudly instead.
+#[tokio::test]
+async fn register_refuses_a_response_for_a_different_address() {
+    let probe = r#"{"schema":"nat.divergence-probe/1","backend":"candle-cuda"}"#;
+    let srv = StubServer::start(vec![(
+        200,
+        r#"{"worker":"0xdbea000000000000000000000000000000000001","capability":"h01"}"#,
+    )])
+    .await;
+    let err = client(srv.url()).register(probe).await.expect_err("must refuse");
+    let msg = err.to_string();
+    assert!(msg.contains("registered a different address"), "{msg}");
+}
+
+
+/// A 429 on registration is retried a bounded number of times.
+#[tokio::test]
+async fn register_retries_a_429_a_bounded_number_of_times() {
+    let probe = r#"{"schema":"nat.divergence-probe/1","backend":"candle-cuda"}"#;
+    let me = format!("{:?}", wallet().address());
+    let ok = format!(r#"{{"worker":"{me}","capability":"h01"}}"#);
+    let srv = StubServer::start(vec![
+        (429, r#"{"error":"registered too recently"}"#),
+        (200, Box::leak(ok.into_boxed_str())),
+    ])
+    .await;
+    assert!(client(srv.url()).register(probe).await.is_ok());
+    assert_eq!(srv.hit_count(), 2);
+
+    let busy = StubServer::start(vec![(429, r#"{"error":"busy"}"#)]).await;
+    let err = client(busy.url()).register(probe).await.expect_err("gives up");
+    assert!(matches!(err, ClientError::Rejected { status: 429, .. }));
+    assert_eq!(busy.hit_count(), REGISTER_ATTEMPTS as usize);
 }

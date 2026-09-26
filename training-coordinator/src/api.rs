@@ -14,7 +14,6 @@
 //! `GET  /v1/status`    — fleet counts. This is what alf-gateway polls to fill
 //!                        the round/training panels the portal already renders.
 
-use std::collections::HashSet;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
@@ -26,11 +25,6 @@ use axum::{Json, Router};
 use ethereum_types::H160;
 use parking_lot::Mutex;
 use serde::Serialize;
-
-/// Bound on the lease-replay set, mirroring the pool-coordinator's dedup cap. A
-/// captured lease request is only usable inside the freshness window, so the set
-/// only needs to remember that window's worth of (signer, timestamp) pairs.
-const LEASE_SEEN_CAP: usize = 10_000;
 
 /// PBA-L3b-001: new identities admitted per hour, across all sources. Refreshing
 /// an existing registration is free; only a key the coordinator has never seen
@@ -80,11 +74,20 @@ impl RegistrationBudget {
     }
 }
 
+use crate::admission::{Admission, Refused, MAX_FUTURE_SKEW_NANOS};
 use crate::attestation::{self, Attestation};
 use crate::job::JobSpec;
-use crate::state::{LeaseError, Policy, RegisterError, State};
+use crate::state::{LeaseError, Policy, RegisterError, State, SOURCE_SLOT_STALE_SECS};
 use crate::store::Store;
 use crate::submission::{recover_submitter, SignedSubmission};
+
+/// Why a registration was refused inside the state lock.
+enum RegFail {
+    Replay,
+    TooSoon { retry_after_secs: u64 },
+    Budget,
+    Registry(RegisterError),
+}
 
 pub struct Coordinator {
     state: Mutex<State>,
@@ -92,7 +95,7 @@ pub struct Coordinator {
     /// Recently-seen (signer, timestamp) lease requests, to refuse an exact
     /// replay within the freshness window (CP-B-002). In-memory only: the
     /// freshness window bounds replay across a restart, so this need not persist.
-    lease_seen: Mutex<HashSet<(H160, u64)>>,
+    admission: Mutex<Admission>,
     /// PBA-L3b-001: budget for never-seen identities.
     new_registrations: Mutex<RegistrationBudget>,
 }
@@ -109,39 +112,66 @@ impl Coordinator {
     pub fn open_with(store: Store, policy: Policy) -> std::io::Result<Self> {
         let mut state = store.load()?;
         state.policy = policy;
+        // A policy tightened across a restart applies to leases already out.
+        let revoked = state.revoke_out_of_policy();
+        if !revoked.is_empty() {
+            tracing::info!(
+                ?revoked,
+                "requeued leases the current tier policy no longer allows"
+            );
+        }
+        // Live leases get a fresh renewal window across a restart.
+        state.grace_live_leases(unix_now());
+        // One save covers both (each marks the state dirty if it changed it).
+        if state.take_dirty() {
+            store.save(&state)?;
+        }
         Ok(Self {
             state: Mutex::new(state),
             store,
-            lease_seen: Mutex::new(HashSet::new()),
+            admission: Mutex::new(Admission::default()),
             new_registrations: Mutex::new(RegistrationBudget::new()),
         })
-    }
-
-    /// Record that `(who, timestamp)` has asked for a lease. Returns `false` if it
-    /// was already recorded — an exact replay of a captured request, which must be
-    /// refused. Bounded like the pool-coordinator's dedup set: when full, drop the
-    /// oldest-observed half (a brute-force but deterministic eviction).
-    fn note_lease_seen(&self, who: H160, timestamp: u64) -> bool {
-        let mut set = self.lease_seen.lock();
-        if set.len() >= LEASE_SEEN_CAP {
-            let drop_count = set.len() / 2;
-            let to_remove: Vec<_> = set.iter().take(drop_count).cloned().collect();
-            for k in to_remove {
-                set.remove(&k);
-            }
-        }
-        set.insert((who, timestamp))
     }
 
     /// Run `f`, then persist. If persisting fails the change is still live in
     /// memory, and the error is returned so the caller can refuse the request —
     /// reporting success for a lease that would vanish on restart is worse than
     /// reporting failure for one that was granted.
+    ///
+    /// Only persists when `f` changed something that must survive a restart
+    /// ([`State::take_dirty`]): a refused request or a poll that only
+    /// refreshes `last_seen` costs no serialisation and no fsync.
     fn mutate<T>(&self, f: impl FnOnce(&mut State) -> T) -> std::io::Result<T> {
         let mut g = self.state.lock();
         let out = f(&mut g);
-        self.store.save(&g)?;
+        if g.take_dirty() {
+            if let Err(e) = self.store.save(&g) {
+                // Not persisted: keep it pending so the next request retries.
+                g.mark_dirty();
+                return Err(e);
+            }
+        }
         Ok(out)
+    }
+
+    /// [`Coordinator::mutate`] on the blocking pool, so a slow disk (the
+    /// save fsyncs) stalls only this request and never the async runtime that
+    /// serves every other worker's heartbeat.
+    async fn mutate_off_runtime<T: Send + 'static>(
+        self: &Arc<Self>,
+        f: impl FnOnce(&mut State) -> T + Send + 'static,
+    ) -> std::io::Result<T> {
+        let me = Arc::clone(self);
+        match tokio::task::spawn_blocking(move || me.mutate(f)).await {
+            Ok(r) => r,
+            Err(e) => Err(std::io::Error::other(e.to_string())),
+        }
+    }
+
+    /// Timestamps currently remembered by per-key admission.
+    pub fn admission_len(&self) -> usize {
+        self.admission.lock().len()
     }
 
     pub fn snapshot(&self) -> State {
@@ -205,40 +235,120 @@ pub fn source_of(peer: Option<SocketAddr>, headers: &HeaderMap) -> String {
     }
 }
 
+/// Registration handler; the work is in [`register_inner`].
 async fn register(
+    state: AxumState<Arc<Coordinator>>,
+    peer: Option<ConnectInfo<SocketAddr>>,
+    headers: HeaderMap,
+    body: Json<Attestation>,
+) -> Response {
+    match register_inner(state, peer, headers, body).await {
+        Ok(j) => j.into_response(),
+        Err(r) => *r,
+    }
+}
+
+async fn register_inner(
     AxumState(c): AxumState<Arc<Coordinator>>,
     peer: Option<ConnectInfo<SocketAddr>>,
     headers: HeaderMap,
     Json(att): Json<Attestation>,
-) -> Result<Json<RegisterResponse>, ApiError> {
-    let w = attestation::verify(&att).map_err(|e| err(StatusCode::BAD_REQUEST, e.to_string()))?;
+) -> Result<Json<RegisterResponse>, Box<Response>> {
+    // A registration is bound to the moment it was signed, like a lease or a
+    // heartbeat: stale or repeated bodies are refused.
+    if att.timestamp == 0 {
+        return Err(err(
+            StatusCode::UPGRADE_REQUIRED,
+            "worker too old: registration requires a signed timestamp; upgrade the worker",
+        )
+        .into_response()
+        .into());
+    }
+    if !fresh(att.timestamp, unix_now_nanos()) {
+        return Err(err(
+            StatusCode::UNAUTHORIZED,
+            "registration timestamp is outside the freshness window",
+        )
+        .into_response()
+        .into());
+    }
+    let w = attestation::verify(&att)
+        .map_err(|e| err(StatusCode::BAD_REQUEST, e.to_string()).into_response())?;
+    let ts = att.timestamp;
     let source = source_of(peer.map(|ConnectInfo(a)| a), &headers);
     let now = unix_now();
+    let (c2, w2, source2) = (Arc::clone(&c), w.clone(), source.clone());
     let granted = c
-        .mutate(|s| {
+        .mutate_off_runtime(move |s| {
+            // Checks that change nothing come first, so a refused request
+            // never causes a save.
+            if s.registration_seen(w2.id, ts) {
+                return Err(RegFail::Replay);
+            }
+            if let Some(known) = s.workers.get(&w2.id) {
+                if now
+                    < known
+                        .last_registration
+                        .saturating_add(s.policy.register_refresh_secs)
+                {
+                    return Err(RegFail::TooSoon {
+                        retry_after_secs: known
+                            .last_registration
+                            .saturating_add(s.policy.register_refresh_secs)
+                            .saturating_sub(now),
+                    });
+                }
+            }
             // PBA-L3b-001: a never-seen identity spends from the global budget,
             // but only once its source is known to have room, so a full source
             // cannot drain the budget and lock out every other newcomer.
-            if !s.workers.contains_key(&w.id) && !s.policy.is_trusted(&w.id) {
-                s.admits_new(&w.id, &source, now).map_err(Some)?;
-                if !c.new_registrations.lock().try_take(now) {
-                    return Err(None);
+            if !s.workers.contains_key(&w2.id) && !s.policy.is_trusted(&w2.id) {
+                s.admits_new(&w2.id, &source2, now)
+                    .map_err(RegFail::Registry)?;
+                if !c2.new_registrations.lock().try_take(now) {
+                    return Err(RegFail::Budget);
                 }
             }
-            s.register(&w, &source, now).map_err(Some)
+            let granted = s.register(&w2, &source2, now).map_err(RegFail::Registry)?;
+            // Recorded only once accepted, so a refused registration
+            // changes nothing and costs no save.
+            s.note_registration(w2.id, ts, unix_now_nanos());
+            Ok(granted)
         })
+        .await
         .map_err(|e| {
             err(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 format!("could not persist: {e}"),
             )
+            .into_response()
         })?
-        .map_err(|e: Option<RegisterError>| match e {
-            None => err(
-                StatusCode::TOO_MANY_REQUESTS,
-                "too many new registrations; retry later",
+        .map_err(|e| match e {
+            RegFail::Budget => with_retry_after(
+                err(
+                    StatusCode::TOO_MANY_REQUESTS,
+                    "too many new registrations; retry later",
+                )
+                .into_response(),
+                3_600 / NEW_REGISTRATIONS_PER_HOUR,
             ),
-            Some(e) => err(StatusCode::TOO_MANY_REQUESTS, e.to_string()),
+            RegFail::TooSoon { retry_after_secs } => with_retry_after(
+                err(
+                    StatusCode::TOO_MANY_REQUESTS,
+                    "registered too recently; retry later",
+                )
+                .into_response(),
+                retry_after_secs,
+            ),
+            RegFail::Replay => err(
+                StatusCode::UNAUTHORIZED,
+                "registration already used (replay)",
+            )
+            .into_response(),
+            RegFail::Registry(e) => with_retry_after(
+                err(StatusCode::TOO_MANY_REQUESTS, e.to_string()).into_response(),
+                SOURCE_SLOT_STALE_SECS,
+            ),
         })?;
     Ok(Json(RegisterResponse {
         worker: format!("{:?}", w.id),
@@ -246,37 +356,67 @@ async fn register(
     }))
 }
 
-/// Check freshness, recover the signer over `digest`, and refuse an exact
-/// replay (CP-B-002). Shared by every signed, timestamp-bound request.
-fn authenticate(
-    c: &Coordinator,
-    timestamp: u64,
-    digest: &[u8; 32],
-    signature: &[u8],
-) -> Result<H160, ApiError> {
-    if unix_now_nanos().abs_diff(timestamp) > LEASE_FRESHNESS_NANOS {
+/// Is a signed timestamp acceptable at `now_nanos`? Up to the freshness window
+/// behind the coordinator clock, and only a small clock skew ahead of it (a
+/// request cannot be pre-signed far into the future).
+fn fresh(timestamp: u64, now_nanos: u64) -> bool {
+    timestamp <= now_nanos.saturating_add(MAX_FUTURE_SKEW_NANOS)
+        && now_nanos.saturating_sub(timestamp) <= LEASE_FRESHNESS_NANOS
+}
+
+/// Check freshness and recover the signer over `digest`. Takes no lock: the
+/// single-use and per-key limits are applied by [`admit`] inside the state
+/// mutation, off the async runtime.
+fn verify_signed(timestamp: u64, digest: &[u8; 32], signature: &[u8]) -> Result<H160, ApiError> {
+    if !fresh(timestamp, unix_now_nanos()) {
         return Err(err(
             StatusCode::UNAUTHORIZED,
             "request timestamp is outside the freshness window",
         ));
     }
-    let who = citrate_training_worker::wallet::Wallet::recover_address(digest, signature)
-        .map_err(|_| err(StatusCode::UNAUTHORIZED, "signature does not recover"))?;
-    if !c.note_lease_seen(who, timestamp) {
-        return Err(err(
-            StatusCode::UNAUTHORIZED,
-            "request already used (replay)",
-        ));
-    }
-    Ok(who)
+    citrate_training_worker::wallet::Wallet::recover_address(digest, signature)
+        .map_err(|_| err(StatusCode::UNAUTHORIZED, "signature does not recover"))
 }
 
-fn too_many(until: u64, now: u64, msg: String) -> Response {
-    let mut r = err(StatusCode::TOO_MANY_REQUESTS, msg).into_response();
-    if let Ok(v) = until.saturating_sub(now).max(1).to_string().parse() {
+/// Per-key admission for a registered signer (an unknown key's request does
+/// nothing, so it is not recorded). Call with the state lock held.
+fn admit(c: &Coordinator, s: &State, who: H160, timestamp: u64) -> Result<(), Refused> {
+    if !s.workers.contains_key(&who) {
+        return Ok(());
+    }
+    c.admission.lock().admit(who, timestamp, unix_now_nanos())
+}
+
+fn refused(r: Refused) -> Response {
+    match r {
+        Refused::Replay => {
+            err(StatusCode::UNAUTHORIZED, "request already used (replay)").into_response()
+        }
+        Refused::TooFast { retry_after_secs } | Refused::OverQuota { retry_after_secs } => {
+            with_retry_after(
+                err(
+                    StatusCode::TOO_MANY_REQUESTS,
+                    "too many requests from this key; retry later",
+                )
+                .into_response(),
+                retry_after_secs,
+            )
+        }
+    }
+}
+
+fn with_retry_after(mut r: Response, secs: u64) -> Response {
+    if let Ok(v) = secs.max(1).to_string().parse() {
         r.headers_mut().insert(axum::http::header::RETRY_AFTER, v);
     }
     r
+}
+
+fn too_many(until: u64, now: u64, msg: String) -> Response {
+    with_retry_after(
+        err(StatusCode::TOO_MANY_REQUESTS, msg).into_response(),
+        until.saturating_sub(now),
+    )
 }
 
 async fn lease(
@@ -286,18 +426,22 @@ async fn lease(
     // CP-B-002: reject a stale or far-future timestamp so a captured request is
     // usable only inside a short window, then recover the signer over the SAME
     // timestamp it signed, then refuse an exact replay within that window.
-    let who = match authenticate(
-        &c,
-        req.timestamp,
-        &lease_digest(req.timestamp),
-        &req.signature,
-    ) {
+    let ts = req.timestamp;
+    let who = match verify_signed(ts, &lease_digest(ts), &req.signature) {
         Ok(w) => w,
         Err(e) => return e.into_response(),
     };
     let now = unix_now();
-    let got = match c.mutate(|s| s.lease(who, now)) {
-        Ok(g) => g,
+    let c2 = Arc::clone(&c);
+    let got = match c
+        .mutate_off_runtime(move |s| {
+            admit(&c2, s, who, ts)?;
+            Ok(s.lease(who, now))
+        })
+        .await
+    {
+        Ok(Ok(g)) => g,
+        Ok(Err(r)) => return refused(r),
         Err(e) => {
             return err(
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -324,24 +468,30 @@ async fn lease(
 async fn heartbeat(
     AxumState(c): AxumState<Arc<Coordinator>>,
     Json(req): Json<HeartbeatRequest>,
-) -> Result<Json<HeartbeatResponse>, ApiError> {
-    let who = authenticate(
-        &c,
-        req.timestamp,
-        &heartbeat_digest(&req.job, req.timestamp),
-        &req.signature,
-    )?;
+) -> Response {
+    let ts = req.timestamp;
+    let who = match verify_signed(ts, &heartbeat_digest(&req.job, ts), &req.signature) {
+        Ok(w) => w,
+        Err(e) => return e.into_response(),
+    };
     let now = unix_now();
-    let expires_at = c
-        .mutate(|s| s.renew(who, &req.job, now))
-        .map_err(|e| {
-            err(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("could not persist: {e}"),
-            )
-        })?
-        .map_err(|e| err(StatusCode::CONFLICT, e.to_string()))?;
-    Ok(Json(HeartbeatResponse { expires_at }))
+    let (c2, job) = (Arc::clone(&c), req.job.clone());
+    match c
+        .mutate_off_runtime(move |s| {
+            admit(&c2, s, who, ts)?;
+            Ok(s.renew(who, &job, now))
+        })
+        .await
+    {
+        Ok(Ok(Ok(expires_at))) => Json(HeartbeatResponse { expires_at }).into_response(),
+        Ok(Ok(Err(e))) => err(StatusCode::CONFLICT, e.to_string()).into_response(),
+        Ok(Err(r)) => refused(r),
+        Err(e) => err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("could not persist: {e}"),
+        )
+        .into_response(),
+    }
 }
 
 async fn submit(
@@ -350,7 +500,9 @@ async fn submit(
 ) -> Result<StatusCode, ApiError> {
     let who = recover_submitter(&sub).map_err(|e| err(StatusCode::UNAUTHORIZED, e.to_string()))?;
     let now = unix_now();
-    c.mutate(|s| s.submit(who, &sub.job, sub.payload.clone(), now))
+    let (job, payload) = (sub.job.clone(), sub.payload.clone());
+    c.mutate_off_runtime(move |s| s.submit(who, &job, payload, now))
+        .await
         .map_err(|e| {
             err(
                 StatusCode::INTERNAL_SERVER_ERROR,

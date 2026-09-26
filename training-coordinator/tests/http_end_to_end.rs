@@ -15,9 +15,9 @@ use citrate_training_coordinator::state::Policy;
 use citrate_training_coordinator::store::Store;
 use citrate_training_coordinator::submission::submission_digest;
 use citrate_training_coordinator::JobId;
+use citrate_training_worker::coordinator_protocol::attestation_digest;
 use citrate_training_worker::wallet::Wallet;
 use http_body_util::BodyExt;
-use sha3::{Digest, Keccak256};
 use tower::ServiceExt;
 
 // Anvil account #0 / #1 — well-known throwaways, NOT real keys.
@@ -25,7 +25,14 @@ const KEY_A: &str = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf
 const KEY_B: &str = "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d";
 
 fn tmp(name: &str) -> std::path::PathBuf {
-    let d = std::env::temp_dir().join(format!("citrate-coord-http-{name}"));
+    // Unique per process and call, so two suite runs on one host (or two
+    // tests sharing a name) never share a state file.
+    static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = N.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let d = std::env::temp_dir().join(format!(
+        "citrate-coord-http-{name}-{}-{n}",
+        std::process::id()
+    ));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).unwrap();
     d.join("state.json")
@@ -47,14 +54,6 @@ fn hex_sig(key: &str, digest: &[u8; 32]) -> String {
         "0x{}",
         hex::encode(w.sign_digest_recoverable(digest).unwrap())
     )
-}
-
-fn keccak(b: &[u8]) -> [u8; 32] {
-    let mut h = Keccak256::new();
-    h.update(b);
-    let mut d = [0u8; 32];
-    d.copy_from_slice(&h.finalize());
-    d
 }
 
 fn post(path: &str, body: serde_json::Value) -> Request<Body> {
@@ -91,10 +90,14 @@ fn coordinator_trusting(name: &str, jobs: Vec<JobSpec>, keys: &[&str]) -> Arc<Co
     c
 }
 
+/// A fresh, timestamp-bound registration, signed the way the worker client
+/// signs it.
 fn register_body(key: &str, body: &str) -> serde_json::Value {
+    let ts = unix_nanos();
     serde_json::json!({
         "probe_json": body,
-        "signature": hex_sig(key, &keccak(body.as_bytes())),
+        "timestamp": ts,
+        "signature": hex_sig(key, &attestation_digest(body, ts)),
     })
 }
 
@@ -587,7 +590,7 @@ async fn pba_l3b_001_fresh_h01_keys_cannot_squat_the_ladder_over_http() {
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
-        assert_eq!(json_of(res).await["capability"], "federated");
+        assert_eq!(json_of(res).await["capability"], "probe");
         let res = router(c.clone())
             .oneshot(post("/v1/lease", lease_body(&k)))
             .await
@@ -615,7 +618,13 @@ async fn pba_l3b_001_fresh_h01_keys_cannot_squat_the_ladder_over_http() {
 #[tokio::test]
 async fn pba_l3b_001_new_identity_registration_is_rate_limited() {
     use citrate_training_coordinator::api::NEW_REGISTRATION_BURST;
-    let c = coordinator("reg-budget", vec![]);
+    // The final refresh below re-registers a key immediately, so the per-key
+    // refresh interval is off here (it has its own test).
+    let policy = Policy {
+        register_refresh_secs: 0,
+        ..Policy::default()
+    };
+    let c = Arc::new(Coordinator::open_with(Store::new(tmp("reg-budget")), policy).unwrap());
     let body = probe("candle-cpu", "f32", 7_786.0, true);
     let mut limited = None;
     for i in 0..(NEW_REGISTRATION_BURST + 5) {
@@ -815,7 +824,7 @@ async fn pba_l3b_001_second_concurrent_lease_is_refused_over_http() {
 }
 
 /// Drive the real client through one job of `job_ms` against a coordinator
-/// with a `window_secs` renewal window, heartbeating every 200 ms. `blocking`
+/// with a `window_secs` renewal window, heartbeating every 2 s. `blocking`
 /// models the job as synchronous CPU work (`std::thread::sleep`, no await
 /// point), which is what the real candle executor is.
 async fn run_one_heartbeated_job(
@@ -834,43 +843,49 @@ async fn run_one_heartbeated_job(
     )
     .unwrap();
     let client = fast_client(serve(c.clone()).await, KEY_A)
-        .with_heartbeat_every(std::time::Duration::from_millis(200));
+        // Every heartbeat fsyncs the coordinator's state file; a 2 s cadence
+        // keeps the test from saturating a busy disk with syncs.
+        .with_heartbeat_every(std::time::Duration::from_secs(2));
     client
         .register(&probe("candle-cpu", "f32", 7_137.0, true))
         .await
         .unwrap();
     let ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let r = ran.clone();
-    client
-        .poll_loop(
-            move |_job| {
-                let r = r.clone();
-                async move {
-                    if blocking {
-                        std::thread::sleep(std::time::Duration::from_millis(job_ms));
-                    } else {
-                        tokio::time::sleep(std::time::Duration::from_millis(job_ms)).await;
-                    }
-                    r.store(true, std::sync::atomic::Ordering::SeqCst);
-                    Ok("{}".to_string())
+    let run = client.poll_loop(
+        move |_job| {
+            let r = r.clone();
+            async move {
+                if blocking {
+                    std::thread::sleep(std::time::Duration::from_millis(job_ms));
+                } else {
+                    tokio::time::sleep(std::time::Duration::from_millis(job_ms)).await;
                 }
-            },
-            {
-                let r = ran.clone();
-                move || !r.load(std::sync::atomic::Ordering::SeqCst)
-            },
-        )
+                r.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok("{}".to_string())
+            }
+        },
+        {
+            let r = ran.clone();
+            move || !r.load(std::sync::atomic::Ordering::SeqCst)
+        },
+    );
+    // Never hang the suite: a lost lease makes the poll loop spin forever.
+    tokio::time::timeout(std::time::Duration::from_secs(60), run)
         .await
+        .expect("poll loop did not finish within 60 s")
         .unwrap();
     c.snapshot().counts().done
 }
 
 /// The real client heartbeats a running job, and that is what keeps the lease:
-/// a 7 s job against a 4 s window is only accepted if heartbeats landed.
+/// an 18 s job against a 15 s window is only accepted if heartbeats landed
+/// (the window is generous because each heartbeat fsyncs the state file, which
+/// can stall for seconds on a busy shared disk).
 #[tokio::test]
 async fn pba_l3b_001_the_real_client_heartbeats_while_a_job_runs() {
     assert_eq!(
-        run_one_heartbeated_job("client-hb", 4, 7_000, false).await,
+        run_one_heartbeated_job("client-hb", 15, 18_000, false).await,
         1,
         "the heartbeated lease must still be live when the result is submitted"
     );
@@ -883,7 +898,7 @@ async fn pba_l3b_001_the_real_client_heartbeats_while_a_job_runs() {
 #[tokio::test]
 async fn pba_l3b_001_a_blocking_job_is_still_heartbeated() {
     assert_eq!(
-        run_one_heartbeated_job("client-hb-blocking", 4, 7_000, true).await,
+        run_one_heartbeated_job("client-hb-blocking", 15, 18_000, true).await,
         1,
         "a synchronous job lost its lease: heartbeats never fired"
     );
@@ -893,7 +908,7 @@ async fn pba_l3b_001_a_blocking_job_is_still_heartbeated() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn pba_l3b_001_a_blocking_job_is_still_heartbeated_multi_thread() {
     assert_eq!(
-        run_one_heartbeated_job("client-hb-blocking-mt", 4, 7_000, true).await,
+        run_one_heartbeated_job("client-hb-blocking-mt", 15, 18_000, true).await,
         1,
         "a synchronous job lost its lease: heartbeats never fired"
     );
@@ -934,4 +949,428 @@ async fn pba_l3b_001_a_full_source_cannot_drain_the_registration_budget() {
         StatusCode::OK,
         "honest onboarding denied by one host"
     );
+}
+
+/// A coordinator restarted with a tighter tier policy requeues leases the new
+/// policy no longer allows, and persists that.
+#[tokio::test]
+async fn tier_restart_with_a_tighter_policy_requeues_disallowed_leases() {
+    let path = tmp("tier-restart");
+    let open = Policy {
+        open_tier: Capability::Federated,
+        ..Policy::default()
+    };
+    let first = Arc::new(Coordinator::open_with(Store::new(&path), open).unwrap());
+    first
+        .add_job(
+            JobSpec::new("f", Capability::Federated, serde_json::json!({})).with_lease_secs(9999),
+        )
+        .unwrap();
+    let fast = probe("candle-cuda", "f32", 71_098.0, true);
+    router(first.clone())
+        .oneshot(post("/v1/register", register_body(KEY_A, &fast)))
+        .await
+        .unwrap();
+    let res = router(first.clone())
+        .oneshot(post("/v1/lease", lease_body(KEY_A)))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    drop(first);
+
+    let second = Arc::new(Coordinator::open_with(Store::new(&path), Policy::default()).unwrap());
+    let c = second.snapshot().counts();
+    assert_eq!(
+        (c.leased, c.pending),
+        (0, 1),
+        "the federated lease is requeued at boot"
+    );
+    let on_disk = Store::new(&path).load().unwrap().counts();
+    assert_eq!((on_disk.leased, on_disk.pending), (0, 1), "and persisted");
+}
+
+// ── Registration freshness and persistence ────────────────────────────
+
+/// A registration is bound to a fresh timestamp: an exact repeat of a
+/// earlier body, or a stale one, is refused, so it cannot lower a vetted
+/// worker's claim or its live lease.
+#[tokio::test]
+async fn registration_is_fresh_and_single_use() {
+    // Re-registering the same key back to back is part of this test, so the
+    // per-key refresh interval is off here (it has its own test).
+    let mut policy = Policy {
+        register_refresh_secs: 0,
+        ..Policy::default()
+    };
+    policy
+        .trusted_h01
+        .insert(Wallet::from_hex(KEY_A).unwrap().address());
+    let c = Arc::new(Coordinator::open_with(Store::new(tmp("reg-fresh")), policy).unwrap());
+    c.add_job(JobSpec::new("ladder", Capability::H01, serde_json::json!({})).with_lease_secs(9999))
+        .unwrap();
+    let earlier = register_body(KEY_A, &probe("candle-cpu", "f32", 1.0, true));
+    let res = router(c.clone())
+        .oneshot(post("/v1/register", earlier.clone()))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let fast = probe("candle-cuda", "f32", 71_098.0, true);
+    let res = router(c.clone())
+        .oneshot(post("/v1/register", register_body(KEY_A, &fast)))
+        .await
+        .unwrap();
+    assert_eq!(json_of(res).await["capability"], "h01");
+    let res = router(c.clone())
+        .oneshot(post("/v1/lease", lease_body(KEY_A)))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    // The earlier body again: refused.
+    let res = router(c.clone())
+        .oneshot(post("/v1/register", earlier))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    let res = router(c.clone())
+        .oneshot(post("/v1/heartbeat", heartbeat_body(KEY_A, "ladder")))
+        .await
+        .unwrap();
+    assert_eq!(
+        res.status(),
+        StatusCode::OK,
+        "the vetted lease is untouched"
+    );
+    // A stale or missing timestamp is refused outright.
+    let body = probe("candle-cpu", "f32", 7_000.0, true);
+    let stale_ts = 1_000_000_000u64;
+    let stale = serde_json::json!({
+        "probe_json": body,
+        "timestamp": stale_ts,
+        "signature": hex_sig(KEY_B, &attestation_digest(&body, stale_ts)),
+    });
+    let res = router(c.clone())
+        .oneshot(post("/v1/register", stale))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    let legacy = serde_json::json!({
+        "probe_json": body,
+        "signature": hex_sig(KEY_B, &attestation_digest(&body, 0)),
+    });
+    let res = router(c.clone())
+        .oneshot(post("/v1/register", legacy))
+        .await
+        .unwrap();
+    // No timestamp at all: an older worker, told to upgrade.
+    assert_eq!(res.status(), StatusCode::UPGRADE_REQUIRED);
+}
+
+/// Requests that change nothing do not rewrite the state file.
+#[tokio::test]
+async fn persistence_requests_that_change_nothing_do_not_rewrite_state() {
+    let path = tmp("no-op-save");
+    let c = Arc::new(Coordinator::open_with(Store::new(&path), Policy::default()).unwrap());
+    for i in 0..50 {
+        c.add_job(JobSpec::new(
+            format!("j{i}"),
+            Capability::H01,
+            serde_json::json!({"pad": "x".repeat(500)}),
+        ))
+        .unwrap();
+    }
+    let res = router(c.clone())
+        .oneshot(post(
+            "/v1/register",
+            register_body(KEY_B, &probe("candle-cpu", "f32", 7_000.0, true)),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let m0 = std::fs::metadata(&path).unwrap().modified().unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    let stranger = "0x1111111111111111111111111111111111111111111111111111111111111111";
+    for _ in 0..10 {
+        let res = router(c.clone())
+            .oneshot(post("/v1/lease", lease_body(stranger)))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::FORBIDDEN);
+        // A registered worker with nothing it may do: 204, nothing to persist.
+        let res = router(c.clone())
+            .oneshot(post("/v1/lease", lease_body(KEY_B)))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NO_CONTENT);
+        let res = router(c.clone())
+            .oneshot(post("/v1/heartbeat", heartbeat_body(stranger, "j0")))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::CONFLICT);
+    }
+    let m1 = std::fs::metadata(&path).unwrap().modified().unwrap();
+    assert_eq!(m0, m1, "no-op requests rewrote the state file");
+}
+
+/// A worker from before registration carried a timestamp is told plainly
+/// that it must be upgraded, not that its clock is off.
+#[tokio::test]
+async fn lifecycle_an_old_worker_is_told_to_upgrade() {
+    let c = coordinator("old-worker", vec![]);
+    let body = probe("candle-cpu", "f32", 7_000.0, true);
+    let legacy = serde_json::json!({
+        "probe_json": body,
+        "signature": hex_sig(KEY_B, &attestation_digest(&body, 0)),
+    });
+    let res = router(c)
+        .oneshot(post("/v1/register", legacy))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::UPGRADE_REQUIRED);
+    let msg = json_of(res).await["error"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert!(msg.contains("worker too old"), "{msg}");
+    assert!(msg.contains("upgrade the worker"), "{msg}");
+}
+
+/// Registrations accepted before a restart stay single-use after it.
+#[tokio::test]
+async fn lifecycle_registration_stays_single_use_across_a_restart() {
+    let path = tmp("reg-restart");
+    let first = Arc::new(Coordinator::open_with(Store::new(&path), Policy::default()).unwrap());
+    let body = register_body(KEY_A, &probe("candle-cpu", "f32", 7_000.0, true));
+    let res = router(first.clone())
+        .oneshot(post("/v1/register", body.clone()))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    drop(first);
+    let second = Arc::new(Coordinator::open_with(Store::new(&path), Policy::default()).unwrap());
+    let res = router(second)
+        .oneshot(post("/v1/register", body))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+}
+
+/// One key cannot re-register faster than the refresh interval.
+#[tokio::test]
+async fn lifecycle_registration_refresh_is_throttled_per_key() {
+    let c = coordinator("reg-throttle", vec![]);
+    let slow = probe("candle-cpu", "f32", 7_000.0, true);
+    let other = probe("candle-cpu", "f32", 7_001.0, true);
+    let res = router(c.clone())
+        .oneshot(post("/v1/register", register_body(KEY_A, &slow)))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let res = router(c.clone())
+        .oneshot(post("/v1/register", register_body(KEY_A, &other)))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::TOO_MANY_REQUESTS);
+    // Another key is unaffected.
+    let res = router(c.clone())
+        .oneshot(post("/v1/register", register_body(KEY_B, &slow)))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+}
+
+/// A failed save leaves the change pending, and the next request persists it.
+#[tokio::test]
+async fn lifecycle_a_failed_save_is_retried() {
+    let dir = tmp("save-retry");
+    let path = dir.clone();
+    let parent = path.parent().unwrap().to_path_buf();
+    let c = Arc::new(Coordinator::open_with(Store::new(&path), Policy::default()).unwrap());
+    c.add_job(JobSpec::new("j", Capability::Probe, serde_json::json!({})))
+        .unwrap();
+    let res = router(c.clone())
+        .oneshot(post(
+            "/v1/register",
+            register_body(KEY_A, &probe("candle-cpu", "f32", 7_000.0, true)),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    // Make the state directory unwritable by replacing it with a file.
+    std::fs::remove_dir_all(&parent).unwrap();
+    std::fs::write(&parent, b"not a directory").unwrap();
+    let res = router(c.clone())
+        .oneshot(post("/v1/lease", lease_body(KEY_A)))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    // Disk back; a request that changes nothing itself still flushes it.
+    std::fs::remove_file(&parent).unwrap();
+    std::fs::create_dir_all(&parent).unwrap();
+    let res = router(c.clone())
+        .oneshot(post("/v1/lease", lease_body(KEY_A)))
+        .await
+        .unwrap();
+    assert_ne!(res.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let on_disk = Store::new(&path).load().unwrap().counts();
+    assert_eq!(
+        on_disk.leased, 1,
+        "the lease granted before the failed save was persisted"
+    );
+}
+
+// ── Per-key admission ──────────────────────────────────────────────────
+
+fn lease_body_at(key: &str, ts: u64) -> serde_json::Value {
+    serde_json::json!({ "timestamp": ts, "signature": hex_sig(key, &lease_digest(ts)) })
+}
+
+/// One registered key sending requests as fast as it can only gets itself
+/// refused (429 + Retry-After); another key's heartbeat on a live lease is
+/// unaffected, and the refused key's requests are not remembered.
+#[tokio::test]
+async fn admission_one_key_cannot_crowd_out_another() {
+    let policy = Policy {
+        register_refresh_secs: 0,
+        ..Policy::default()
+    };
+    let c = Arc::new(Coordinator::open_with(Store::new(tmp("admission")), policy).unwrap());
+    c.add_job(JobSpec::new("j", Capability::Probe, serde_json::json!({})).with_lease_secs(9_999))
+        .unwrap();
+    let cpu = probe("candle-cpu", "f32", 7_000.0, true);
+    for k in [KEY_A, KEY_B] {
+        let res = router(c.clone())
+            .oneshot(post("/v1/register", register_body(k, &cpu)))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+    }
+    let res = router(c.clone())
+        .oneshot(post("/v1/lease", lease_body(KEY_A)))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    // KEY_B sends polls as fast as it can, each with a distinct timestamp.
+    let base = unix_nanos();
+    let mut limited = 0;
+    for i in 0..500u64 {
+        let res = router(c.clone())
+            .oneshot(post("/v1/lease", lease_body_at(KEY_B, base + i)))
+            .await
+            .unwrap();
+        if res.status() == StatusCode::TOO_MANY_REQUESTS {
+            assert!(
+                res.headers().get("retry-after").is_some(),
+                "429 carries Retry-After"
+            );
+            limited += 1;
+        } else {
+            assert_ne!(res.status(), StatusCode::SERVICE_UNAVAILABLE);
+        }
+    }
+    assert!(limited >= 400, "the busy key is limited ({limited} of 500)");
+    assert!(
+        c.admission_len() <= 20,
+        "refused requests are not remembered: {}",
+        c.admission_len()
+    );
+    // The honest leaseholder's heartbeat still works.
+    let res = router(c.clone())
+        .oneshot(post("/v1/heartbeat", heartbeat_body(KEY_A, "j")))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+}
+
+/// A request dated more than the allowed clock skew ahead is refused.
+#[tokio::test]
+async fn admission_future_dated_requests_are_refused() {
+    let c = coordinator("future", vec![]);
+    let cpu = probe("candle-cpu", "f32", 7_000.0, true);
+    router(c.clone())
+        .oneshot(post("/v1/register", register_body(KEY_A, &cpu)))
+        .await
+        .unwrap();
+    let ahead = unix_nanos() + 115 * 1_000_000_000;
+    let res = router(c.clone())
+        .oneshot(post("/v1/lease", lease_body_at(KEY_A, ahead)))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    let near = unix_nanos() + 5 * 1_000_000_000;
+    let res = router(c.clone())
+        .oneshot(post("/v1/lease", lease_body_at(KEY_A, near)))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::NO_CONTENT, "small skew is fine");
+    let body = probe("candle-cpu", "f32", 7_001.0, true);
+    let ts = unix_nanos() + 115 * 1_000_000_000;
+    let reg = serde_json::json!({
+        "probe_json": body,
+        "timestamp": ts,
+        "signature": hex_sig(KEY_B, &attestation_digest(&body, ts)),
+    });
+    let res = router(c.clone())
+        .oneshot(post("/v1/register", reg))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+}
+
+/// Requests from signers that are not registered are never remembered.
+#[tokio::test]
+async fn admission_unregistered_signers_are_not_recorded() {
+    let c = coordinator("unregistered", vec![]);
+    let stranger = "0x1111111111111111111111111111111111111111111111111111111111111111";
+    for _ in 0..20 {
+        let res = router(c.clone())
+            .oneshot(post("/v1/lease", lease_body(stranger)))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::FORBIDDEN);
+    }
+    assert_eq!(c.admission_len(), 0);
+    // A registered signer's request is remembered.
+    let cpu = probe("candle-cpu", "f32", 7_000.0, true);
+    router(c.clone())
+        .oneshot(post("/v1/register", register_body(KEY_A, &cpu)))
+        .await
+        .unwrap();
+    let res = router(c.clone())
+        .oneshot(post("/v1/lease", lease_body(KEY_A)))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+    assert_eq!(c.admission_len(), 1);
+}
+
+/// A refused new-key registration (its source is full) does not rewrite state,
+/// and a throttled refresh carries Retry-After.
+#[tokio::test]
+async fn admission_refused_registrations_do_not_save() {
+    let path = tmp("reg-refused");
+    let policy = Policy {
+        max_workers_per_source: 1,
+        ..Policy::default()
+    };
+    let c = Arc::new(Coordinator::open_with(Store::new(&path), policy).unwrap());
+    let cpu = probe("candle-cpu", "f32", 7_000.0, true);
+    let res = router(c.clone())
+        .oneshot(post("/v1/register", register_body(KEY_A, &cpu)))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let m0 = std::fs::metadata(&path).unwrap().modified().unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    let res = router(c.clone())
+        .oneshot(post("/v1/register", register_body(KEY_B, &cpu)))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::TOO_MANY_REQUESTS);
+    let res = router(c.clone())
+        .oneshot(post("/v1/register", register_body(KEY_A, &cpu)))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert!(res.headers().get("retry-after").is_some());
+    assert_eq!(std::fs::metadata(&path).unwrap().modified().unwrap(), m0);
 }

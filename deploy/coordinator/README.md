@@ -173,14 +173,18 @@ party can hold:
 
 | Control | Setting |
 |---|---|
-| H-01 (ladder) work only for vetted addresses | `CITRATE_COORDINATOR_H01_WORKERS=0x…,0x…` (unset = nobody gets H-01; an unvouched H-01 probe is granted `federated`) |
+| Vetted addresses | `CITRATE_COORDINATOR_H01_WORKERS=0x…,0x…`: may take any tier they evidence (unset = nobody is vetted) |
 | Identities per client address (IPv6 per /64) | `CITRATE_COORDINATOR_MAX_WORKERS_PER_SOURCE` (default 16; vouched machines are exempt) |
 | New identities per hour, all sources | 60/h, burst 30 (compile-time); a registration refused by the per-address cap does not spend it |
 | Concurrent leases per identity | 1 |
-| No-show penalty | a lapsed lease costs the key a 1 h cool-down, doubling per consecutive no-show up to 7 days; a delivered result resets it. The history survives the key's record being evicted or its slot reclaimed |
+| No-show penalty | a lapsed lease costs the key a 1 h cool-down, doubling per consecutive no-show up to 7 days; a delivered result from a vetted worker resets it. The history survives the key's record being evicted or its slot reclaimed |
 | Source-group penalty | a lapse by an unvouched worker also (a) excludes its source group (IPv4 address, IPv6 /48) from that job and (b) puts the whole group on the same doubling cool-down, so a fresh key from the same network does not escape |
 | Leases per source group | `CITRATE_COORDINATOR_MAX_LEASES_PER_SOURCE` (default 4; vouched machines are exempt) |
-| Lapsed-job hold | for 15 min after a lapse, the job goes only to established workers (vouched, or with a delivered result) |
+| Lapsed-job hold | after a lapse, the job goes only to vetted workers for 15 min. A job above the probe tier stays reserved beyond that while a vetted worker that could take it (claim satisfies the job, has not itself lapsed it) has asked for work or heartbeated within the last hour, for at most min(7 days, max(15 min, 2 × the job's `lease_secs`)) after the lapse. A registration alone does not count. Probe jobs return to the open pool after the 15 min |
+| Work open to unvetted workers | `CITRATE_COORDINATOR_OPEN_TIER` = `probe` (default) or `federated`; H-01 is always vetted-only |
+| Tier changes | a lease the current *operator policy* no longer allows is returned to the queue on its next heartbeat or submission, and at coordinator start. A worker re-registering with a different claimed capability keeps its lease until it completes or lapses |
+| Signed-request limits | lease polls and heartbeats are limited per key (burst 10, then one every 2 s; 429 with `Retry-After` for that key only) and each is accepted once. Requests may be dated up to 2 min behind or 30 s ahead of the coordinator clock |
+| Registration freshness | a registration carries a signed timestamp and must be within 2 min behind (30 s ahead) of the coordinator clock; an exact repeat is refused, also across a restart. A client without the timestamp gets 426 "worker too old". One key may re-register at most once a minute |
 | Lease lifetime without a heartbeat | 15 min, extendable up to the job's `lease_secs` |
 
 The client address is taken from `X-Forwarded-For` only when the TCP peer is
@@ -190,8 +194,42 @@ fragment does not set it). Do not add `trusted_proxies` without revisiting
 `api::source_of`.
 
 A network whose workers let a lease lapse is not offered that job again, and a
-lapsed job goes to established workers first.
+lapsed job goes to vetted workers first. `CITRATE_COORDINATOR_H01_WORKERS` is
+the vetted list for every tier above the open one.
 
-**Before deploying this version:** upgrade the fleet's workers first (older
-workers do not heartbeat and would lose long jobs after 15 minutes), then set
-`CITRATE_COORDINATOR_H01_WORKERS` in the unit to the fleet's worker addresses.
+**Trade-off when `CITRATE_COORDINATOR_OPEN_TIER=federated`:** a federated job
+that has lapsed once waits for a vetted worker whenever a vetted worker that
+could take it is engaged, even if they are all busy on long jobs (for at most
+min(7 days, max(15 min, 2 × the job's `lease_secs`)) after the lapse). That favours predictable
+completion by known machines over throughput from the open pool. If no vetted
+worker has been seen for an hour, the job returns to the open pool after the
+15-minute hold. Operators who want more open-pool throughput should vet more
+machines rather than shorten the hold.
+
+State is written to disk only when something that must survive a restart
+changes (a lease, heartbeat, submission, a change of claimed tier, an accepted
+registration, expiry); a poll that finds no work, or a refused request, does
+not rewrite it. Heartbeats are written in steps (when the expiry has moved 5
+min past what is on disk, or reaches the deadline), and on start every lease
+still inside its deadline gets a fresh 15-min window, so a restart never
+charges a worker for the coordinator's own downtime. A failed write is retried
+on the next request. Writes run off
+the request-serving threads.
+
+**Deploy order for this version: coordinator first, or coordinator and workers
+in lock-step.**
+
+- A new worker checks that the coordinator registered its own address and
+  fails loudly if not; against an older coordinator (which does not know the
+  timestamped registration format) it would otherwise register under a
+  different address and be refused every lease. So the coordinator must be
+  upgraded no later than the workers.
+- Workers already registered with an older client keep leasing, heartbeating
+  and submitting against the new coordinator until they restart; on restart
+  their registration is refused with 426 "worker too old" until they are
+  upgraded.
+- If any worker in the fleet predates lease heartbeats, upgrade coordinator and
+  workers in lock-step: such workers lose long jobs after the 15-minute
+  renewal window.
+- Set `CITRATE_COORDINATOR_H01_WORKERS` in the unit to the fleet's vetted
+  worker addresses.

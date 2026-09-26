@@ -53,11 +53,15 @@ pub struct JobRecord {
     /// a fresh key from the same host or /48 is not offered the job again.
     #[serde(default)]
     pub failed_by_sources: BTreeSet<String>,
-    /// PBA-L3b-001: after a lapse the job is offered only to established
-    /// workers (vouched, or with a delivered result) until this unix second, so
-    /// a squatter's next fresh key cannot win the race for it.
+    /// After a lapse the job is offered only to vouched workers until this unix
+    /// second, so the next unvouched key cannot win the race for it.
     #[serde(default)]
     pub held_until: u64,
+    /// Lease expiry as last written to disk (not itself persisted; 0 after a
+    /// load, so the first heartbeat is written). See
+    /// [`HEARTBEAT_PERSIST_STEP_SECS`].
+    #[serde(skip)]
+    persisted_expiry: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -79,10 +83,17 @@ pub struct WorkerRecord {
     /// No new lease before this unix second. Set when a lease lapses.
     #[serde(default)]
     pub cooldown_until: u64,
-    /// Results this worker has had accepted. A worker with one is
-    /// "established" and gets first claim on a lapsed job (PBA-L3b-001).
+    /// Results this worker has had accepted. Informational only: submissions
+    /// are not verified, so this grants no scheduling priority.
     #[serde(default)]
     pub delivered: u32,
+    /// Last registration (unix seconds); refreshes are throttled per key.
+    #[serde(default)]
+    pub last_registration: u64,
+    /// Last time this worker asked for work or heartbeated a lease (unix
+    /// seconds). A registration alone does not count.
+    #[serde(default)]
+    pub last_engaged: Option<u64>,
 }
 
 /// No-show history of a source group (PBA-L3b-001). Keys are free, a network
@@ -118,6 +129,14 @@ pub struct State {
     /// boot (see [`crate::api::Coordinator::open_with`]).
     #[serde(skip)]
     pub policy: Policy,
+    /// Set by every change that must be persisted; bookkeeping such as a
+    /// poll refreshing `last_seen` does not set it. See [`State::take_dirty`].
+    #[serde(skip)]
+    dirty: bool,
+    /// (signer, timestamp) of registrations accepted within the freshness
+    /// window. Persisted, so a restart does not make them acceptable again.
+    #[serde(default)]
+    pub recent_registrations: BTreeSet<(H160, u64)>,
 }
 
 /// How many unexpired leases one identity may hold at once (PBA-L3b-001). A
@@ -142,10 +161,35 @@ pub const SOURCE_SLOT_STALE_SECS: u64 = 86_400;
 /// Overridable with `CITRATE_COORDINATOR_MAX_LEASES_PER_SOURCE`.
 pub const DEFAULT_MAX_LEASES_PER_SOURCE: usize = 4;
 
-/// How long a lapsed job is reserved for established workers. Longer than the
-/// worker client's maximum idle poll interval (300 s), so an established
-/// worker that is polling will see it.
+/// How long a lapsed job is reserved for vouched workers. Longer than the
+/// worker client's maximum idle poll interval (300 s), so a vouched worker
+/// that is polling will see it.
 pub const LAPSE_HOLD_SECS: u64 = 900;
+
+/// A vouched worker seen within this many seconds counts as active. A busy
+/// vouched worker heartbeats every few minutes, so this only lapses when no
+/// vouched machine is running at all.
+pub const VOUCHED_ACTIVE_SECS: u64 = 3_600;
+
+/// Longest a lapsed job may stay reserved for vetted workers, whatever its
+/// lease length (see [`reservation_cap`]).
+pub const RESERVATION_MAX_SECS: u64 = 7 * 86_400;
+
+/// A heartbeat is persisted only once it has moved the lease expiry this far
+/// past the last persisted value (or reached the deadline).
+pub const HEARTBEAT_PERSIST_STEP_SECS: u64 = 300;
+
+/// Default for [`Policy::register_refresh_secs`].
+pub const DEFAULT_REGISTER_REFRESH_SECS: u64 = 60;
+
+/// How long a lapsed job above the probe tier may stay reserved for vetted
+/// workers, counted from the lapse.
+/// `min(7 days, max(LAPSE_HOLD_SECS, 2 x lease_secs))`.
+pub fn reservation_cap(lease_secs: u64) -> u64 {
+    lease_secs
+        .saturating_mul(2)
+        .clamp(LAPSE_HOLD_SECS, RESERVATION_MAX_SECS)
+}
 
 /// Bound on the persisted `sources` map.
 pub const MAX_SOURCES: usize = MAX_WORKERS;
@@ -177,22 +221,30 @@ pub struct Policy {
     /// itself, and nothing on the coordinator can re-run it, so a self-reported
     /// H-01 is a claim, not evidence. Anyone could mint a key, claim H-01 and
     /// lease the ladder. The top tier is therefore granted only to vouched
-    /// addresses; an unvouched H-01 claim is treated as `Federated`.
+    /// addresses.
     pub trusted_h01: BTreeSet<H160>,
+    /// Highest tier an unvouched worker may be granted (`Probe` by default;
+    /// an operator may open `Federated`, never `H01`). Work above it goes only
+    /// to vouched addresses.
+    pub open_tier: Capability,
     /// See [`DEFAULT_MAX_WORKERS_PER_SOURCE`].
     pub max_workers_per_source: usize,
     /// See `coordinator_protocol::LEASE_RENEW_WINDOW_SECS`.
     pub lease_window_secs: u64,
     /// See [`DEFAULT_MAX_LEASES_PER_SOURCE`].
     pub max_leases_per_source: usize,
+    /// Minimum seconds between two registrations of the same key.
+    pub register_refresh_secs: u64,
 }
 
 impl Default for Policy {
     fn default() -> Self {
         Self {
             trusted_h01: BTreeSet::new(),
+            open_tier: Capability::Probe,
             max_workers_per_source: DEFAULT_MAX_WORKERS_PER_SOURCE,
             max_leases_per_source: DEFAULT_MAX_LEASES_PER_SOURCE,
+            register_refresh_secs: DEFAULT_REGISTER_REFRESH_SECS,
             lease_window_secs:
                 citrate_training_worker::coordinator_protocol::LEASE_RENEW_WINDOW_SECS,
         }
@@ -202,10 +254,10 @@ impl Default for Policy {
 impl Policy {
     /// The capability the coordinator actually grants for a claimed one.
     pub fn effective_capability(&self, id: &H160, claimed: Capability) -> Capability {
-        if claimed == Capability::H01 && !self.trusted_h01.contains(id) {
-            return Capability::Federated;
+        if self.trusted_h01.contains(id) {
+            return claimed;
         }
-        claimed
+        claimed.min(self.open_tier).min(Capability::Federated)
     }
 
     pub fn is_trusted(&self, id: &H160) -> bool {
@@ -278,10 +330,13 @@ pub enum SubmitError {
     LeaseExpired { expired_at: u64, now: u64 },
     #[error("job is not in a submittable state")]
     NotLeased,
+    #[error("the current policy no longer allows this worker this job's tier")]
+    TierRevoked,
 }
 
 impl State {
     pub fn add_job(&mut self, spec: JobSpec) {
+        self.dirty = true;
         self.jobs.insert(
             spec.id.clone(),
             JobRecord {
@@ -292,6 +347,7 @@ impl State {
                 result: None,
                 failed_by_sources: BTreeSet::new(),
                 held_until: 0,
+                persisted_expiry: 0,
             },
         );
     }
@@ -310,13 +366,19 @@ impl State {
     ) -> Result<Capability, RegisterError> {
         let granted = self.policy.effective_capability(&w.id, w.capability);
         if let Some(e) = self.workers.get_mut(&w.id) {
+            // Only the claimed capability affects scheduling, so only it is
+            // worth a save; the descriptive fields ride along with the next one.
+            let changed = e.capability != w.capability;
+            e.last_registration = now;
             e.capability = w.capability;
             e.backend = w.backend.clone();
             e.dtype = w.dtype.clone();
             e.tokens_per_second = w.tokens_per_second;
             e.last_seen = now;
+            self.dirty |= changed;
             return Ok(granted);
         }
+        self.dirty = true;
 
         let holders = self.leaseholders(now);
         if !self.policy.is_trusted(&w.id) {
@@ -349,6 +411,8 @@ impl State {
                 noshows: penalty.noshows,
                 cooldown_until: penalty.cooldown_until,
                 delivered: 0,
+                last_registration: now,
+                last_engaged: None,
             },
         );
         Ok(granted)
@@ -503,6 +567,7 @@ impl State {
             // while, so a squatter's next fresh key cannot win it back.
             rec.held_until = now.saturating_add(LAPSE_HOLD_SECS);
             freed.push(id.clone());
+            self.dirty = true;
             // PBA-L3b-001: a lapsed lease also costs the worker. A key that
             // leases and walks away waits out a doubling cool-down before it
             // may lease anything again...
@@ -542,6 +607,7 @@ impl State {
         // PBA-L3b-001: a signed poll is proof of life, work or no work. Without
         // this an idle honest worker aged out and a registration flood evicted it.
         rec.last_seen = now;
+        rec.last_engaged = Some(now);
         let claimed = rec.capability;
         let group = source_group(&rec.source);
 
@@ -585,7 +651,9 @@ impl State {
                 return Err(LeaseError::AtLeaseCap);
             }
         }
-        let established = trusted || self.workers.get(&worker).is_some_and(|w| w.delivered > 0);
+        // Only vouched workers get first claim on a lapsed job: an accepted
+        // submission is not verified, so it earns no priority.
+        let established = trusted;
         let cap = self.policy.effective_capability(&worker, claimed);
 
         let pick = self
@@ -595,7 +663,7 @@ impl State {
             .filter(|r| cap.satisfies(r.spec.requires))
             .filter(|r| !r.failed_by.contains(&worker))
             .filter(|r| trusted || !r.failed_by_sources.contains(&group))
-            .filter(|r| established || r.held_until <= now)
+            .filter(|r| established || !self.reserved_for_vouched(r, now))
             .max_by(|a, b| {
                 a.spec
                     .requires
@@ -616,6 +684,7 @@ impl State {
         // PBA-L3b-001: the lease lives one heartbeat window, extendable up to
         // the job's own `lease_secs` by heartbeats (see [`State::renew`]).
         let deadline = now.saturating_add(rec.spec.lease_secs);
+        self.dirty = true;
         rec.status = JobStatus::Leased {
             worker,
             expires_at: now.saturating_add(rec.spec.lease_secs.min(window)),
@@ -624,13 +693,159 @@ impl State {
         Ok(rec.spec.clone())
     }
 
+    /// May `worker` hold a job requiring `requires` under the current policy?
+    ///
+    /// This is the *operator policy* check only: the worker's own claimed
+    /// capability is not consulted. A worker changing its own claim mid-lease
+    /// does not release the lease (it runs to its deadline and a lapse is
+    /// charged as usual); only a policy change requeues work for free.
+    fn tier_allowed(&self, worker: &H160, requires: Capability) -> bool {
+        self.policy
+            .effective_capability(worker, Capability::H01)
+            .satisfies(requires)
+    }
+
+    /// Return a job whose lease the current policy no longer allows to the
+    /// pool. Not a no-show: the worker is not penalised and may be offered
+    /// the job again if the policy allows it later.
+    fn revoke_lease(&mut self, job: &JobId) {
+        if let Some(rec) = self.jobs.get_mut(job) {
+            rec.status = JobStatus::Pending;
+            self.dirty = true;
+        }
+    }
+
+    /// At start: give every lease still inside its deadline a fresh renewal
+    /// window.
+    ///
+    /// Heartbeats are persisted in steps (and cannot arrive while the
+    /// coordinator is down), so the expiry on disk may trail the real one;
+    /// without this a restart would charge honest workers a no-show.
+    pub fn grace_live_leases(&mut self, now: u64) {
+        let window = self.policy.lease_window_secs;
+        for rec in self.jobs.values_mut() {
+            if let JobStatus::Leased {
+                worker,
+                expires_at,
+                deadline,
+            } = rec.status
+            {
+                let hard = if deadline == 0 { expires_at } else { deadline };
+                if hard > now {
+                    let renewed = now.saturating_add(window).min(hard).max(expires_at);
+                    if renewed != expires_at {
+                        rec.status = JobStatus::Leased {
+                            worker,
+                            expires_at: renewed,
+                            deadline: hard,
+                        };
+                        self.dirty = true;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Whether anything that must be persisted changed since the last call.
+    /// Record an accepted registration `(id, timestamp)`; `false` if it was
+    /// already accepted. Entries outside the freshness window are pruned.
+    pub fn note_registration(&mut self, id: H160, timestamp: u64, now_nanos: u64) -> bool {
+        let window = citrate_training_worker::coordinator_protocol::LEASE_FRESHNESS_NANOS;
+        self.recent_registrations
+            .retain(|(_, ts)| ts.abs_diff(now_nanos) <= window);
+        let inserted = self.recent_registrations.insert((id, timestamp));
+        self.dirty |= inserted;
+        inserted
+    }
+
+    /// Was `(id, timestamp)` already accepted? Non-mutating.
+    pub fn registration_seen(&self, id: H160, timestamp: u64) -> bool {
+        self.recent_registrations.contains(&(id, timestamp))
+    }
+
+    /// Mark the state as needing a save (e.g. after a failed save, so the
+    /// next request retries it).
+    pub fn mark_dirty(&mut self) {
+        self.dirty = true;
+    }
+
+    ///
+    /// A `true` means the caller is about to save: the lease expiries being
+    /// written are recorded, so later heartbeats are measured against them.
+    pub fn take_dirty(&mut self) -> bool {
+        let dirty = std::mem::take(&mut self.dirty);
+        if dirty {
+            for rec in self.jobs.values_mut() {
+                if let JobStatus::Leased { expires_at, .. } = rec.status {
+                    rec.persisted_expiry = expires_at;
+                }
+            }
+        }
+        dirty
+    }
+
+    /// Revoke every lease the current policy no longer allows (called at
+    /// boot, so a policy tightened across a restart applies to work already
+    /// out). Returns the requeued jobs.
+    pub fn revoke_out_of_policy(&mut self) -> Vec<JobId> {
+        let revoked: Vec<JobId> = self
+            .jobs
+            .iter()
+            .filter_map(|(id, r)| match r.status {
+                JobStatus::Leased { worker, .. }
+                    if !self.tier_allowed(&worker, r.spec.requires) =>
+                {
+                    Some(id.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        for id in &revoked {
+            self.revoke_lease(id);
+        }
+        revoked
+    }
+
+    /// Is a pending job reserved for vetted workers at `now`? After a lapse
+    /// it is for [`LAPSE_HOLD_SECS`]. A job above the probe tier stays
+    /// reserved after that while a vetted worker that could take it is engaged
+    /// (asked for work or heartbeated within [`VOUCHED_ACTIVE_SECS`]; a
+    /// registration alone does not count), its claim satisfies the job and it
+    /// is not in `failed_by`, up to [`reservation_cap`] after the lapse, so a
+    /// busy vetted fleet is waited for rather than the job going back to the
+    /// open pool. Probe jobs only get the plain hold.
+    fn reserved_for_vouched(&self, rec: &JobRecord, now: u64) -> bool {
+        if rec.held_until == 0 {
+            return false;
+        }
+        if rec.held_until > now {
+            return true;
+        }
+        if rec.spec.requires == Capability::Probe {
+            return false;
+        }
+        let lapsed_at = rec.held_until.saturating_sub(LAPSE_HOLD_SECS);
+        if now >= lapsed_at.saturating_add(reservation_cap(rec.spec.lease_secs)) {
+            return false;
+        }
+        self.workers.iter().any(|(id, w)| {
+            self.policy.is_trusted(id)
+                && w.last_engaged
+                    .is_some_and(|t| now.saturating_sub(t) < VOUCHED_ACTIVE_SECS)
+                && !rec.failed_by.contains(id)
+                && self
+                    .policy
+                    .effective_capability(id, w.capability)
+                    .satisfies(rec.spec.requires)
+        })
+    }
+
     /// Extend a live lease by one heartbeat window, never past its deadline.
     /// Returns the new expiry. Only the leaseholder may renew, and only while
     /// the lease is still live: a lapsed lease has already gone back to the
     /// pool, and renewing it would take it from whoever picked it up.
     pub fn renew(&mut self, worker: H160, job: &JobId, now: u64) -> Result<u64, SubmitError> {
-        let window = self.policy.lease_window_secs;
-        let rec = self.jobs.get_mut(job).ok_or(SubmitError::UnknownJob)?;
+        let rec = self.jobs.get(job).ok_or(SubmitError::UnknownJob)?;
         let JobStatus::Leased {
             worker: holder,
             expires_at,
@@ -648,8 +863,26 @@ impl State {
                 now,
             });
         }
+        let requires = rec.spec.requires;
+        if !self.tier_allowed(&worker, requires) {
+            self.revoke_lease(job);
+            return Err(SubmitError::TierRevoked);
+        }
+        let window = self.policy.lease_window_secs;
+        let rec = self.jobs.get_mut(job).ok_or(SubmitError::UnknownJob)?;
         let hard = if deadline == 0 { expires_at } else { deadline };
         let extended = now.saturating_add(window).min(hard).max(expires_at);
+        // Persist a heartbeat only once it has moved the expiry a full step
+        // past what is on disk, or reached the deadline; a restart grants live
+        // leases a fresh window anyway (see `grace_live_leases`).
+        if extended
+            >= rec
+                .persisted_expiry
+                .saturating_add(HEARTBEAT_PERSIST_STEP_SECS)
+            || (extended == hard && rec.persisted_expiry != hard)
+        {
+            self.dirty = true;
+        }
         rec.status = JobStatus::Leased {
             worker,
             expires_at: extended,
@@ -657,6 +890,7 @@ impl State {
         };
         if let Some(w) = self.workers.get_mut(&worker) {
             w.last_seen = now;
+            w.last_engaged = Some(now);
         }
         Ok(extended)
     }
@@ -675,6 +909,22 @@ impl State {
         result: String,
         now: u64,
     ) -> Result<(), SubmitError> {
+        let rec = self.jobs.get(job).ok_or(SubmitError::UnknownJob)?;
+        if let JobStatus::Leased {
+            worker: holder,
+            expires_at,
+            ..
+        } = rec.status
+        {
+            if holder == worker
+                && expires_at > now
+                && !self.tier_allowed(&worker, rec.spec.requires)
+            {
+                self.revoke_lease(job);
+                return Err(SubmitError::TierRevoked);
+            }
+        }
+        let trusted = self.policy.is_trusted(&worker);
         let rec = self.jobs.get_mut(job).ok_or(SubmitError::UnknownJob)?;
         match rec.status {
             JobStatus::Leased {
@@ -692,14 +942,19 @@ impl State {
                     });
                 }
                 rec.status = JobStatus::Done { worker, at: now };
+                self.dirty = true;
                 rec.result = Some(result);
                 let mut group = None;
                 if let Some(w) = self.workers.get_mut(&worker) {
                     w.last_seen = now;
-                    // A delivered result clears the no-show record.
-                    w.noshows = 0;
                     w.delivered = w.delivered.saturating_add(1);
-                    group = Some(source_group(&w.source));
+                    // Results are not verified, so only a vouched worker's
+                    // delivery clears the no-show record (its own and its
+                    // network's); an unvouched one leaves the back-off intact.
+                    if trusted {
+                        w.noshows = 0;
+                        group = Some(source_group(&w.source));
+                    }
                 }
                 if let Some(src) = group.and_then(|g| self.sources.get_mut(&g)) {
                     src.noshows = 0;

@@ -32,8 +32,9 @@ fn sign(key: &str, body: &str) -> Attestation {
     let w = Wallet::from_hex(key).expect("load test key");
     Attestation {
         probe_json: body.to_string(),
+        timestamp: 1,
         signature: w
-            .sign_digest_recoverable(&attestation_digest(body))
+            .sign_digest_recoverable(&attestation_digest(body, 1))
             .expect("sign")
             .to_vec(),
     }
@@ -221,24 +222,25 @@ fn malformed_attestations_are_rejected_without_panicking() {
     for (label, att) in [
         (
             "not json",
-            Attestation { probe_json: "{oops".into(), signature: good.signature.clone() },
+            Attestation { timestamp: 1, probe_json: "{oops".into(), signature: good.signature.clone() },
         ),
         (
             "empty signature",
-            Attestation { probe_json: body.clone(), signature: vec![] },
+            Attestation { timestamp: 1, probe_json: body.clone(), signature: vec![] },
         ),
         (
             "short signature",
-            Attestation { probe_json: body.clone(), signature: vec![0u8; 64] },
+            Attestation { timestamp: 1, probe_json: body.clone(), signature: vec![0u8; 64] },
         ),
         (
             "all-zero signature",
-            Attestation { probe_json: body.clone(), signature: vec![0u8; 65] },
+            Attestation { timestamp: 1, probe_json: body.clone(), signature: vec![0u8; 65] },
         ),
         (
             "bad recovery id",
             Attestation {
                 probe_json: body.clone(),
+                timestamp: 1,
                 signature: {
                     let mut v = good.signature.clone();
                     v[64] = 99;
