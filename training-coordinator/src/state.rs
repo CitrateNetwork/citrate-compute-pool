@@ -57,6 +57,11 @@ pub struct JobRecord {
     /// second, so the next unvouched key cannot win the race for it.
     #[serde(default)]
     pub held_until: u64,
+    /// Lease expiry as last written to disk (not itself persisted; 0 after a
+    /// load, so the first heartbeat is written). See
+    /// [`HEARTBEAT_PERSIST_STEP_SECS`].
+    #[serde(skip)]
+    persisted_expiry: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -169,6 +174,10 @@ pub const VOUCHED_ACTIVE_SECS: u64 = 3_600;
 /// Longest a lapsed job may stay reserved for vetted workers, whatever its
 /// lease length (see [`reservation_cap`]).
 pub const RESERVATION_MAX_SECS: u64 = 7 * 86_400;
+
+/// A heartbeat is persisted only once it has moved the lease expiry this far
+/// past the last persisted value (or reached the deadline).
+pub const HEARTBEAT_PERSIST_STEP_SECS: u64 = 300;
 
 /// Default for [`Policy::register_refresh_secs`].
 pub const DEFAULT_REGISTER_REFRESH_SECS: u64 = 60;
@@ -338,6 +347,7 @@ impl State {
                 result: None,
                 failed_by_sources: BTreeSet::new(),
                 held_until: 0,
+                persisted_expiry: 0,
             },
         );
     }
@@ -705,6 +715,37 @@ impl State {
         }
     }
 
+    /// At start: give every lease still inside its deadline a fresh renewal
+    /// window.
+    ///
+    /// Heartbeats are persisted in steps (and cannot arrive while the
+    /// coordinator is down), so the expiry on disk may trail the real one;
+    /// without this a restart would charge honest workers a no-show.
+    pub fn grace_live_leases(&mut self, now: u64) {
+        let window = self.policy.lease_window_secs;
+        for rec in self.jobs.values_mut() {
+            if let JobStatus::Leased {
+                worker,
+                expires_at,
+                deadline,
+            } = rec.status
+            {
+                let hard = if deadline == 0 { expires_at } else { deadline };
+                if hard > now {
+                    let renewed = now.saturating_add(window).min(hard).max(expires_at);
+                    if renewed != expires_at {
+                        rec.status = JobStatus::Leased {
+                            worker,
+                            expires_at: renewed,
+                            deadline: hard,
+                        };
+                        self.dirty = true;
+                    }
+                }
+            }
+        }
+    }
+
     /// Whether anything that must be persisted changed since the last call.
     /// Record an accepted registration `(id, timestamp)`; `false` if it was
     /// already accepted. Entries outside the freshness window are pruned.
@@ -728,8 +769,19 @@ impl State {
         self.dirty = true;
     }
 
+    ///
+    /// A `true` means the caller is about to save: the lease expiries being
+    /// written are recorded, so later heartbeats are measured against them.
     pub fn take_dirty(&mut self) -> bool {
-        std::mem::take(&mut self.dirty)
+        let dirty = std::mem::take(&mut self.dirty);
+        if dirty {
+            for rec in self.jobs.values_mut() {
+                if let JobStatus::Leased { expires_at, .. } = rec.status {
+                    rec.persisted_expiry = expires_at;
+                }
+            }
+        }
+        dirty
     }
 
     /// Revoke every lease the current policy no longer allows (called at
@@ -820,7 +872,17 @@ impl State {
         let rec = self.jobs.get_mut(job).ok_or(SubmitError::UnknownJob)?;
         let hard = if deadline == 0 { expires_at } else { deadline };
         let extended = now.saturating_add(window).min(hard).max(expires_at);
-        self.dirty = true;
+        // Persist a heartbeat only once it has moved the expiry a full step
+        // past what is on disk, or reached the deadline; a restart grants live
+        // leases a fresh window anyway (see `grace_live_leases`).
+        if extended
+            >= rec
+                .persisted_expiry
+                .saturating_add(HEARTBEAT_PERSIST_STEP_SECS)
+            || (extended == hard && rec.persisted_expiry != hard)
+        {
+            self.dirty = true;
+        }
         rec.status = JobStatus::Leased {
             worker,
             expires_at: extended,

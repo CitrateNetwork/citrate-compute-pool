@@ -1561,7 +1561,9 @@ fn accounting_only_real_changes_mark_the_state_dirty() {
     assert_eq!(s.lease(addr(1), 2).unwrap().id.0, "j");
     assert!(s.take_dirty(), "a granted lease");
     assert!(s.renew(addr(1), &JobId("j".into()), 3).is_ok());
-    assert!(s.take_dirty(), "a renewal");
+    // (job() leases for 100 s, so this renewal is already at the deadline
+    // that was just saved: nothing new to persist.)
+    assert!(!s.take_dirty(), "a renewal that moves nothing");
     assert_eq!(s.renew(addr(9), &JobId("j".into()), 3), Err(SubmitError::NotLeaseholder));
     assert!(!s.take_dirty(), "a refused renewal");
     s.submit(addr(1), &JobId("j".into()), "r".into(), 4).unwrap();
@@ -1697,4 +1699,98 @@ fn lifecycle_changes_on_a_dirty_state_stay_dirty() {
     let w = LEASE_FRESHNESS_FOR_TESTS;
     assert!(s.note_registration(addr(5), 10 * w, 10 * w));
     assert!(s.take_dirty(), "an accepted registration on a dirty state");
+}
+
+// ── Save coalescing and restart grace ──────────────────────────────────
+
+/// Heartbeats are persisted at most once per HEARTBEAT_PERSIST_STEP_SECS of
+/// expiry movement (and always when the deadline is reached), not per call.
+#[test]
+fn coalesce_heartbeat_saves() {
+    let mut s = State::default();
+    s.add_job(fed_job("j").with_lease_secs(10_000));
+    s.policy.open_tier = Capability::Federated;
+    s.register(&h01_claim(addr(1)), "a", 0).unwrap();
+    s.lease(addr(1), 0).unwrap();
+    assert!(s.take_dirty(), "the grant is saved");
+    let j = JobId("j".into());
+    let mut saves = 0;
+    for _ in 0..50 {
+        s.renew(addr(1), &j, 10).unwrap();
+        if s.take_dirty() {
+            saves += 1;
+        }
+    }
+    assert_eq!(saves, 0, "50 heartbeats at one moment: nothing new to persist");
+    s.renew(addr(1), &j, HEARTBEAT_PERSIST_STEP_SECS - 1).unwrap();
+    assert!(!s.take_dirty(), "moved less than the step");
+    s.renew(addr(1), &j, HEARTBEAT_PERSIST_STEP_SECS).unwrap();
+    assert!(s.take_dirty(), "moved by the step");
+    // Heartbeat every 240 s up to the deadline: saves happen about every
+    // other heartbeat, and the one that first reaches the deadline is saved.
+    let (mut t, mut saves, mut heartbeats) = (HEARTBEAT_PERSIST_STEP_SECS, 0, 0);
+    let mut deadline_saved = false;
+    while t + 240 < 10_000 {
+        t += 240;
+        let e = s.renew(addr(1), &j, t).unwrap();
+        heartbeats += 1;
+        if s.take_dirty() {
+            saves += 1;
+            deadline_saved |= e == 10_000;
+        }
+    }
+    assert!(saves * 2 <= heartbeats + 1, "{saves} saves for {heartbeats} heartbeats");
+    assert!(deadline_saved, "reaching the deadline is persisted");
+    s.renew(addr(1), &j, t).unwrap();
+    assert!(!s.take_dirty(), "already at the deadline and persisted");
+}
+
+/// On restart, a lease still inside its deadline gets a fresh renewal window,
+/// so the worker is not charged for the coordinator's downtime or for a
+/// heartbeat that was accepted but not yet persisted.
+#[test]
+fn coalesce_restart_grace_for_live_leases() {
+    let mut s = State::default();
+    s.add_job(job("live", Capability::Probe).with_lease_secs(10_000));
+    s.add_job(job("done-deadline", Capability::Probe).with_lease_secs(100));
+    s.register(&worker_probe(addr(1)), "a", 0).unwrap();
+    s.register(&worker_probe(addr(2)), "b", 0).unwrap();
+    // addr(2) takes "done-deadline" (first by id), addr(1) then "live".
+    assert_eq!(s.lease(addr(2), 0).unwrap().id.0, "done-deadline");
+    assert_eq!(s.lease(addr(1), 0).unwrap().id.0, "live");
+    let window = s.policy.lease_window_secs;
+    // Coordinator comes back at t=1_000: "live" (expired at 900, deadline
+    // 10_000) is renewed; "done-deadline" (deadline 100) is not.
+    s.grace_live_leases(1_000);
+    assert_eq!(
+        s.jobs[&JobId("live".into())].status,
+        JobStatus::Leased { worker: addr(1), expires_at: 1_000 + window, deadline: 10_000 }
+    );
+    assert!(matches!(
+        s.jobs[&JobId("done-deadline".into())].status,
+        JobStatus::Leased { expires_at: 100, .. }
+    ));
+    // Never past the deadline.
+    s.grace_live_leases(9_900);
+    assert!(matches!(
+        s.jobs[&JobId("live".into())].status,
+        JobStatus::Leased { expires_at: 10_000, .. }
+    ));
+}
+
+/// A lease whose deadline is exactly now is not "live": the restart grace
+/// leaves it (and the dirty flag) alone.
+#[test]
+fn coalesce_restart_grace_skips_a_lease_at_its_deadline() {
+    let mut s = State::default();
+    s.add_job(job("j", Capability::Probe).with_lease_secs(10_000));
+    s.register(&worker_probe(addr(1)), "a", 0).unwrap();
+    s.lease(addr(1), 0).unwrap();
+    s.take_dirty();
+    s.grace_live_leases(10_000);
+    assert!(matches!(
+        s.jobs[&JobId("j".into())].status,
+        JobStatus::Leased { expires_at: 900, deadline: 10_000, .. }
+    ));
+    assert!(!s.take_dirty());
 }

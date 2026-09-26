@@ -33,6 +33,7 @@
 //! fleet data this coordinator is what collects. Wiring payment before that
 //! number exists would be picking it by guess.
 
+pub mod admission;
 pub mod api;
 pub mod attestation;
 pub mod job;

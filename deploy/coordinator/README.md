@@ -183,7 +183,8 @@ party can hold:
 | Lapsed-job hold | after a lapse, the job goes only to vetted workers for 15 min. A job above the probe tier stays reserved beyond that while a vetted worker that could take it (claim satisfies the job, has not itself lapsed it) has asked for work or heartbeated within the last hour, for at most min(7 days, max(15 min, 2 × the job's `lease_secs`)) after the lapse. A registration alone does not count. Probe jobs return to the open pool after the 15 min |
 | Work open to unvetted workers | `CITRATE_COORDINATOR_OPEN_TIER` = `probe` (default) or `federated`; H-01 is always vetted-only |
 | Tier changes | a lease the current *operator policy* no longer allows is returned to the queue on its next heartbeat or submission, and at coordinator start. A worker re-registering with a different claimed capability keeps its lease until it completes or lapses |
-| Registration freshness | a registration carries a signed timestamp and must be within 2 min of the coordinator clock; an exact repeat is refused, also across a restart. A client without the timestamp gets 426 "worker too old". One key may re-register at most once a minute |
+| Signed-request limits | lease polls and heartbeats are limited per key (burst 10, then one every 2 s; 429 with `Retry-After` for that key only) and each is accepted once. Requests may be dated up to 2 min behind or 30 s ahead of the coordinator clock |
+| Registration freshness | a registration carries a signed timestamp and must be within 2 min behind (30 s ahead) of the coordinator clock; an exact repeat is refused, also across a restart. A client without the timestamp gets 426 "worker too old". One key may re-register at most once a minute |
 | Lease lifetime without a heartbeat | 15 min, extendable up to the job's `lease_secs` |
 
 The client address is taken from `X-Forwarded-For` only when the TCP peer is
@@ -199,7 +200,7 @@ the vetted list for every tier above the open one.
 **Trade-off when `CITRATE_COORDINATOR_OPEN_TIER=federated`:** a federated job
 that has lapsed once waits for a vetted worker whenever a vetted worker that
 could take it is engaged, even if they are all busy on long jobs (for at most
-min(7 days, 2 × the job's `lease_secs`) after the lapse). That favours predictable
+min(7 days, max(15 min, 2 × the job's `lease_secs`)) after the lapse). That favours predictable
 completion by known machines over throughput from the open pool. If no vetted
 worker has been seen for an hour, the job returns to the open pool after the
 15-minute hold. Operators who want more open-pool throughput should vet more
@@ -208,7 +209,11 @@ machines rather than shorten the hold.
 State is written to disk only when something that must survive a restart
 changes (a lease, heartbeat, submission, a change of claimed tier, an accepted
 registration, expiry); a poll that finds no work, or a refused request, does
-not rewrite it. A failed write is retried on the next request. Writes run off
+not rewrite it. Heartbeats are written in steps (when the expiry has moved 5
+min past what is on disk, or reaches the deadline), and on start every lease
+still inside its deadline gets a fresh 15-min window, so a restart never
+charges a worker for the coordinator's own downtime. A failed write is retried
+on the next request. Writes run off
 the request-serving threads.
 
 **Deploy order for this version: coordinator first, or coordinator and workers

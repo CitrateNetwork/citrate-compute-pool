@@ -1217,3 +1217,160 @@ async fn lifecycle_a_failed_save_is_retried() {
         "the lease granted before the failed save was persisted"
     );
 }
+
+// ── Per-key admission ──────────────────────────────────────────────────
+
+fn lease_body_at(key: &str, ts: u64) -> serde_json::Value {
+    serde_json::json!({ "timestamp": ts, "signature": hex_sig(key, &lease_digest(ts)) })
+}
+
+/// One registered key sending requests as fast as it can only gets itself
+/// refused (429 + Retry-After); another key's heartbeat on a live lease is
+/// unaffected, and the refused key's requests are not remembered.
+#[tokio::test]
+async fn admission_one_key_cannot_crowd_out_another() {
+    let policy = Policy {
+        register_refresh_secs: 0,
+        ..Policy::default()
+    };
+    let c = Arc::new(Coordinator::open_with(Store::new(tmp("admission")), policy).unwrap());
+    c.add_job(JobSpec::new("j", Capability::Probe, serde_json::json!({})).with_lease_secs(9_999))
+        .unwrap();
+    let cpu = probe("candle-cpu", "f32", 7_000.0, true);
+    for k in [KEY_A, KEY_B] {
+        let res = router(c.clone())
+            .oneshot(post("/v1/register", register_body(k, &cpu)))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+    }
+    let res = router(c.clone())
+        .oneshot(post("/v1/lease", lease_body(KEY_A)))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    // KEY_B sends polls as fast as it can, each with a distinct timestamp.
+    let base = unix_nanos();
+    let mut limited = 0;
+    for i in 0..500u64 {
+        let res = router(c.clone())
+            .oneshot(post("/v1/lease", lease_body_at(KEY_B, base + i)))
+            .await
+            .unwrap();
+        if res.status() == StatusCode::TOO_MANY_REQUESTS {
+            assert!(
+                res.headers().get("retry-after").is_some(),
+                "429 carries Retry-After"
+            );
+            limited += 1;
+        } else {
+            assert_ne!(res.status(), StatusCode::SERVICE_UNAVAILABLE);
+        }
+    }
+    assert!(limited >= 400, "the busy key is limited ({limited} of 500)");
+    assert!(
+        c.admission_len() <= 20,
+        "refused requests are not remembered: {}",
+        c.admission_len()
+    );
+    // The honest leaseholder's heartbeat still works.
+    let res = router(c.clone())
+        .oneshot(post("/v1/heartbeat", heartbeat_body(KEY_A, "j")))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+}
+
+/// A request dated more than the allowed clock skew ahead is refused.
+#[tokio::test]
+async fn admission_future_dated_requests_are_refused() {
+    let c = coordinator("future", vec![]);
+    let cpu = probe("candle-cpu", "f32", 7_000.0, true);
+    router(c.clone())
+        .oneshot(post("/v1/register", register_body(KEY_A, &cpu)))
+        .await
+        .unwrap();
+    let ahead = unix_nanos() + 115 * 1_000_000_000;
+    let res = router(c.clone())
+        .oneshot(post("/v1/lease", lease_body_at(KEY_A, ahead)))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    let near = unix_nanos() + 5 * 1_000_000_000;
+    let res = router(c.clone())
+        .oneshot(post("/v1/lease", lease_body_at(KEY_A, near)))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::NO_CONTENT, "small skew is fine");
+    let body = probe("candle-cpu", "f32", 7_001.0, true);
+    let ts = unix_nanos() + 115 * 1_000_000_000;
+    let reg = serde_json::json!({
+        "probe_json": body,
+        "timestamp": ts,
+        "signature": hex_sig(KEY_B, &attestation_digest(&body, ts)),
+    });
+    let res = router(c.clone())
+        .oneshot(post("/v1/register", reg))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+}
+
+/// Requests from signers that are not registered are never remembered.
+#[tokio::test]
+async fn admission_unregistered_signers_are_not_recorded() {
+    let c = coordinator("unregistered", vec![]);
+    let stranger = "0x1111111111111111111111111111111111111111111111111111111111111111";
+    for _ in 0..20 {
+        let res = router(c.clone())
+            .oneshot(post("/v1/lease", lease_body(stranger)))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::FORBIDDEN);
+    }
+    assert_eq!(c.admission_len(), 0);
+    // A registered signer's request is remembered.
+    let cpu = probe("candle-cpu", "f32", 7_000.0, true);
+    router(c.clone())
+        .oneshot(post("/v1/register", register_body(KEY_A, &cpu)))
+        .await
+        .unwrap();
+    let res = router(c.clone())
+        .oneshot(post("/v1/lease", lease_body(KEY_A)))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+    assert_eq!(c.admission_len(), 1);
+}
+
+/// A refused new-key registration (its source is full) does not rewrite state,
+/// and a throttled refresh carries Retry-After.
+#[tokio::test]
+async fn admission_refused_registrations_do_not_save() {
+    let path = tmp("reg-refused");
+    let policy = Policy {
+        max_workers_per_source: 1,
+        ..Policy::default()
+    };
+    let c = Arc::new(Coordinator::open_with(Store::new(&path), policy).unwrap());
+    let cpu = probe("candle-cpu", "f32", 7_000.0, true);
+    let res = router(c.clone())
+        .oneshot(post("/v1/register", register_body(KEY_A, &cpu)))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let m0 = std::fs::metadata(&path).unwrap().modified().unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    let res = router(c.clone())
+        .oneshot(post("/v1/register", register_body(KEY_B, &cpu)))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::TOO_MANY_REQUESTS);
+    let res = router(c.clone())
+        .oneshot(post("/v1/register", register_body(KEY_A, &cpu)))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert!(res.headers().get("retry-after").is_some());
+    assert_eq!(std::fs::metadata(&path).unwrap().modified().unwrap(), m0);
+}

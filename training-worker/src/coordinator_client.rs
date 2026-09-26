@@ -87,6 +87,12 @@ impl Backoff {
     }
 }
 
+/// Registration attempts on 429 before giving up.
+pub const REGISTER_ATTEMPTS: u32 = 3;
+
+/// A throttled registration: wait this long, then retry.
+struct RetryAfter(Duration, ClientError);
+
 pub struct CoordinatorClient {
     base: String,
     http: reqwest::Client,
@@ -160,25 +166,74 @@ impl CoordinatorClient {
     ///
     /// `probe_json` must be the bytes as produced by nat's `divergence_probe` —
     /// passed through unmodified, because the signature covers them verbatim.
+    ///
+    /// A `429` (the coordinator asks this key to slow down) is retried up to
+    /// [`REGISTER_ATTEMPTS`] times in total, waiting the `Retry-After` it gave
+    /// (capped at 60 s, default 1 s); anything else is returned at once.
     pub async fn register(&self, probe_json: &str) -> Result<RegisterResponse, ClientError> {
+        let mut attempt = 1;
+        loop {
+            match self.register_once(probe_json).await {
+                Err(RetryAfter(wait, e)) if attempt < REGISTER_ATTEMPTS => {
+                    tracing::warn!(?wait, error = %e, "registration throttled; retrying");
+                    tokio::time::sleep(wait).await;
+                    attempt += 1;
+                }
+                Err(RetryAfter(_, e)) => return Err(e),
+                Ok(r) => return r,
+            }
+        }
+    }
+
+    async fn register_once(
+        &self,
+        probe_json: &str,
+    ) -> Result<Result<RegisterResponse, ClientError>, RetryAfter> {
+        match self.register_attempt(probe_json).await {
+            Err((Some(wait), e)) => Err(RetryAfter(wait, e)),
+            Err((None, e)) => Ok(Err(e)),
+            Ok(r) => Ok(Ok(r)),
+        }
+    }
+
+    async fn register_attempt(
+        &self,
+        probe_json: &str,
+    ) -> Result<RegisterResponse, (Option<Duration>, ClientError)> {
+        let plain = |e| (None, e);
         let timestamp = unix_nanos();
         let att = Attestation {
             probe_json: probe_json.to_string(),
             timestamp,
-            signature: self.sign(&attestation_digest(probe_json, timestamp))?,
+            signature: self
+                .sign(&attestation_digest(probe_json, timestamp))
+                .map_err(plain)?,
         };
-        let res = self.post("/v1/register", &att).await?;
+        let res = self.post("/v1/register", &att).await.map_err(plain)?;
         let status = res.status();
         if !status.is_success() {
-            return Err(ClientError::Rejected {
-                status: status.as_u16(),
-                body: res.text().await.unwrap_or_default(),
+            let wait = (status == reqwest::StatusCode::TOO_MANY_REQUESTS).then(|| {
+                let secs = res
+                    .headers()
+                    .get(reqwest::header::RETRY_AFTER)
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|v| v.trim().parse::<u64>().ok())
+                    .unwrap_or(1)
+                    .min(60);
+                Duration::from_secs(secs)
             });
+            return Err((
+                wait,
+                ClientError::Rejected {
+                    status: status.as_u16(),
+                    body: res.text().await.unwrap_or_default(),
+                },
+            ));
         }
         let reg = res
             .json::<RegisterResponse>()
             .await
-            .map_err(|e| ClientError::Malformed(e.to_string()))?;
+            .map_err(|e| plain(ClientError::Malformed(e.to_string())))?;
         // The coordinator must have registered the address this key signs as;
         // anything else means the two sides disagree on the registration
         // format and every later request would be refused.
@@ -188,10 +243,10 @@ impl CoordinatorClient {
             .filter(|b| b.len() == 20)
             .map(|b| ethereum_types::H160::from_slice(&b));
         if got != Some(expected) {
-            return Err(ClientError::IdentityMismatch {
+            return Err(plain(ClientError::IdentityMismatch {
                 expected: format!("{expected:?}"),
                 got: reg.worker,
-            });
+            }));
         }
         Ok(reg)
     }
