@@ -548,12 +548,27 @@ impl ChainClient for MockChainClient {
 
     async fn expire_stalled_training(
         &self,
-        _job_id: JobId,
-        _caller: WorkerAddress,
+        job_id: JobId,
+        caller: WorkerAddress,
     ) -> Result<(), ChainError> {
-        Err(ChainError::WrongState(
-            "expireStalledTraining not modelled".into(),
-        ))
+        let mut state = self.inner.lock();
+        let block = state.block_number;
+        let job = state
+            .jobs
+            .get_mut(&job_id)
+            .ok_or(ChainError::UnknownJob(job_id))?;
+        if job.state != JobChainState::Training {
+            return Err(ChainError::WrongState("not training".into()));
+        }
+        if caller != MOCK_REQUESTER && !job.joined.contains(&caller) {
+            return Err(ChainError::NotRequesterOrGovernance);
+        }
+        if block <= job.last_activity_block + STALL_EXPIRY_BLOCKS {
+            return Err(ChainError::NotStalled);
+        }
+        job.state = JobChainState::Awaiting;
+        job.all_epochs_committed_block = block;
+        Ok(())
     }
 
     async fn reassign_coordinator(
@@ -571,8 +586,10 @@ impl ChainClient for MockChainClient {
         if job.state != JobChainState::Training {
             return Err(ChainError::WrongState("not training".into()));
         }
-        if !job.joined.contains(&caller) {
-            return Err(ChainError::CallerNotJoined);
+        // Only the requester or governance appoints the coordinator; a
+        // joined worker's exit is `expire_stalled_training`.
+        if caller != MOCK_REQUESTER && caller != MOCK_GOVERNANCE {
+            return Err(ChainError::NotRequesterOrGovernance);
         }
         if !job.joined.contains(&new_coordinator) {
             return Err(ChainError::ReplacementNotJoined);
@@ -580,8 +597,11 @@ impl ChainClient for MockChainClient {
         if block <= job.last_activity_block + COORDINATION_TIMEOUT {
             return Err(ChainError::CoordinatorStillActive);
         }
-        if let Some(old) = job.coordinator {
-            job.liveness_slashed.insert(old);
+        // The liveness slash applies only when governance adjudicates.
+        if caller == MOCK_GOVERNANCE {
+            if let Some(old) = job.coordinator {
+                job.liveness_slashed.insert(old);
+            }
         }
         job.coordinator = Some(new_coordinator);
         job.last_activity_block = block;

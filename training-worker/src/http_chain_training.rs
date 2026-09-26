@@ -539,12 +539,16 @@ impl ChainClient for HttpChainClient {
 
     async fn expire_stalled_training(
         &self,
-        _job_id: JobId,
+        job_id: JobId,
         _caller: WorkerAddress,
     ) -> Result<(), ChainError> {
-        Err(ChainError::WrongState(
-            "expireStalledTraining not wired".into(),
-        ))
+        // `caller` is trait-compat; on chain, msg.sender is the signing
+        // wallet, which must be the requester or a joined worker.
+        let mut data = Vec::with_capacity(4 + 32);
+        data.extend_from_slice(&self.selectors.expire_stalled_training);
+        data.extend_from_slice(&u256_word(U256::from(job_id)));
+        self.send_write(data, U256::zero()).await?;
+        Ok(())
     }
 
     async fn challenge_step(
