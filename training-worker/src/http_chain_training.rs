@@ -22,7 +22,8 @@
 //! | `close_recruitment` | `ComputePoolTraining.closeRecruitment(uint256,address)` | write |
 //! | `commit_epoch` | `ComputePoolTraining.commitEpoch(uint256,uint32,bytes32)` | write |
 //! | `finalize` | `ComputePoolTraining.finalizeTrainingJob(uint256)` | write |
-//! | `reassign_coordinator` | `ComputePoolTraining.reassignCoordinator(uint256,address)` | write |
+//! | `reassign_coordinator` | `ComputePoolTraining.reassignCoordinator(uint256,address)` | write (requester / governance only) |
+//! | `expire_stalled_training` | `ComputePoolTraining.expireStalledTraining(uint256)` | write (requester or joined worker) |
 //!
 //! # Partial-snapshot caveat (S1.5 follow-up)
 //!
@@ -91,6 +92,7 @@ struct Selectors {
     commit_epoch: [u8; 4],
     finalize_training_job: [u8; 4],
     reassign_coordinator: [u8; 4],
+    expire_stalled_training: [u8; 4],
 }
 
 impl Selectors {
@@ -102,6 +104,7 @@ impl Selectors {
             commit_epoch: selector("commitEpoch(uint256,uint32,bytes32)"),
             finalize_training_job: selector("finalizeTrainingJob(uint256)"),
             reassign_coordinator: selector("reassignCoordinator(uint256,address)"),
+            expire_stalled_training: selector("expireStalledTraining(uint256)"),
         }
     }
 }
@@ -534,6 +537,16 @@ impl ChainClient for HttpChainClient {
         Ok(())
     }
 
+    async fn expire_stalled_training(
+        &self,
+        _job_id: JobId,
+        _caller: WorkerAddress,
+    ) -> Result<(), ChainError> {
+        Err(ChainError::WrongState(
+            "expireStalledTraining not wired".into(),
+        ))
+    }
+
     async fn challenge_step(
         &self,
         _job_id: JobId,
@@ -878,6 +891,7 @@ mod tests {
             s.commit_epoch,
             s.finalize_training_job,
             s.reassign_coordinator,
+            s.expire_stalled_training,
         ];
         for i in 0..all.len() {
             for j in (i + 1)..all.len() {
@@ -988,6 +1002,42 @@ mod tests {
         assert!(
             raw.windows(20).any(|w| w == new_coord.as_bytes()),
             "new coordinator address not found in signed tx"
+        );
+    }
+
+    #[test]
+    fn expire_stalled_training_selector_is_pinned() {
+        // keccak256("expireStalledTraining(uint256)")[..4], from the ABI of
+        // ComputePoolTraining on citrate-chain main.
+        assert_eq!(
+            hex::encode(Selectors::compute().expire_stalled_training),
+            "0f73d3e4"
+        );
+    }
+
+    #[tokio::test]
+    async fn expire_stalled_training_encodes_job_id_only() {
+        let state = StubState::new();
+        state.queue_write_happy_path("0x2");
+        let addr = spawn_stub_rpc(state.clone()).await;
+
+        let client = make_client(format!("http://{}", addr));
+        client
+            .expire_stalled_training(0x0102_0304, Address::repeat_byte(0x11))
+            .await
+            .expect("expire");
+
+        let params = state
+            .log
+            .last_params("eth_sendRawTransaction")
+            .expect("saw send");
+        let raw_hex = params[0].as_str().expect("string").to_string();
+        let raw = hex::decode(raw_hex.trim_start_matches("0x")).expect("decode");
+        let mut call = Selectors::compute().expire_stalled_training.to_vec();
+        call.extend_from_slice(&u256_word(U256::from(0x0102_0304u64)));
+        assert!(
+            raw.windows(call.len()).any(|w| w == call.as_slice()),
+            "expireStalledTraining(jobId) calldata not found in signed tx"
         );
     }
 
