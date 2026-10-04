@@ -18,7 +18,8 @@
 //! | `CITRATE_LORA_OUT` | where the trained adapter must be written |
 //! | `CITRATE_LORA_ROUND_ID` | the round, `0x` hex (a seed source) |
 //!
-//! The program must write a GGUF LoRA adapter with the same tensors as the start
+//! No `CITRATE_TRAINING_*` variable (the worker key, its keystore passphrase or path) reaches the
+//! program. The program must write a GGUF LoRA adapter with the same tensors as the start
 //! adapter to `CITRATE_LORA_OUT` and exit 0 within the timeout.
 
 use std::path::{Path, PathBuf};
@@ -70,6 +71,8 @@ pub struct CommandTrainer {
 /// Default ceiling on one training run (placeholder, pending owner sign-off).
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(6 * 3600);
 const STDERR_TAIL: usize = 2048;
+/// Prefix of the worker's own configuration variables, its key among them; none reach the trainer.
+const WORKER_ENV_PREFIX: &str = "CITRATE_TRAINING_";
 
 impl CommandTrainer {
     pub fn new(program: impl Into<PathBuf>, timeout: Duration) -> std::io::Result<Self> {
@@ -137,13 +140,20 @@ impl LoraTrainer for CommandTrainer {
             .env("CITRATE_LORA_DATASET", &req.dataset)
             .env("CITRATE_LORA_OUT", &req.out)
             .env("CITRATE_LORA_ROUND_ID", &req.round_id_hex)
-            // The trainer never sees the worker's key material.
-            .env_remove("CITRATE_TRAINING_PRIVATE_KEY_HEX")
-            .env_remove("CITRATE_TRAINING_KEYSTORE_PASSPHRASE")
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true);
+        // The trainer never sees the worker's key material, nor where it lives: every
+        // `CITRATE_TRAINING_*` variable (key, keystore passphrase, keystore path, ...) is withheld.
+        for (name, _) in std::env::vars_os() {
+            if name
+                .to_str()
+                .is_some_and(|n| n.starts_with(WORKER_ENV_PREFIX))
+            {
+                cmd.env_remove(&name);
+            }
+        }
         let child = cmd.spawn().map_err(|source| TrainError::Spawn {
             program: self.program.display().to_string(),
             source,
@@ -273,6 +283,37 @@ mod tests {
             t.train(&req(&dir)).await,
             Err(TrainError::Timeout(_))
         ));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The trainer is the operator's program, but it still never learns where the worker's key
+    /// lives: every `CITRATE_TRAINING_*` variable (the key, the keystore passphrase and the
+    /// keystore path among them) is withheld from it.
+    #[test]
+    fn the_trainer_sees_no_worker_key_variable_at_all() {
+        let _env = crate::ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let dir = tmp("scrub");
+        let p = script(
+            &dir,
+            "t.sh",
+            "printf '%s|%s' \"${CITRATE_TRAINING_KEYSTORE_PATH:-unset}\" \
+             \"${CITRATE_TRAINING_FL_CANARY:-unset}\" > \"$CITRATE_LORA_OUT\"",
+        );
+        std::env::set_var("CITRATE_TRAINING_KEYSTORE_PATH", "/canary/keystore.json");
+        std::env::set_var("CITRATE_TRAINING_FL_CANARY", "visible");
+        let t = CommandTrainer::new(&p, Duration::from_secs(30)).expect("trainer");
+        let r = req(&dir);
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let ran = rt.block_on(t.train(&r));
+        std::env::remove_var("CITRATE_TRAINING_KEYSTORE_PATH");
+        std::env::remove_var("CITRATE_TRAINING_FL_CANARY");
+        ran.expect("train");
+        assert_eq!(std::fs::read_to_string(&r.out).expect("out"), "unset|unset");
         let _ = std::fs::remove_dir_all(dir);
     }
 

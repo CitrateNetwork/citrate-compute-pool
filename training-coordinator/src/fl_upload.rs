@@ -20,6 +20,7 @@
 //! is deleted. Re-uploading bytes already held is a no-op.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use axum::body::Body;
@@ -67,6 +68,18 @@ impl DeltaStore {
     /// `<dir>/<sha256 hex>.fld`.
     pub fn path_of(&self, sha: &[u8; 32]) -> PathBuf {
         self.dir.join(format!("{}.fld", hex::encode(sha)))
+    }
+
+    /// A fresh temporary path for one upload of `sha`: unique within this process (a counter)
+    /// and across processes sharing the directory (the process id).
+    fn partial_path(&self, sha: &[u8; 32]) -> PathBuf {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let n = NEXT.fetch_add(1, Ordering::Relaxed);
+        self.dir.join(format!(
+            ".{}.{}.{n}.partial",
+            hex::encode(sha),
+            std::process::id()
+        ))
     }
 }
 
@@ -164,12 +177,10 @@ async fn upload(
         return Ok(StatusCode::OK);
     }
 
-    // Stream to a temp file beside the destination, hashing and counting.
-    let tmp = store.dir.join(format!(
-        ".{}.{}.partial",
-        hex::encode(sha),
-        std::process::id()
-    ));
+    // Stream to a temp file beside the destination, hashing and counting. The name is unique
+    // per request: two uploads of one address in flight at once must never share a file, or a
+    // slow one could write its tail into the artifact the other already stored.
+    let tmp = store.partial_path(&sha);
     let result = stream_to(&tmp, body, cap).await;
     let (got, len) = match result {
         Ok(v) => v,

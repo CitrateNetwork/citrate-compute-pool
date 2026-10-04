@@ -151,3 +151,22 @@ fn the_delta_digest_binds_every_field() {
     assert_ne!(base, delta_digest(&[1; 32], &[2; 20], &[3; 32], &[4; 32], 9, 6));
     assert_ne!(base, delta_digest(&[1; 32], &[2; 20], &[3; 32], &[4; 32], 5, 9));
 }
+
+/// `FederatedRoundLedger.commitRound` refuses more participants than 0x0110 accepts (a larger
+/// round could never be recomputed by a challenge), so a config that allows one is refused here
+/// before any device trains for it. Narrow chunks keep the cell bound from catching it.
+#[test]
+fn a_roster_larger_than_the_precompile_accepts_is_refused() {
+    let mut c = sample_config();
+    c.chunk_dim = 1;
+    c.roster = (1..=1025u32)
+        .map(|i| {
+            let mut a = [0u8; 20];
+            a[16..].copy_from_slice(&i.to_be_bytes());
+            a
+        })
+        .collect();
+    assert_eq!(c.validate(), Err(ConfigError::RosterTooLarge(1025)));
+    c.roster.pop();
+    c.validate().expect("1024 devices fit 0x0110");
+}

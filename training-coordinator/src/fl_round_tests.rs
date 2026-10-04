@@ -116,6 +116,24 @@ fn bytes_calls_and_returns_follow_the_abi() {
     assert!(decode_bytes_return(&lying).is_err());
 }
 
+/// A node's return data is not trusted: an offset or length near `u64::MAX` is an error, never an
+/// arithmetic overflow (a panic in debug builds, a wrapped slice index in release).
+#[test]
+fn a_hostile_return_offset_or_length_is_an_error_not_an_overflow() {
+    let mut huge_offset = vec![0u8; 96];
+    huge_offset[24..32].copy_from_slice(&u64::MAX.to_be_bytes());
+    assert!(decode_bytes_return(&huge_offset).is_err());
+
+    let mut near_max_offset = vec![0u8; 96];
+    near_max_offset[24..32].copy_from_slice(&(u64::MAX - 16).to_be_bytes());
+    assert!(decode_bytes_return(&near_max_offset).is_err());
+
+    let mut huge_length = vec![0u8; 96];
+    huge_length[31] = 0x20;
+    huge_length[56..64].copy_from_slice(&u64::MAX.to_be_bytes());
+    assert!(decode_bytes_return(&huge_length).is_err());
+}
+
 fn kv() -> Vec<(String, Value)> {
     vec![
         ("general.architecture".into(), Value::Str("gemma4".into())),

@@ -105,8 +105,11 @@ pub fn encode_bytes_call(sig: &str, data: &[u8]) -> Vec<u8> {
 /// Decode a single `bytes` return value.
 pub fn decode_bytes_return(ret: &[u8]) -> Result<Vec<u8>, String> {
     let word = |i: usize| -> Result<u64, String> {
+        let end = i
+            .checked_add(32)
+            .ok_or_else(|| "ABI offset out of range".to_string())?;
         let w = ret
-            .get(i..i + 32)
+            .get(i..end)
             .ok_or_else(|| "return data too short".to_string())?;
         if w[..24].iter().any(|b| *b != 0) {
             return Err("ABI word out of range".into());
@@ -117,8 +120,13 @@ pub fn decode_bytes_return(ret: &[u8]) -> Result<Vec<u8>, String> {
     };
     let off = usize::try_from(word(0)?).map_err(|e| e.to_string())?;
     let len = usize::try_from(word(off)?).map_err(|e| e.to_string())?;
-    let start = off + 32;
-    ret.get(start..start + len)
+    let start = off
+        .checked_add(32)
+        .ok_or_else(|| "ABI offset out of range".to_string())?;
+    let end = start
+        .checked_add(len)
+        .ok_or_else(|| "ABI length out of range".to_string())?;
+    ret.get(start..end)
         .map(<[u8]>::to_vec)
         .ok_or_else(|| "return data shorter than its length".into())
 }

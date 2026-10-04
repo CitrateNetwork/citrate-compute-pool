@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::attestation::RegisteredWorker;
 use crate::job::{Capability, JobId, JobSpec};
+use citrate_training_worker::fl::round::{LoraDeltaPayload, TASK_LORA_DELTA};
 
 /// Where a job is in its life.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -655,12 +656,35 @@ impl State {
         // submission is not verified, so it earns no priority.
         let established = trusted;
         let cap = self.policy.effective_capability(&worker, claimed);
+        // HUP-S9.2: the federated LoRA rounds this worker already holds or finished a job of.
+        let my_rounds: BTreeSet<[u8; 32]> = self
+            .jobs
+            .values()
+            .filter(|r| match r.status {
+                JobStatus::Leased { worker: h, .. } | JobStatus::Done { worker: h, .. } => {
+                    h == worker
+                }
+                _ => false,
+            })
+            .filter_map(|r| match lora_round_of(&r.spec) {
+                LoraRound::Round(p) => Some(p.round_id),
+                LoraRound::NotLora | LoraRound::Malformed => None,
+            })
+            .collect();
+        let me = worker.to_fixed_bytes();
 
         let pick = self
             .jobs
             .values()
             .filter(|r| r.status == JobStatus::Pending)
             .filter(|r| cap.satisfies(r.spec.requires))
+            // A cluster's round job goes only to a device on its roster, at most one job per
+            // round per device; a job that claims to be a round but does not parse goes to nobody.
+            .filter(|r| match lora_round_of(&r.spec) {
+                LoraRound::NotLora => true,
+                LoraRound::Malformed => false,
+                LoraRound::Round(p) => p.config.in_roster(&me) && !my_rounds.contains(&p.round_id),
+            })
             .filter(|r| !r.failed_by.contains(&worker))
             .filter(|r| trusted || !r.failed_by_sources.contains(&group))
             .filter(|r| established || !self.reserved_for_vouched(r, now))
@@ -987,6 +1011,25 @@ pub struct Counts {
     pub done: usize,
     pub quarantined: usize,
     pub workers: usize,
+}
+
+/// What a job is, as far as federated LoRA rounds (HUP-S9.2) are concerned.
+enum LoraRound {
+    /// Not a `lora_delta` job.
+    NotLora,
+    /// Says it is a `lora_delta` job but its payload does not parse or validate.
+    Malformed,
+    Round(Box<LoraDeltaPayload>),
+}
+
+fn lora_round_of(spec: &JobSpec) -> LoraRound {
+    if spec.payload.get("task").and_then(|t| t.as_str()) != Some(TASK_LORA_DELTA) {
+        return LoraRound::NotLora;
+    }
+    match serde_json::from_value::<LoraDeltaPayload>(spec.payload.clone()) {
+        Ok(p) if p.validate().is_ok() => LoraRound::Round(Box::new(p)),
+        _ => LoraRound::Malformed,
+    }
 }
 
 #[cfg(test)]

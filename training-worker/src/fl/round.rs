@@ -8,7 +8,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::belnap::{ChunkRules, ConfidenceRule, WeightRule, MAX_DIM};
+use super::belnap::{ChunkRules, ConfidenceRule, WeightRule, MAX_DIM, MAX_N};
 use super::{hexser, keccak, Addr, B32};
 
 pub const TASK_LORA_DELTA: &str = "lora_delta";
@@ -64,6 +64,8 @@ pub enum ConfigError {
     MinParticipants(u16),
     #[error("the roster has {roster} devices, fewer than min_participants {min}")]
     RosterTooSmall { roster: usize, min: u16 },
+    #[error("the roster has {0} devices; 0x0110 aggregates at most {MAX_N}")]
+    RosterTooLarge(usize),
     #[error("chunk_dim {0} must be 1..={MAX_DIM}")]
     ChunkDim(u32),
     #[error("roster {roster} x chunk_dim {chunk} exceeds {MAX_CHUNK_CELLS} cells per chunk")]
@@ -106,6 +108,9 @@ impl RoundConfig {
                 roster: self.roster.len(),
                 min: self.min_participants,
             });
+        }
+        if self.roster.len() > MAX_N {
+            return Err(ConfigError::RosterTooLarge(self.roster.len()));
         }
         if self.chunk_dim == 0 || self.chunk_dim as usize > MAX_DIM {
             return Err(ConfigError::ChunkDim(self.chunk_dim));

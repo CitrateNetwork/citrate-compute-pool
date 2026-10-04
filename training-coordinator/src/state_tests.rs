@@ -1794,3 +1794,94 @@ fn coalesce_restart_grace_skips_a_lease_at_its_deadline() {
     ));
     assert!(!s.take_dirty());
 }
+
+// ── Federated LoRA rounds (HUP-S9.2) ───────────────────────────────────
+
+fn lora_round(roster: &[u8], ordinal: u64) -> citrate_training_worker::fl::round::LoraDeltaPayload {
+    use citrate_training_worker::fl::belnap::{ConfidenceRule, WeightRule};
+    use citrate_training_worker::fl::round::{LoraDeltaPayload, RoundConfig};
+    LoraDeltaPayload::new(
+        RoundConfig {
+            chain_id: 1337,
+            ledger: [0x11; 20],
+            cluster_id: [0x22; 32],
+            base_model_sha256: [0x33; 32],
+            start_adapter_sha256: [0x44; 32],
+            roster: roster.iter().map(|b| [*b; 20]).collect(),
+            min_participants: 3,
+            chunk_dim: 16,
+            value_scale_log2: 8,
+            threshold_pos: 32768,
+            threshold_neg: -32768,
+            confidence: ConfidenceRule::Nonzero,
+            weight: WeightRule::Uniform,
+            max_values: 1 << 20,
+        },
+        ordinal,
+    )
+}
+
+/// Pool workers as a federated-tier coordinator sees them (`open_tier = Federated`, as a
+/// coordinator that runs LoRA rounds is configured).
+fn federated_pool(workers: &[u8]) -> State {
+    let mut s = State::default();
+    s.policy.open_tier = Capability::Federated;
+    for b in workers {
+        s.register(&worker(*b, Capability::Federated), &format!("src-{b}"), 0)
+            .unwrap();
+    }
+    s
+}
+
+fn lora_job(id: &str, payload: &citrate_training_worker::fl::round::LoraDeltaPayload) -> JobSpec {
+    JobSpec::new(
+        id,
+        Capability::Federated,
+        serde_json::to_value(payload).expect("payload"),
+    )
+    .with_lease_secs(100)
+}
+
+/// A cluster's round job is for the devices on its roster. Handing it to any other pool
+/// worker only makes that worker decline it, charges it a no-show and delays the round.
+#[test]
+fn a_lora_round_job_is_offered_only_to_devices_on_its_roster() {
+    let mut s = federated_pool(&[1, 9]);
+    s.add_job(lora_job("fl-0", &lora_round(&[1, 2, 3], 0)));
+    assert_eq!(s.lease(addr(9), 10), Err(LeaseError::NothingAvailable));
+    assert_eq!(s.lease(addr(1), 10).expect("roster device").id.0, "fl-0");
+}
+
+/// One contribution per device per round: once a device holds or finished a job of a round,
+/// the round's other jobs are left for the rest of its roster.
+#[test]
+fn a_device_is_offered_at_most_one_job_per_round() {
+    let mut s = federated_pool(&[1, 2]);
+    let round0 = lora_round(&[1, 2, 3], 0);
+    s.add_job(lora_job("fl-0-a", &round0));
+    s.add_job(lora_job("fl-0-b", &round0));
+    s.add_job(lora_job("fl-1-a", &lora_round(&[1, 2, 3], 1)));
+    let first = s.lease(addr(1), 10).expect("lease").id;
+    s.submit(addr(1), &first, "{}".into(), 11).expect("submit");
+    let next = s.lease(addr(1), 12).expect("another round").id;
+    assert_eq!(next.0, "fl-1-a", "the second job of round 0 is not offered again");
+    s.submit(addr(1), &next, "{}".into(), 13).expect("submit");
+    assert_eq!(s.lease(addr(1), 14), Err(LeaseError::NothingAvailable));
+    // The round's other job is still there for another roster device.
+    assert!(s.lease(addr(2), 15).expect("roster device").id.0.starts_with("fl-0-"));
+}
+
+/// A job that says it is a LoRA round but whose payload does not parse is offered to nobody.
+#[test]
+fn a_malformed_lora_round_job_is_offered_to_nobody() {
+    let mut s = federated_pool(&[1]);
+    s.add_job(
+        JobSpec::new(
+            "fl-bad",
+            Capability::Federated,
+            serde_json::json!({"task": "lora_delta", "ordinal": 0}),
+        )
+        .with_lease_secs(100),
+    );
+    assert_eq!(s.lease(addr(1), 10), Err(LeaseError::NothingAvailable));
+}

@@ -342,3 +342,82 @@ async fn bad_signatures_and_paths_are_refused() {
     assert_eq!(r.status(), StatusCode::BAD_REQUEST);
     let _ = std::fs::remove_dir_all(&e.dir);
 }
+
+/// Two uploads of the same content address in flight at once (a worker retrying while its first
+/// attempt still streams, or a second leaseholder) must not share a temporary file: a slow upload
+/// whose tail is garbage would otherwise write into the file the honest one already stored.
+#[tokio::test]
+async fn concurrent_uploads_of_one_address_never_corrupt_the_stored_artifact() {
+    let e = leased("concurrent", 1 << 20).await;
+    let w1 = wallet(1);
+    let bytes = artifact(&e.cfg, w1.address().to_fixed_bytes(), 16);
+    let sha = sha256(&bytes);
+    let app = fl_router(e.coord.clone(), e.store.clone());
+
+    // Upload A: the first half of the honest bytes, then a pause, then a garbage tail.
+    let half = bytes.len() / 2;
+    let (tx, rx) = tokio::sync::mpsc::channel::<Result<Vec<u8>, std::io::Error>>(4);
+    let stream = futures::stream::unfold(rx, |mut rx| async move {
+        rx.recv().await.map(|item| (item, rx))
+    });
+    let slow = Request::builder()
+        .method("PUT")
+        .uri(format!("/v1/fl/delta/{}?job=fl-0", hex::encode(sha)))
+        .header(
+            "x-citrate-signature",
+            sig(&w1, &fl_delta_upload_digest(&JobId("fl-0".into()), &sha)),
+        )
+        .body(Body::from_stream(stream))
+        .expect("request");
+    let a = tokio::spawn(app.clone().oneshot(slow));
+    tx.send(Ok(bytes[..half].to_vec())).await.expect("send");
+    // Wait until A is streaming into its temporary file.
+    let deltas = e.store.dir().to_path_buf();
+    let mut started = false;
+    for _ in 0..200 {
+        let partial = std::fs::read_dir(&deltas)
+            .expect("dir")
+            .filter_map(Result::ok)
+            .any(|d| d.file_name().to_string_lossy().ends_with(".partial"));
+        if partial {
+            started = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(started, "the slow upload never started streaming");
+
+    // Upload B: the same honest bytes, all at once. It is stored.
+    let r = app
+        .clone()
+        .oneshot(put("fl-0", &sha, &w1, bytes.clone()))
+        .await
+        .expect("put");
+    assert_eq!(r.status(), StatusCode::CREATED);
+
+    // A finishes with garbage: refused, and the stored artifact is untouched.
+    tx.send(Ok(vec![0xEE; bytes.len() - half]))
+        .await
+        .expect("send");
+    drop(tx);
+    let r = a.await.expect("join").expect("put");
+    assert_eq!(r.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let stored = std::fs::read(e.store.path_of(&sha)).expect("stored");
+    assert_eq!(
+        sha256(&stored),
+        sha,
+        "the stored artifact no longer hashes to its address"
+    );
+    assert_eq!(stored, bytes);
+    let leftovers: Vec<_> = std::fs::read_dir(&deltas)
+        .expect("dir")
+        .filter_map(Result::ok)
+        .map(|d| d.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.ends_with(".partial"))
+        .collect();
+    assert!(
+        leftovers.is_empty(),
+        "temporary files left behind: {leftovers:?}"
+    );
+    let _ = std::fs::remove_dir_all(&e.dir);
+}
