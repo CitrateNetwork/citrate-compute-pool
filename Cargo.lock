@@ -630,14 +630,18 @@ name = "citrate-training-coordinator"
 version = "0.4.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "axum",
  "citrate-training-worker",
  "ethereum-types",
+ "futures",
  "hex",
  "http-body-util",
  "parking_lot",
+ "reqwest",
  "serde",
  "serde_json",
+ "sha2",
  "sha3",
  "thiserror 1.0.69",
  "tokio",

@@ -13,6 +13,13 @@ path = "src/lib.rs"
 name = "citrate-training-coordinator"
 path = "src/main.rs"
 
+# Federated LoRA rounds (HUP-S9.2): config hashing, round job catalogues, start
+# adapters, aggregation through a Citrate node's 0x0110, bundles and proofs.
+# Produces unsigned intents only; it never signs or sends a transaction.
+[[bin]]
+name = "citrate-fl-round"
+path = "src/bin/fl_round.rs"
+
 [dependencies]
 # The worker crate owns the wallet + recoverable-signature primitives. Depending
 # on it rather than re-deriving them keeps one implementation of the thing that
@@ -26,12 +33,19 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
+async-trait = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 parking_lot = { workspace = true }
 ethereum-types = "0.14"
 sha3 = { workspace = true }
 hex = "0.4"
+# HUP-S9.2 federated LoRA rounds: streamed delta uploads (sha2 + futures) and
+# the aggregator's JSON-RPC calls to a Citrate node (reqwest, same features as
+# the worker so the lock gains no new packages).
+sha2 = "0.10"
+futures = "0.3"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

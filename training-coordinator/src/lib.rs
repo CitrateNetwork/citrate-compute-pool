@@ -36,6 +36,11 @@
 pub mod admission;
 pub mod api;
 pub mod attestation;
+/// Federated LoRA rounds: aggregation through `0x0110`, the round bundle and
+/// the unsigned commit intent (HUP-S9.2).
+pub mod fl_round;
+/// The delta-artifact upload route for federated LoRA rounds (HUP-S9.2).
+pub mod fl_upload;
 pub mod job;
 pub mod state;
 pub mod store;

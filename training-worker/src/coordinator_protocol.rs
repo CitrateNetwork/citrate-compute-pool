@@ -203,6 +203,23 @@ pub fn submission_digest(job: &JobId, payload: &str) -> [u8; 32] {
     ])
 }
 
+/// Header carrying the uploader's signature on `PUT /v1/fl/delta/{sha256}`.
+pub const FL_DELTA_SIGNATURE_HEADER: &str = "x-citrate-signature";
+
+/// `keccak256("citrate-fl-delta-upload/1\n" || job_id || "\n" || sha256)`.
+///
+/// Signed by the worker holding the lease on `job`, so only a leaseholder of a
+/// federated LoRA job can place a delta artifact on the coordinator, and only
+/// the artifact whose content address it signed.
+pub fn fl_delta_upload_digest(job: &JobId, sha256: &[u8; 32]) -> [u8; 32] {
+    keccak(&[
+        b"citrate-fl-delta-upload/1\n",
+        job.0.as_bytes(),
+        b"\n",
+        sha256,
+    ])
+}
+
 /// A signed capability claim, as submitted for registration.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Attestation {
