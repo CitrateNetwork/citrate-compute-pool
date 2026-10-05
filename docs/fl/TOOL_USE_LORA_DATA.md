@@ -115,11 +115,11 @@ must emit verbatim.
 - The rows still pass the device runner's `verify_dataset`, so `CITRATE_FL_DATASET` can point
   at the converted file.
 
-Public rows, when allowed, use the same format with `source: "xlam-60k"` or
-`source: "xlam-irrelevance-7.5k"`, their own `tools` list and masked names. They end at the
-assistant's call (or, for irrelevance rows, its plain answer), because the sources carry no tool
-result. Masking is applied at conversion time with a seed taken from
-the round id, so every device masks the same way.
+Proposed, not built: public rows, when allowed, would use the same format with
+`source: "xlam-60k"` or `source: "xlam-irrelevance-7.5k"`, their own `tools` list and masked
+names. They would end at the assistant's call (or, for irrelevance rows, its plain answer),
+because the sources carry no tool result. Masking would be applied at conversion time with a
+seed taken from the round id, so every device masks the same way.
 
 ## 4. The mix (recommended default, pending owner sign-off)
 
