@@ -24,6 +24,7 @@
 //! chain's replay tool is a second, independent implementation of them.
 
 pub mod belnap;
+pub mod dataset;
 pub mod delta;
 pub mod gguf;
 pub mod round;

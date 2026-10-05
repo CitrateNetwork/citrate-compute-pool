@@ -1,0 +1,324 @@
+{
+  "format": "citrate-heldout-v1",
+  "dataset": "toolcall-v2",
+  "normalization": "lowercase; every character that is neither alphabetic nor numeric becomes a space; whitespace runs collapse to one space; trimmed",
+  "count": 79,
+  "items": [
+    {
+      "id": "amb-create-unnamed-group",
+      "sha256": "229b3b0b89010bb9d45a6ab4c27c492249a6c5c4a812822757a1c0bd22677763"
+    },
+    {
+      "id": "amb-deploy-no-bytecode",
+      "sha256": "99808d9454015782227b6dee32430547983a47149007251c1fa88d4bce3f6f05"
+    },
+    {
+      "id": "amb-find-no-platform",
+      "sha256": "5f0642304a0901b926992ff3c255e039e7d860eaeb5797397cf5d5290d0cad64"
+    },
+    {
+      "id": "amb-invite-no-group",
+      "sha256": "54730c78cc53893250757b8554114d2fbea7f8a912895494bf32c7bfa82c726c"
+    },
+    {
+      "id": "amb-roster-no-group",
+      "sha256": "2934b979d913f012223358f195376d552f2bbae05c62881c0c4fcc5f5df01bdc"
+    },
+    {
+      "id": "amb-run-unnamed-skill",
+      "sha256": "b86e364516589370e99c836c450627b852ae307e22c5538fcf7d172a1376d996"
+    },
+    {
+      "id": "ax-directory-at-handle",
+      "sha256": "c5ba4d88fd05aa976c9ec20e88d9008d998a3f8e49886d9ee58c211f5a625961"
+    },
+    {
+      "id": "ax-docs-quoted-query",
+      "sha256": "333b38378c70c92d9dff443be5ac7e3998bbd3433f3c2927d53dd5d5bc78ddac"
+    },
+    {
+      "id": "ax-invite-label",
+      "sha256": "f5e75282367ef535d229603d3fcce9354f0025a45454e3e8202139f7cb61ef26"
+    },
+    {
+      "id": "ax-memory-rpc",
+      "sha256": "90c34f9d6cd5d0dbe2c6ee1fd6cb537ea8d0bbbb45d141da7527b319377d8bc9"
+    },
+    {
+      "id": "nt-arithmetic",
+      "sha256": "e742f20c26cab66c4ee5781caf48e510842a70c710032747da5a1f36c06018d2"
+    },
+    {
+      "id": "nt-belnap-both-meaning",
+      "sha256": "37fc2ecc8b0bd0184faafa7fa8c5b4cbe20a08902ecaf04d84b76aa419e754e4"
+    },
+    {
+      "id": "nt-capabilities",
+      "sha256": "940b6e0262b7462766143c0e9f79c5b45d7b24a8e3aa9d2fccf6b26074ff844b"
+    },
+    {
+      "id": "nt-greeting",
+      "sha256": "8f434346648f6b96df89dda901c5176b10a6d83961dd3c1ac88b59b2dc327aa4"
+    },
+    {
+      "id": "nt-hash-vs-signature",
+      "sha256": "dd4b854f20d2ee7a137f4303ea1466dd32c19ba953874cb93c4a30c72ea8cc77"
+    },
+    {
+      "id": "nt-rewrite",
+      "sha256": "202fbfe9fd2851a900b6502c612bec629cbd8e892d718e41047577d8a6600cd8"
+    },
+    {
+      "id": "nt-thanks",
+      "sha256": "9b20047fae11f81ef1e3e89e86f1f43941f759f9ad6cd17e6235f55e33d5c257"
+    },
+    {
+      "id": "nw-calendar-howto",
+      "sha256": "a5fc3722e6df6639e53b0f64d354c6635cf10ea607febcaca90bff83acc34a57"
+    },
+    {
+      "id": "nw-contract-view-not-a-write",
+      "sha256": "78983d0b4e9fa3fa004ad4e0f52ec86030fc82b2bfaf926f778226ca536510e4"
+    },
+    {
+      "id": "nw-deploy-howto",
+      "sha256": "14513481376aaaf3eabe7869c4876cd6db3bab68031fa406b12de752ec280c37"
+    },
+    {
+      "id": "nw-fact-in-passing",
+      "sha256": "1572156c28c206d7cdfc67c8a7edc6250734032b4f1e752036528d85f65a32e9"
+    },
+    {
+      "id": "nw-fl-howto",
+      "sha256": "a0415026280cc2e53ef71e424290aa63b9414f3ee362845bec312e8b4e0a0803"
+    },
+    {
+      "id": "nw-group-idea",
+      "sha256": "65663746e77dfb75ca9ec8c5e2ee46e8c4b2456957e5d15b65ae9841fcea504e"
+    },
+    {
+      "id": "nw-gsheets-read-not-append",
+      "sha256": "bc89c1aebeddebfef5c707707c01efecd8ea1314dc05efc5010a7738bf0aa15e"
+    },
+    {
+      "id": "nw-invite-howto",
+      "sha256": "ee4c3bbd03b927894a248394c7816d46c1c9a3fb514ac4d75a6a117ad6d67592"
+    },
+    {
+      "id": "nw-roster-then-nothing",
+      "sha256": "eab168cbac740f49595aa8a278640a20ff824a1d11fc6d2a67884186a2d90284"
+    },
+    {
+      "id": "nw-schedule-question",
+      "sha256": "31727febbf1351505d5a4599e24d332470812b6fc41024bad62ac67b2aa15e0e"
+    },
+    {
+      "id": "nw-skill-idea",
+      "sha256": "6030c7ccc8ccbb3e573ea2ecb58859dec84f1b78db155e8c49deda3caf8b87cc"
+    },
+    {
+      "id": "nw-venting",
+      "sha256": "110b0a511fb2b5d27b45b324ae042106163c730f1481724fd74e863a7dafa2e2"
+    },
+    {
+      "id": "sc-group-roster-tool",
+      "sha256": "715849628a61c3d48506fdad627e63b9952f347f8b5f593cfcfe1d6ce8725618"
+    },
+    {
+      "id": "sc-memory-recall-tool",
+      "sha256": "bc116211f8d65682a0d3922fa7ec47e7e1eb1adbae4cc9bd1ce14dd6bc4993d5"
+    },
+    {
+      "id": "sc-models-list-tool",
+      "sha256": "8cfc412873cf6f3cd2fd2a35f186bc389f65159356b276b03bda2cbace1d748c"
+    },
+    {
+      "id": "sc-staking-tool",
+      "sha256": "00dad222f471c5ca61e572e6ac5ffbe03a008e842d6b71f7b5ddb5a1ddbe231f"
+    },
+    {
+      "id": "tc-belnap-decode-example",
+      "sha256": "60545eaecaf9259dde0a5225dfb210810248e98e6022f350f033cf3ced35e48c"
+    },
+    {
+      "id": "tc-belnap-encode-two",
+      "sha256": "a7162e313d4a060fe87fc53fb46e4bbc990e66c5e37e52f86dcc9053193abdd4"
+    },
+    {
+      "id": "tc-calendar-list-days",
+      "sha256": "528713a0dd405e13b58017749d46ca4902aeefc644047c6d0d34c4e37a8abb34"
+    },
+    {
+      "id": "tc-contract-deploy-explicit",
+      "sha256": "8b7e4b5d542a9caa045d75361f29d7db4fa41ecaf9b3f58a3ded9b7f05a5a98f"
+    },
+    {
+      "id": "tc-contract-view-balance",
+      "sha256": "c0bd30ebd13184a23116be66b1dee8d6c5cfb976176b7a9a518cbfb1ac860cff"
+    },
+    {
+      "id": "tc-contract-view-fork",
+      "sha256": "a16a39364b917061153aafc940f42abc7f893398774140c8cc9e909ec0b7f13a"
+    },
+    {
+      "id": "tc-contract-view-supply",
+      "sha256": "df8d00803bc25e3be9501e8fcf981fc129be3b8500152e0e473a411b5ba2acc8"
+    },
+    {
+      "id": "tc-directory-discord",
+      "sha256": "d01e94d8c726284dbc1a9af12e883fb43f6a92aae0a28220f03d31ce2a15c817"
+    },
+    {
+      "id": "tc-directory-x",
+      "sha256": "db24d71e14472cb4f50617e4e139772a5141a8a701fcbf9745b7d5968bfd924c"
+    },
+    {
+      "id": "tc-docs-gasless",
+      "sha256": "b2f731305a10d7282feac447ab951c6f81013b0aa70272248ca9837af5eea921"
+    },
+    {
+      "id": "tc-docs-slashing",
+      "sha256": "6a62397e364696926788529cd1b6dd5d5bf4de09e2be9c6851e3108ce8641166"
+    },
+    {
+      "id": "tc-fl-plan-explain",
+      "sha256": "93b55a89f71675090798ac10fc0e241d18f29f995dd97b08b81402de97d3d908"
+    },
+    {
+      "id": "tc-fl-plan-probe",
+      "sha256": "e0f1f459eb8faea4209c73e1e81f7a0239df94f1a33c6f5d0cd3905d619f82d1"
+    },
+    {
+      "id": "tc-fl-start-explicit",
+      "sha256": "d2c9ff0f012d970443a37907303351d91a2b30ce5f5cd993e4380c80a0a8122b"
+    },
+    {
+      "id": "tc-group-create-channel",
+      "sha256": "38f05cd71d784091ad911b91bf1c8bd62c4027d11e65706324603764d28333fb"
+    },
+    {
+      "id": "tc-group-create-forum",
+      "sha256": "f5afc0b1d782e69c1035c94d77527859eb33e328524d00dcebec3fd8b45451d4"
+    },
+    {
+      "id": "tc-group-invite-explicit",
+      "sha256": "35810b5f9bec05fff9862e4ede218d15108144cc40835017c9e2064eb507e7bb"
+    },
+    {
+      "id": "tc-group-roster",
+      "sha256": "06e466c165c46a23ad44c20b1598fcff943b0bc3b0156834ba433e7166f6f2d0"
+    },
+    {
+      "id": "tc-groups-list",
+      "sha256": "ec7ea248db7e7c0c3e5ce18b30fbee5bc96376ac4fc69ef66f57e57486c8eab9"
+    },
+    {
+      "id": "tc-gsheets-append-explicit",
+      "sha256": "94aeb496a6ccd27c761dde4e58d54941a408b5fdbaa4e24739d8ae8a3f541583"
+    },
+    {
+      "id": "tc-gsheets-read-link",
+      "sha256": "2ad2b97a644995d7d277894f630702a978f380855fa77107157e39ba2efffe6e"
+    },
+    {
+      "id": "tc-gsheets-read-range",
+      "sha256": "87938503416ba84c7a48bf1ee4dd69d8a05237a09fc2b2f3f7adf6144b7d9058"
+    },
+    {
+      "id": "tc-journal-append-explicit",
+      "sha256": "399eefbd6b5c414e5eb1fa15464c359838ae28f530f9c31bc1461341ebd22d14"
+    },
+    {
+      "id": "tc-journal-page",
+      "sha256": "fd5b312271b344bac8a74a3bf1952bcd4d2a2e56e7b7a9f3b036064349db8a70"
+    },
+    {
+      "id": "tc-journal-today",
+      "sha256": "f864f25dc2fe1a168c6ddf0035d58310a92d6f0292af0a664f2f7a9291670641"
+    },
+    {
+      "id": "tc-memory-assert-explicit",
+      "sha256": "1939007a52ec400d2eb22a15626850271890acb907da6c23b5bd9069315e2cad"
+    },
+    {
+      "id": "tc-models-list",
+      "sha256": "b9ac8f0b14cc1c505391a47d599aa89598a267dfa1b0e08696bbab9d262e1fa2"
+    },
+    {
+      "id": "tc-nav-commissary",
+      "sha256": "e846d78c2f8b1c313b0b6efe7e0d214764229c21d1eb3c6fcef8f8e516cb1718"
+    },
+    {
+      "id": "tc-nav-settings",
+      "sha256": "57f0e5744c11a87174fa2c70a47aca28e503ab6ce94a4b8f76311aae885b3edd"
+    },
+    {
+      "id": "tc-nav-storage",
+      "sha256": "5b468c661ab3c9ffdfb6436cb2faaa5e7100d3e3d7147288d5160e30d1bf9c44"
+    },
+    {
+      "id": "tc-nav-wallet",
+      "sha256": "10f07c2923b2028dcc3ec6215dd76eafb3323b001cd580db72b7eb3f249f04ff"
+    },
+    {
+      "id": "tc-node-height",
+      "sha256": "bbc9acc75252e92aafa9e0237d267972d675c9cf3e558793a84017593301afb3"
+    },
+    {
+      "id": "tc-node-peers",
+      "sha256": "514a80fedb281f167d2829b5f6da79f7aada098df0ec904c5b0540a97fb399cc"
+    },
+    {
+      "id": "tc-node-validating",
+      "sha256": "8f5f42c29c88aa58314c18a5e903433b72a1904e9cef8cdc31ff84f08a9e0b3d"
+    },
+    {
+      "id": "tc-personal-dentist",
+      "sha256": "bb4abd51d9979d9f44b53c7ef9b92a458f29ce60cda7499672d221e29c762698"
+    },
+    {
+      "id": "tc-recall-personal",
+      "sha256": "81b0a730b9d716808f0efd68af1a753791219307f1561d3d51701eb623d71275"
+    },
+    {
+      "id": "tc-schedule-add-weekly",
+      "sha256": "87a8a7343e9e4b0a0981fa5a75d343f6920c6cef8dfb0326d801ef1c5d7acbed"
+    },
+    {
+      "id": "tc-schedule-list-week",
+      "sha256": "53607548fcaf32a747f0a4fe13f97bf6255a9af97678a05be6c32b747800e4b0"
+    },
+    {
+      "id": "tc-skill-run",
+      "sha256": "c38270a54974abcb91cb3592cf1f087d531734591d1aba3edb4776261bb28bcd"
+    },
+    {
+      "id": "tc-skill-write-explicit",
+      "sha256": "db5d936ea7c8d32a723add233b3487fe5817293e7dc8ebbe1825bb3ed4765dbb"
+    },
+    {
+      "id": "tc-skills-list",
+      "sha256": "cd10024db6a4919d500cd9739da0cb80f91e0e34fcfd2021c80e3447bed526af"
+    },
+    {
+      "id": "tc-staking-claimable",
+      "sha256": "a9b3b8edc09d79030a9660c7b127933a2ae2bbdf4c1a5423d6e28aafc239b750"
+    },
+    {
+      "id": "tc-staking-staked",
+      "sha256": "a7a9deb77f4baf95086db1793923db9b22b5a848f7e097ea4a61291e6649999a"
+    },
+    {
+      "id": "tc-verified-source",
+      "sha256": "a73a295daf0c35d27410a0ee6293a43b6ad9fcb3b6d45cf995fa81abde9cd54c"
+    },
+    {
+      "id": "tc-wallet-address",
+      "sha256": "7758d461ba933b7c690679ffacba049d0c39fbb0889d763cef19c506af779957"
+    },
+    {
+      "id": "tc-widget-create-explicit",
+      "sha256": "de2720279ddabf1d445453a85e44a460c146207db90abd059a0b0f281f96e822"
+    }
+  ]
+}
