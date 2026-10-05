@@ -491,3 +491,71 @@ fn the_node_url_follows_the_outbound_policy() {
     assert!(RpcBelnap::new("http://203.0.113.7:8545", [1; 20]).is_err());
     assert!(RpcBelnap::new("ftp://x", [1; 20]).is_err());
 }
+
+/// A loopback JSON-RPC node that answers the first `limited` calls with a rate-limit error
+/// (`-32005`, what citrate-chain's method budget returns), then with `belnapAggregate`'s ABI
+/// return of `out`.
+async fn limited_node(limited: usize, out: Vec<u8>) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let calls = std::sync::Arc::new(AtomicUsize::new(0));
+    let seen = calls.clone();
+    // The ABI return of one `bytes` value: offset, length, padded data.
+    let ret = encode_bytes_call("belnapAggregate(bytes)", &out)[4..].to_vec();
+    let app = axum::Router::new().route(
+        "/",
+        axum::routing::post(move || {
+            let n = seen.fetch_add(1, Ordering::SeqCst);
+            let ret = ret.clone();
+            async move {
+                axum::Json(if n < limited {
+                    serde_json::json!({"jsonrpc": "2.0", "id": 1, "error": {
+                        "code": -32005,
+                        "message": "Method budget exceeded. Reduce call frequency for expensive methods."}})
+                } else {
+                    serde_json::json!({"jsonrpc": "2.0", "id": 1, "result": hex0x(&ret)})
+                })
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    (format!("http://{addr}/"), calls)
+}
+
+fn quick_retry(attempts: u32) -> RateLimitRetry {
+    RateLimitRetry {
+        attempts,
+        initial: std::time::Duration::from_millis(5),
+        max: std::time::Duration::from_millis(20),
+    }
+}
+
+#[tokio::test]
+async fn a_rate_limited_eth_call_is_retried_until_the_node_answers() {
+    let (url, calls) = limited_node(3, vec![7, 8, 9]).await;
+    let b = RpcBelnap::new(url, [0x11; 20]).expect("rpc").with_retry(quick_retry(5));
+    assert_eq!(b.aggregate(&[1, 2, 3]).await.expect("aggregate"), vec![7, 8, 9]);
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 4);
+}
+
+#[tokio::test]
+async fn a_node_that_keeps_rate_limiting_fails_the_round_after_the_last_try() {
+    let (url, calls) = limited_node(usize::MAX, vec![1]).await;
+    let b = RpcBelnap::new(url, [0x11; 20]).expect("rpc").with_retry(quick_retry(3));
+    match b.aggregate(&[1]).await {
+        Err(RoundError::Node(m)) => assert!(m.contains("still rate limiting after 3 tries"), "{m}"),
+        other => panic!("expected a node error, got {other:?}"),
+    }
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 3);
+}
+
+#[test]
+fn only_the_limit_exceeded_code_counts_as_rate_limiting() {
+    assert!(is_rate_limited(&serde_json::json!({"code": -32005, "message": "x"})));
+    assert!(!is_rate_limited(&serde_json::json!({"code": -32000, "message": "execution reverted"})));
+    assert!(!is_rate_limited(&serde_json::json!({"message": "no code"})));
+    assert_eq!(RateLimitRetry::default().attempts, 10);
+}

@@ -27,6 +27,11 @@ path = "src/bin/main.rs"
 name = "citrate-coop-worker"
 path = "src/bin/coop_worker.rs"
 
+# HUP-S9.3 / RA-15: a member's verified trajectory export -> trainer input rows.
+[[bin]]
+name = "citrate-fl-dataset"
+path = "src/bin/fl_dataset.rs"
+
 [dependencies]
 tokio = { workspace = true }
 async-trait = { workspace = true }

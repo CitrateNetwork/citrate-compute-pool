@@ -63,6 +63,38 @@ pub struct RpcBelnap {
     rpc: String,
     ledger: Addr,
     http: reqwest::Client,
+    retry: RateLimitRetry,
+}
+
+/// How [`RpcBelnap`] waits when the node asks it to slow down. A round at Gemma 4 E4B scale makes
+/// thousands of `eth_call`s, more than a node's per-client method budget allows in a burst
+/// (citrate-chain `core/api/src/rate_limit.rs`: `eth_call` costs 10 of 1000 per second). Only a
+/// rate-limit answer is retried; any other error fails the round at once.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RateLimitRetry {
+    /// Total tries per chunk, the first included.
+    pub attempts: u32,
+    pub initial: std::time::Duration,
+    pub max: std::time::Duration,
+}
+
+impl Default for RateLimitRetry {
+    fn default() -> Self {
+        Self {
+            attempts: 10,
+            initial: std::time::Duration::from_millis(250),
+            max: std::time::Duration::from_secs(4),
+        }
+    }
+}
+
+/// JSON-RPC "limit exceeded" (EIP-1474), which a Citrate node returns when a client's method
+/// budget is spent.
+pub const RPC_LIMIT_EXCEEDED: i64 = -32005;
+
+/// Whether a JSON-RPC error object asks the caller to slow down.
+pub fn is_rate_limited(error: &serde_json::Value) -> bool {
+    error.get("code").and_then(serde_json::Value::as_i64) == Some(RPC_LIMIT_EXCEEDED)
 }
 
 impl RpcBelnap {
@@ -78,7 +110,14 @@ impl RpcBelnap {
             http: citrate_training_worker::outbound::redirect_safe_client(
                 std::time::Duration::from_secs(60),
             ),
+            retry: RateLimitRetry::default(),
         })
+    }
+
+    /// Replace the rate-limit retry policy.
+    pub fn with_retry(mut self, retry: RateLimitRetry) -> Self {
+        self.retry = retry;
+        self
     }
 }
 
@@ -139,16 +178,45 @@ impl BelnapBackend for RpcBelnap {
             "jsonrpc": "2.0", "id": 1, "method": "eth_call",
             "params": [{"to": hex0x(&self.ledger), "data": hex0x(&data)}, "latest"],
         });
-        let res: serde_json::Value = self
-            .http
-            .post(&self.rpc)
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| RoundError::Node(e.to_string()))?
-            .json()
-            .await
-            .map_err(|e| RoundError::Node(e.to_string()))?;
+        let mut wait = self.retry.initial;
+        let mut attempt = 1u32;
+        let res: serde_json::Value = loop {
+            let resp = self
+                .http
+                .post(&self.rpc)
+                .json(&body)
+                .send()
+                .await
+                .map_err(|e| RoundError::Node(e.to_string()))?;
+            let too_many = resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS;
+            let res: Option<serde_json::Value> = if too_many {
+                None
+            } else {
+                Some(
+                    resp.json()
+                        .await
+                        .map_err(|e| RoundError::Node(e.to_string()))?,
+                )
+            };
+            let limited = too_many
+                || res
+                    .as_ref()
+                    .and_then(|r| r.get("error"))
+                    .is_some_and(is_rate_limited);
+            match res {
+                Some(r) if !limited => break r,
+                _ if attempt < self.retry.attempts => {
+                    tokio::time::sleep(wait).await;
+                    wait = (wait * 2).min(self.retry.max);
+                    attempt += 1;
+                }
+                _ => {
+                    return Err(RoundError::Node(format!(
+                        "eth_call failed: the node is still rate limiting after {attempt} tries"
+                    )))
+                }
+            }
+        };
         if let Some(e) = res.get("error") {
             return Err(RoundError::Node(format!("eth_call failed: {e}")));
         }
