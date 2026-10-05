@@ -64,6 +64,9 @@ pub mod events;
 /// Candle, so a node can sign and settle without building the trainer.
 #[cfg(feature = "federated")]
 pub mod federated_signer;
+/// Federated LoRA rounds (HUP-S9.2): GGUF adapters, Q16 deltas, chunk
+/// commitments, the `0x0110` wire format and the `lora_delta` job runner.
+pub mod fl;
 pub mod http_chain_pipeline;
 pub mod http_chain_training;
 pub mod job_artifacts;

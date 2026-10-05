@@ -24,6 +24,14 @@
 //!   client address may register (default 16).
 //! - `CITRATE_COORDINATOR_MAX_LEASES_PER_SOURCE` — live leases unvouched
 //!   workers of one source group (IPv4 address, IPv6 /48) may hold (default 4).
+//!
+//! Federated LoRA rounds (HUP-S9.2), off unless set:
+//!
+//! - `CITRATE_COORDINATOR_FL_DELTA_DIR` — where workers' delta artifacts are
+//!   stored. Setting it serves `PUT /v1/fl/delta/{sha256}`; unset, the route
+//!   does not exist.
+//! - `CITRATE_COORDINATOR_FL_MAX_DELTA_BYTES` — operator cap per artifact
+//!   (default 256 MiB; the round's own `max_values` bound applies too).
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -90,12 +98,27 @@ async fn main() -> anyhow::Result<()> {
         "coordinator starting"
     );
 
+    let mut app = router(coord.clone());
+    if let Ok(dir) = std::env::var("CITRATE_COORDINATOR_FL_DELTA_DIR") {
+        let max = match std::env::var("CITRATE_COORDINATOR_FL_MAX_DELTA_BYTES") {
+            Ok(raw) => raw.trim().parse::<u64>().map_err(|e| {
+                anyhow::anyhow!("CITRATE_COORDINATOR_FL_MAX_DELTA_BYTES={raw:?}: {e}")
+            })?,
+            Err(_) => citrate_training_coordinator::fl_upload::DEFAULT_MAX_DELTA_BYTES,
+        };
+        let store = citrate_training_coordinator::fl_upload::DeltaStore::new(&dir, max)?;
+        tracing::info!(%dir, max_bytes = max, "federated LoRA delta uploads enabled");
+        app = app.merge(citrate_training_coordinator::fl_upload::fl_router(
+            coord, store,
+        ));
+    }
+
     let listener = tokio::net::TcpListener::bind(&bind).await?;
     tracing::info!(%bind, "listening");
     // Connect info feeds the per-source identity cap (PBA-L3b-001).
     axum::serve(
         listener,
-        router(coord).into_make_service_with_connect_info::<SocketAddr>(),
+        app.into_make_service_with_connect_info::<SocketAddr>(),
     )
     .await?;
     Ok(())

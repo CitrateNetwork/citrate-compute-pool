@@ -120,6 +120,26 @@ the training worker's upstream is the **training coordinator's HTTP endpoint**.
 
 See the full multi-repo bring-up: https://docs.citrate.ai/local-stack
 
+## Federated LoRA rounds (HUP-S9.2)
+
+A cluster-scoped round: devices train a LoRA adapter on their own verified trajectories, the
+coordinator aggregates the deltas through the chain's `0x0110` Belnap precompile and prepares
+an unsigned commit for `FederatedRoundLedger` (citrate-chain). Off unless configured; the format
+is specified in citrate-chain `docs/fl/FL_ROUND_V1.md`.
+
+- **Coordinator:** set `CITRATE_COORDINATOR_FL_DELTA_DIR` to accept delta uploads
+  (`PUT /v1/fl/delta/{sha256}`, leaseholder-signed, size-capped by
+  `CITRATE_COORDINATOR_FL_MAX_DELTA_BYTES`, default 256 MiB).
+- **Device (`citrate-coop-worker`):** `CITRATE_FL_DATASET` (the member's verified trajectory
+  export), `CITRATE_FL_CONSENT_FILE` (`{"rounds": ["0x<round id>"]}`, per-round consent),
+  `CITRATE_LORA_TRAINER` (the operator's trainer program, inputs via `CITRATE_LORA_*`
+  environment variables), `CITRATE_FL_STORE` (staged `models/<sha256>.gguf` and
+  `adapters/<sha256>.gguf`). Without them, `lora_delta` jobs are declined with the reason.
+- **Operator tool (`citrate-fl-round`):** `config-hash`, `jobs`, `init-adapter`, `aggregate`
+  (eth_call to a Citrate node; writes the bundle, the merged adapter and an unsigned
+  `commit-intent.json`), `proof`, `roots`, `intent`, `check-bundle`. It never signs or sends.
+- **End to end on a local devnet:** citrate-chain `scripts/fl/devnet-round-e2e.sh`.
+
 ## Configuration
 
 **pool-coordinator** (env): `CITRATE_POOL_RPC_URL` (default `http://127.0.0.1:8545`),

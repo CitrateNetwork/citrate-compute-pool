@@ -33,6 +33,22 @@
 //! fabricated results that nobody could reproduce. Declining is the correct
 //! behaviour for a machine that cannot do the work.
 //!
+//! # Federated LoRA rounds (`lora_delta` jobs, HUP-S9.2)
+//!
+//! Handled in every build, because the training is the operator's own trainer
+//! program rather than a backend compiled in here. A device takes part only
+//! when its member set it up and consented:
+//!
+//! - `CITRATE_FL_DATASET`: the member's verified trajectory export (JSONL);
+//! - `CITRATE_FL_CONSENT_FILE`: `{"rounds": ["0x<round id>", ...]}`, the rounds
+//!   the member agreed to contribute to (D-29: per round);
+//! - `CITRATE_LORA_TRAINER`: the trainer program (see `fl::trainer`);
+//! - `CITRATE_FL_STORE` (default `./fl`): staged base models and start adapters
+//!   under `models/<sha256>.gguf` and `adapters/<sha256>.gguf`.
+//!
+//! Without them every `lora_delta` job is declined with the reason. Only the
+//! signed delta leaves the device; the trained adapter and the dataset stay.
+//!
 //! # Artifacts: staged on demand, from a mirror nobody trusts
 //!
 //! Jobs run against a local artifact store (`CITRATE_ARTIFACT_STORE`, default
@@ -51,6 +67,8 @@ use std::sync::Arc;
 
 use citrate_training_worker::coordinator_client::CoordinatorClient;
 use citrate_training_worker::coordinator_protocol::JobSpec;
+use citrate_training_worker::fl::runner::{DeviceConfig, LoraDeltaRunner};
+use citrate_training_worker::fl::trainer::{CommandTrainer, LoraTrainer};
 use citrate_training_worker::wallet::Wallet;
 
 /// Executes a job, or returns the reason it will not.
@@ -61,11 +79,85 @@ use citrate_training_worker::wallet::Wallet;
 struct Executor {
     #[cfg(feature = "nat")]
     inner: citrate_training_worker::job_runner::NatJobRunner,
+    /// Federated LoRA rounds (`lora_delta` jobs). Independent of the `nat`
+    /// feature: the training itself is the operator's trainer program.
+    fl: FlExecutor,
+}
+
+/// The federated LoRA half of the executor.
+struct FlExecutor {
+    runner: Option<LoraDeltaRunner>,
+    /// Why `runner` is absent, for the decline message.
+    unavailable: String,
+    uploader: CoordinatorClient,
+}
+
+impl FlExecutor {
+    fn new(url: &str, wallet: Wallet) -> Self {
+        let uploader = CoordinatorClient::new(url, wallet.clone());
+        let Some(device) = DeviceConfig::from_env() else {
+            return Self {
+                runner: None,
+                unavailable: "this device is not set up for federated LoRA rounds \
+                              (CITRATE_FL_DATASET is unset)"
+                    .into(),
+                uploader,
+            };
+        };
+        match CommandTrainer::from_env() {
+            Ok(trainer) => {
+                let trainer: Option<Box<dyn LoraTrainer>> =
+                    trainer.map(|t| Box::new(t) as Box<dyn LoraTrainer>);
+                tracing::info!(
+                    store = %device.store.display(),
+                    dataset = %device.dataset.display(),
+                    trainer = trainer.as_ref().map(|t| t.id()).unwrap_or_else(|| "none".into()),
+                    "federated LoRA rounds enabled"
+                );
+                Self {
+                    runner: Some(LoraDeltaRunner::new(device, trainer, wallet)),
+                    unavailable: String::new(),
+                    uploader,
+                }
+            }
+            Err(e) => Self {
+                runner: None,
+                unavailable: format!("the configured LoRA trainer is unusable: {e}"),
+                uploader,
+            },
+        }
+    }
+
+    async fn run(&self, job: JobSpec) -> anyhow::Result<String> {
+        let Some(runner) = &self.runner else {
+            anyhow::bail!(
+                "declining federated LoRA job {}: {}",
+                job.id,
+                self.unavailable
+            );
+        };
+        let out = runner.run(&job).await?;
+        // Upload first: a result whose artifact the coordinator does not hold
+        // cannot be aggregated, so submitting it would only waste the lease.
+        self.uploader
+            .upload_fl_delta(&job.id, &out.artifact_sha256, out.artifact)
+            .await?;
+        runner.mark_contributed(&out.result.round_id)?;
+        tracing::info!(
+            job = %job.id,
+            round = %citrate_training_worker::fl::hex0x(&out.result.round_id),
+            values = out.result.n_values,
+            examples = out.result.examples,
+            seconds = out.result.seconds,
+            "federated LoRA delta uploaded"
+        );
+        Ok(out.result_json)
+    }
 }
 
 impl Executor {
     #[cfg(feature = "nat")]
-    fn new(worker: ethereum_types::H160) -> Self {
+    fn new(worker: ethereum_types::H160, fl: FlExecutor) -> Self {
         let store =
             std::env::var("CITRATE_ARTIFACT_STORE").unwrap_or_else(|_| "./artifacts".into());
         let scratch = std::env::var("CITRATE_SCRATCH").unwrap_or_else(|_| "./scratch".into());
@@ -86,21 +178,25 @@ impl Executor {
                  jobs whose artifacts are not staged locally will be declined"
             ),
         }
-        Self { inner: runner }
+        Self { inner: runner, fl }
     }
 
     #[cfg(not(feature = "nat"))]
-    fn new(_worker: ethereum_types::H160) -> Self {
+    fn new(_worker: ethereum_types::H160, fl: FlExecutor) -> Self {
         tracing::warn!(
-            "built WITHOUT the `nat` feature: no training backend is compiled in, so \
-             training jobs will be declined and reassigned. Rebuild with \
-             `--features nat` (or `nat-cuda`) to execute them."
+            "built WITHOUT the `nat` feature: no NAT training backend is compiled in, so \
+             NAT `train` jobs will be declined and reassigned. Rebuild with \
+             `--features nat` (or `nat-cuda`) to execute them. Federated LoRA \
+             (`lora_delta`) jobs do not need it."
         );
-        Self {}
+        Self { fl }
     }
 
     #[cfg(feature = "nat")]
     async fn run(&self, job: JobSpec) -> anyhow::Result<String> {
+        if LoraDeltaRunner::handles(&job) {
+            return self.fl.run(job).await;
+        }
         let result = self.inner.run(&job).await?;
         tracing::info!(
             job = %result.job,
@@ -122,6 +218,9 @@ impl Executor {
 
     #[cfg(not(feature = "nat"))]
     async fn run(&self, job: JobSpec) -> anyhow::Result<String> {
+        if LoraDeltaRunner::handles(&job) {
+            return self.fl.run(job).await;
+        }
         anyhow::bail!(
             "cannot execute job {} ({:?}): this worker was built without the `nat` \
              training backend. Declining so the lease expires and the coordinator \
@@ -169,6 +268,7 @@ async fn async_main(
     // Loaded before logging existed; report what the load noticed now.
     wallet.log_load_warnings();
     let worker_id = wallet.address();
+    let fl = FlExecutor::new(&url, wallet.clone());
     let client = CoordinatorClient::new(&url, wallet);
     tracing::info!(worker = ?worker_id, coordinator = %url, "starting");
 
@@ -191,7 +291,7 @@ async fn async_main(
         }
     });
 
-    let executor = Arc::new(Executor::new(worker_id));
+    let executor = Arc::new(Executor::new(worker_id, fl));
     let check = running.clone();
     client
         .poll_loop(

@@ -101,6 +101,19 @@ pub struct CoordinatorClient {
     heartbeat_every: Duration,
 }
 
+/// Percent-encode everything outside the RFC 3986 unreserved set.
+fn url_component(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
 fn unix_nanos() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -311,6 +324,49 @@ impl CoordinatorClient {
             signature: self.sign(&submission_digest(job, payload))?,
         };
         let res = self.post("/v1/submit", &sub).await?;
+        let status = res.status();
+        if !status.is_success() {
+            return Err(ClientError::Rejected {
+                status: status.as_u16(),
+                body: res.text().await.unwrap_or_default(),
+            });
+        }
+        Ok(())
+    }
+
+    /// Upload a federated LoRA delta artifact for a job this worker holds.
+    ///
+    /// The coordinator stores it under its SHA-256 only after checking the
+    /// signature recovers to the job's leaseholder and the bytes hash to the
+    /// address in the path, so a retry of the same bytes is harmless.
+    pub async fn upload_fl_delta(
+        &self,
+        job: &JobId,
+        sha256: &[u8; 32],
+        bytes: Vec<u8>,
+    ) -> Result<(), ClientError> {
+        let sig = self.sign(&crate::coordinator_protocol::fl_delta_upload_digest(
+            job, sha256,
+        ))?;
+        let res = self
+            .http
+            .put(format!(
+                "{}/v1/fl/delta/{}?job={}",
+                self.base,
+                hex::encode(sha256),
+                url_component(&job.0)
+            ))
+            .header(
+                crate::coordinator_protocol::FL_DELTA_SIGNATURE_HEADER,
+                format!("0x{}", hex::encode(sig)),
+            )
+            .body(bytes)
+            // A delta can be tens of megabytes; the client-wide 30 s budget is
+            // for small JSON calls.
+            .timeout(Duration::from_secs(600))
+            .send()
+            .await
+            .map_err(|e| ClientError::Transport(e.to_string()))?;
         let status = res.status();
         if !status.is_success() {
             return Err(ClientError::Rejected {
