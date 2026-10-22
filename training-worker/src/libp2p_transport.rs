@@ -1043,6 +1043,68 @@ mod tests {
         }
     }
 
+    /// Over a live two-node mesh, a validly signed message whose inner
+    /// identity field names someone other than the signer is dropped by the
+    /// receiver's swarm task. The control message sent right after it, which
+    /// names its real signer, is the first thing the receiver sees.
+    #[tokio::test]
+    async fn a_mesh_message_naming_another_worker_is_dropped_on_receipt() {
+        let a = LibP2pTransport::new(test_key(0x2A), listen_addr(), vec![], test_scope())
+            .await
+            .expect("A starts");
+        let a_addr = wait_listener(&a).await;
+        let b = LibP2pTransport::new(test_key(0x2B), listen_addr(), vec![a_addr], test_scope())
+            .await
+            .expect("B starts");
+        let _ = wait_listener(&b).await;
+
+        let addr_a = a.own_address();
+        let addr_b = b.own_address();
+        let someone_else = WorkerAddress::repeat_byte(0x77);
+        for t in [&a, &b] {
+            t.register(addr_a).await;
+            t.register(addr_b).await;
+        }
+        settle_mesh().await;
+
+        // Signed by A, but claims to be someone else's step commit.
+        a.broadcast(WorkerMessage::StepCommitted(step_commit_for(
+            0,
+            0,
+            someone_else,
+        )))
+        .await
+        .expect("publish mislabelled commit");
+        // Signed by A, claims to be from someone else's pipeline stage.
+        a.broadcast(WorkerMessage::PipelineActivation {
+            request_id: 1,
+            from_stage: 0,
+            to_stage: 1,
+            from_worker: someone_else,
+            payload: vec![1, 2, 3],
+        })
+        .await
+        .expect("publish mislabelled activation");
+        // Control: A's own commit.
+        a.broadcast(WorkerMessage::StepCommitted(step_commit_for(0, 1, addr_a)))
+            .await
+            .expect("publish own commit");
+
+        let got = tokio::time::timeout(Duration::from_secs(5), b.recv(addr_b))
+            .await
+            .expect("B recv timed out")
+            .expect("B got a message");
+        match got {
+            WorkerMessage::StepCommitted(sc) => {
+                assert_eq!(sc.worker, addr_a, "a mislabelled commit was delivered");
+                assert_eq!(sc.step, 1, "a mislabelled commit was delivered");
+            }
+            other => panic!("a mislabelled message was delivered: {other:?}"),
+        }
+        let more = tokio::time::timeout(Duration::from_millis(500), b.recv(addr_b)).await;
+        assert!(more.is_err(), "nothing else may be delivered, got {more:?}");
+    }
+
     #[tokio::test]
     async fn sender_does_not_receive_own_broadcast() {
         let sk_a = test_key(0x1A);
