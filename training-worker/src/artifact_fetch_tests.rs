@@ -314,3 +314,43 @@ async fn a_chunked_response_under_the_cap_is_served() {
         .expect("under cap serves");
     assert_eq!(out.len(), 100);
 }
+
+/// A server that advertises an over-cap `Content-Length`, sends the headers,
+/// and then holds the connection open without sending a body byte.
+async fn spawn_advertised_oversize_server(advertised: u64) -> std::net::SocketAddr {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        if let Ok((mut sock, _)) = listener.accept().await {
+            let mut scratch = [0u8; 1024];
+            let _ = sock.read(&mut scratch).await;
+            let head = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {advertised}\r\n\r\n"
+            );
+            let _ = sock.write_all(head.as_bytes()).await;
+            let _ = sock.flush().await;
+            // Hold the socket open, body never sent.
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+        }
+    });
+    addr
+}
+
+// An over-cap Content-Length is refused from the headers alone, before the
+// client waits on a single body byte.
+#[tokio::test]
+async fn an_over_cap_content_length_is_refused_before_reading_the_body() {
+    let addr = spawn_advertised_oversize_server(1 << 30).await;
+    let mirror = HttpMirror::new(format!("http://{addr}"));
+    let out = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        mirror.fetch_capped("anything", 256),
+    )
+    .await
+    .expect("an advertised over-cap length must be refused without reading the body");
+    assert!(
+        matches!(out, Err(FetchError::TooLarge)),
+        "an advertised over-cap body must be TooLarge, got {out:?}"
+    );
+}
