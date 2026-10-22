@@ -500,4 +500,44 @@ mod tests {
         assert_eq!(ev.job_id, 42);
         assert_eq!(ev.block_number, 0x10);
     }
+
+    /// An indexed topic word wider than u64 is a decode error, never a
+    /// silently truncated id: a pool/job id of 2^64 + 5 must not decode as 5.
+    #[tokio::test]
+    async fn decode_rejects_an_id_topic_wider_than_u64() {
+        for idx in [1usize, 2] {
+            let mut log = make_log(5, 42);
+            let mut word = [0u8; 32];
+            (U256::from(u64::MAX) + U256::from(6u64)).to_big_endian(&mut word);
+            log["topics"][idx] = json!(format!("0x{}", hex::encode(word)));
+            let out = decode_compute_requested(&log, H160::repeat_byte(0xDD));
+            assert!(
+                matches!(out, Err(CoordinatorError::Chain(_))),
+                "topic[{idx}] wider than u64 must be refused, got {:?}",
+                out.map(|e| (e.pool_id, e.job_id))
+            );
+        }
+    }
+
+    /// The subscriber refuses a plaintext ws:// URL to a non-loopback host
+    /// before it dials anything. TEST-NET-1 (192.0.2.0/24) is reserved and
+    /// unrouted; with the gate in place no connection is attempted at all.
+    #[tokio::test]
+    async fn connect_refuses_plaintext_ws_to_a_remote_host_before_dialing() {
+        let subscriber =
+            WsChainSubscriber::new("ws://192.0.2.1:9".to_string(), H160::repeat_byte(0xDD));
+        let out = tokio::time::timeout(std::time::Duration::from_secs(5), subscriber.connect())
+            .await
+            .expect("the outbound gate must refuse immediately, not dial");
+        match out {
+            Ok(_) => panic!("a plaintext remote ws:// subscription must be refused"),
+            Err(e) => {
+                let msg = e.to_string();
+                assert!(
+                    msg.contains("CITRATE_POOL_WS_URL") && msg.contains("plaintext"),
+                    "refusal must come from the outbound gate, got: {msg}"
+                );
+            }
+        }
+    }
 }

@@ -1885,3 +1885,29 @@ fn a_malformed_lora_round_job_is_offered_to_nobody() {
     );
     assert_eq!(s.lease(addr(1), 10), Err(LeaseError::NothingAvailable));
 }
+
+/// A key whose lease lapsed is not offered that same job again, even once its
+/// no-show cool-down has passed and it is vouched (so the source-group rules do
+/// not apply). The job stays available to every other worker.
+#[test]
+fn a_lapsed_job_is_not_reoffered_to_the_key_that_let_it_lapse() {
+    let mut s = with(&[("a", Capability::Probe)], &[(1, Capability::Probe)]);
+    s.policy.trusted_h01.insert(addr(1));
+    s.register(&worker(2, Capability::Probe), "src-2", 0).unwrap();
+    s.policy.trusted_h01.insert(addr(2));
+
+    assert_eq!(s.lease(addr(1), 0).unwrap().id.0, "a");
+    assert_eq!(s.expire_leases(101), vec![JobId("a".into())]);
+    // Past the first no-show cool-down.
+    let t = 101 + NOSHOW_BACKOFF_BASE_SECS;
+    assert_eq!(
+        s.lease(addr(1), t),
+        Err(LeaseError::NothingAvailable),
+        "the key that let the lease lapse must not be handed the same job again"
+    );
+    assert_eq!(
+        s.lease(addr(2), t).unwrap().id.0,
+        "a",
+        "the lapsed job must still go to another worker"
+    );
+}
