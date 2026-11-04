@@ -72,7 +72,7 @@ Until then the public share of the mix is zero (section 4).
   question above.
 
 What we take from Hammer is the method, which needs no licence: masking applies to public rows
-only. Hermes rows keep their real names, because the 29 parity-v1 names are exactly what the
+only. Hermes rows keep their real names, because the 35 parity-v1 names are exactly what the
 shipping agent calls and the eval scores. Masking them would teach the model to ignore names it
 must emit verbatim.
 
@@ -82,7 +82,7 @@ must emit verbatim.
 |---|---|---|---|
 | Licence | CC-BY-4.0, gated, "research purposes" note | CC-BY-4.0, derived from xLAM | the member's own data, D-29 consent per round |
 | Turn shape | single call, no result, no answer | single turn, no call | full turn: call, result, answer |
-| Tool surface | 3,673 public APIs | same | the 29 parity-v1 tools |
+| Tool surface | 3,673 public APIs | same | the 35 parity-v1 tools |
 | Quality filter | APIGen checks | inherited | every workflow verifier passed (D-22) |
 | Teaches | argument filling, multiple and parallel calls | when not to call | our tools, our result shapes, how answers cite results |
 | Risk | licence questions; style drift toward generic APIs | inherits xLAM's | small and narrow per device; privacy, handled by redaction and consent |
@@ -105,7 +105,7 @@ must emit verbatim.
 
 - `messages` are copied verbatim from the export, so every redaction marker survives. The
   converter does not redact on its own; it trusts nothing it would have to undo.
-- `tools` lists the 29 parity-v1 names (citrate-core `src/agent/parity/parity-v1.json`, pinned
+- `tools` lists the 35 parity-v1 names (citrate-core `src/agent/parity/parity-v1.json`, pinned
   by a hash in both repos). The trainer renders the Gemma tool-declaration block from these
   names and core's tool definitions.
 - Dropped and counted: rows that match a held-out item, call a tool outside parity-v1, pass
@@ -141,7 +141,7 @@ through the same held-out check.
 
 ## 5. The held-out split (toolcall-v2)
 
-- citrate-core's `toolcall-v2` (79 items: v1's 57 plus fragments) is the S9.4 measuring stick.
+- citrate-core's `toolcall-v2` (90 items: v1's 57 plus fragments) is the S9.4 measuring stick.
   Its manifest holds the sha256 of each prompt after normalization (lowercase, everything that
   is neither alphabetic nor numeric becomes a space, whitespace collapsed, trimmed), never the
   prompt text, so prompts do not travel into a training repo.

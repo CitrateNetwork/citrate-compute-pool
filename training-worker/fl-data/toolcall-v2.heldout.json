@@ -2,7 +2,7 @@
   "format": "citrate-heldout-v1",
   "dataset": "toolcall-v2",
   "normalization": "lowercase; every character that is neither alphabetic nor numeric becomes a space; whitespace runs collapse to one space; trimmed",
-  "count": 79,
+  "count": 90,
   "items": [
     {
       "id": "amb-create-unnamed-group",
@@ -85,6 +85,10 @@
       "sha256": "14513481376aaaf3eabe7869c4876cd6db3bab68031fa406b12de752ec280c37"
     },
     {
+      "id": "nw-explain-then-resend",
+      "sha256": "f6487bfbf9f28ec7af07124a8cc46eb97aa11f7701bf1c574b28bc7d089f4edc"
+    },
+    {
       "id": "nw-fact-in-passing",
       "sha256": "1572156c28c206d7cdfc67c8a7edc6250734032b4f1e752036528d85f65a32e9"
     },
@@ -145,6 +149,22 @@
       "sha256": "a7162e313d4a060fe87fc53fb46e4bbc990e66c5e37e52f86dcc9053193abdd4"
     },
     {
+      "id": "tc-book-find-by-name",
+      "sha256": "aa00eb92db269dc28b6d8b71fca41d754822fab8b1c5e5a4c1b69f57bf2e5979"
+    },
+    {
+      "id": "tc-book-find-registry",
+      "sha256": "4b4104b5accda9c189495476b7a43a534aae1d3005a3e38ea999b6cc3bfe9cf7"
+    },
+    {
+      "id": "tc-book-then-balance",
+      "sha256": "ac3ad0c9bbc1538e8d1551380034511aadcd61e817ea1194a7b6a53e51124f41"
+    },
+    {
+      "id": "tc-book-what-is-address",
+      "sha256": "dfb72cb7604f887b2598e3b625dbad8c80ed10ca995be66920e47d7aefe4d2c1"
+    },
+    {
       "id": "tc-calendar-list-days",
       "sha256": "528713a0dd405e13b58017749d46ca4902aeefc644047c6d0d34c4e37a8abb34"
     },
@@ -165,6 +185,14 @@
       "sha256": "df8d00803bc25e3be9501e8fcf981fc129be3b8500152e0e473a411b5ba2acc8"
     },
     {
+      "id": "tc-decode-calldata",
+      "sha256": "472fb25fba0fc21c0eb69e7737b3d124e5c8921a00cda0dc142d69f198fd2646"
+    },
+    {
+      "id": "tc-decode-log",
+      "sha256": "cc9468bcaa3c27e3be41a6f467316af938c9603ad1227be1ec421bb01b05c278"
+    },
+    {
       "id": "tc-directory-discord",
       "sha256": "d01e94d8c726284dbc1a9af12e883fb43f6a92aae0a28220f03d31ce2a15c817"
     },
@@ -181,6 +209,10 @@
       "sha256": "6a62397e364696926788529cd1b6dd5d5bf4de09e2be9c6851e3108ce8641166"
     },
     {
+      "id": "tc-explain-tx",
+      "sha256": "d3b1984c7ff70643caeb159359a9661551947d3101c7b0964fa186066b636b69"
+    },
+    {
       "id": "tc-fl-plan-explain",
       "sha256": "93b55a89f71675090798ac10fc0e241d18f29f995dd97b08b81402de97d3d908"
     },
@@ -191,6 +223,10 @@
     {
       "id": "tc-fl-start-explicit",
       "sha256": "d2c9ff0f012d970443a37907303351d91a2b30ce5f5cd993e4380c80a0a8122b"
+    },
+    {
+      "id": "tc-get-code-proxy",
+      "sha256": "89fdb8769490105cbdbdbd9ddaf61883a9ad35e0c22741761d82b8c8372d7e6e"
     },
     {
       "id": "tc-group-create-channel",
@@ -223,6 +259,10 @@
     {
       "id": "tc-gsheets-read-range",
       "sha256": "87938503416ba84c7a48bf1ee4dd69d8a05237a09fc2b2f3f7adf6144b7d9058"
+    },
+    {
+      "id": "tc-identify-unverified",
+      "sha256": "2497364a3db7856509c45da1896a4a158d6c92f189a948b3793dad26ce2a189a"
     },
     {
       "id": "tc-journal-append-explicit",
@@ -275,6 +315,10 @@
     {
       "id": "tc-personal-dentist",
       "sha256": "bb4abd51d9979d9f44b53c7ef9b92a458f29ce60cda7499672d221e29c762698"
+    },
+    {
+      "id": "tc-read-token-balance",
+      "sha256": "a061f6c2e0f5443b474210a239c64fe28e5403c6cda96e8238492d38996a1504"
     },
     {
       "id": "tc-recall-personal",
