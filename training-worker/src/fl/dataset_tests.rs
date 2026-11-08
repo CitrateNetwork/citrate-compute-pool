@@ -9,7 +9,7 @@ const FL_EXPORT_V1_SHA256: &str =
     "3db35d06ea8ff9bdcfabf39abcb16e73b9a43eccdfa8747c5db4ebb82273a719";
 /// Pinned in citrate-core `src/agent/eval/heldout.test.ts` too.
 const PARITY_V1_TOOL_NAMES_SHA256: &str =
-    "15534eb4d24830b58acb575a01cf6e7070e7ffb9ac81a463e8fe69350b3eecee";
+    "abbb885be3253ae488edafebb68f5f3049130ea8be49d930b0ef28a14912c75c";
 
 fn held() -> HeldOut {
     HeldOut::toolcall_v2().expect("embedded manifest")
@@ -39,11 +39,13 @@ fn the_pinned_files_are_the_ones_the_other_repos_pin() {
 fn the_toolcall_v2_manifest_holds_every_eval_item() {
     let h = held();
     assert_eq!(h.dataset(), "toolcall-v2");
-    assert_eq!(h.len(), 79);
+    assert_eq!(h.len(), 90);
     // tc-node-height, through the normalization in any casing or punctuation.
     assert!(h.contains_prompt("What block height is my node at right now?"));
     assert!(h.contains_prompt("  WHAT block-height is my node at... right now"));
     assert!(!h.contains_prompt("What block height was my node at yesterday?"));
+    // tc-book-find-by-name, one of core's contract-tool items (CORE-A6).
+    assert!(h.contains_prompt("What is the address of the WrappedSALT contract on Citrate?"));
 }
 
 /// The same vectors as citrate-core `heldout.test.ts`.
@@ -93,7 +95,7 @@ fn the_fixture_converts_with_each_exclusion_counted() {
         assert_eq!(row.metadata.tool_schema, "parity-v1");
         assert_eq!(row.metadata.source, "hermes-verified");
         assert_eq!(row.metadata.split, "train");
-        assert_eq!(row.tools.len(), 29);
+        assert_eq!(row.tools.len(), 35);
     }
 }
 
