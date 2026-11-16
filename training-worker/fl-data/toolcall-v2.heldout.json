@@ -2,7 +2,7 @@
   "format": "citrate-heldout-v1",
   "dataset": "toolcall-v2",
   "normalization": "lowercase; every character that is neither alphabetic nor numeric becomes a space; whitespace runs collapse to one space; trimmed",
-  "count": 90,
+  "count": 96,
   "items": [
     {
       "id": "amb-create-unnamed-group",
@@ -213,6 +213,22 @@
       "sha256": "d3b1984c7ff70643caeb159359a9661551947d3101c7b0964fa186066b636b69"
     },
     {
+      "id": "tc-fl-adapter-gate-read-all",
+      "sha256": "8502d8056180faeb787f1df7ce6ad1bb36f331ac9aa0007cbebac6b192bd487c"
+    },
+    {
+      "id": "tc-fl-adapter-gate-read-sha",
+      "sha256": "353cfb2d179ecf79852eff655f826b288ba62af813f30cda0d00edf9055ac1a8"
+    },
+    {
+      "id": "tc-fl-adapter-load-propose",
+      "sha256": "6fa6930865981871d32b203161eb2d0e90409bb797762cc704a7011ff0c922dc"
+    },
+    {
+      "id": "tc-fl-adapter-unload",
+      "sha256": "e8f910cc4898c9e8c39327b1b0ba11bfc6474954313c0d7147ed43380e015afb"
+    },
+    {
       "id": "tc-fl-plan-explain",
       "sha256": "93b55a89f71675090798ac10fc0e241d18f29f995dd97b08b81402de97d3d908"
     },
@@ -325,6 +341,10 @@
       "sha256": "81b0a730b9d716808f0efd68af1a753791219307f1561d3d51701eb623d71275"
     },
     {
+      "id": "tc-round-draft-tune",
+      "sha256": "14164a396fa6a998cb5db3a670053fa2ed6df4399d06ceedb156e29daed42fed"
+    },
+    {
       "id": "tc-schedule-add-weekly",
       "sha256": "87a8a7343e9e4b0a0981fa5a75d343f6920c6cef8dfb0326d801ef1c5d7acbed"
     },
@@ -363,6 +383,10 @@
     {
       "id": "tc-widget-create-explicit",
       "sha256": "de2720279ddabf1d445453a85e44a460c146207db90abd059a0b0f281f96e822"
+    },
+    {
+      "id": "tc-worker-terms-gpu-night",
+      "sha256": "048bad0ef5fc81ce88c61a03cb9d803e58c5082ae0b65d5d9b76d81cb47e4cf2"
     }
   ]
 }
