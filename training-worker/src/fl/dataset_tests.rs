@@ -9,7 +9,7 @@ const FL_EXPORT_V1_SHA256: &str =
     "3db35d06ea8ff9bdcfabf39abcb16e73b9a43eccdfa8747c5db4ebb82273a719";
 /// Pinned in citrate-core `src/agent/eval/heldout.test.ts` too.
 const PARITY_V1_TOOL_NAMES_SHA256: &str =
-    "6d69a9821928d9b27b8e52ad33069b4fb370aff89f0fe54d0c8a5f3914294527";
+    "bd52844e1f4c627670033ecce989320cdee6f7a1fc87b3da0c43b672e91b1c7b";
 
 fn held() -> HeldOut {
     HeldOut::toolcall_v2().expect("embedded manifest")
@@ -39,7 +39,7 @@ fn the_pinned_files_are_the_ones_the_other_repos_pin() {
 fn the_toolcall_v2_manifest_holds_every_eval_item() {
     let h = held();
     assert_eq!(h.dataset(), "toolcall-v2");
-    assert_eq!(h.len(), 92);
+    assert_eq!(h.len(), 96);
     // tc-node-height, through the normalization in any casing or punctuation.
     assert!(h.contains_prompt("What block height is my node at right now?"));
     assert!(h.contains_prompt("  WHAT block-height is my node at... right now"));
@@ -86,7 +86,7 @@ fn the_fixture_converts_with_each_exclusion_counted() {
         }
     );
     assert_eq!(r.held_out_dataset, "toolcall-v2");
-    assert_eq!(r.held_out_items, 92);
+    assert_eq!(r.held_out_items, 96);
     assert_eq!(r.tool_calls.get("node_status"), Some(&1));
     assert_eq!(r.tool_calls.get("journal_append"), Some(&1));
     assert_eq!(r.tool_calls.len(), 2);
@@ -95,7 +95,7 @@ fn the_fixture_converts_with_each_exclusion_counted() {
         assert_eq!(row.metadata.tool_schema, "parity-v1");
         assert_eq!(row.metadata.source, "hermes-verified");
         assert_eq!(row.metadata.split, "train");
-        assert_eq!(row.tools.len(), 37);
+        assert_eq!(row.tools.len(), 40);
     }
 }
 

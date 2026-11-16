@@ -7,7 +7,7 @@
 //!
 //! ```json
 //! {"messages": [...unchanged...],
-//!  "tools": ["memory_search", ...the 37 parity-v1 tool names...],
+//!  "tools": ["memory_search", ...the 40 parity-v1 tool names...],
 //!  "metadata": {"model": "...", "workflow": null, "step": null, "verifiers": ["..."],
 //!               "format": "citrate-fl-sft-v1", "tool_schema": "parity-v1",
 //!               "source": "hermes-verified", "split": "train", "example_id": "<sha256>"}}
@@ -22,7 +22,7 @@
 //!   to an item of the held-out manifest (by default the embedded toolcall-v2 manifest, which
 //!   citrate-core generates from its eval set) is dropped. The manifest carries hashes only.
 //! - **Only the shipping tool surface is trained.** An example that calls a tool outside the
-//!   37-tool parity-v1 schema (an MCP server's tool, a retired name) is dropped, as is one whose
+//!   40-tool parity-v1 schema (an MCP server's tool, a retired name) is dropped, as is one whose
 //!   tool-call arguments are not a JSON object, or whose tool results do not answer a call.
 //! - **No duplicates.** Rows are keyed by the sha256 of their messages; a repeat is dropped.
 //! - Rows still pass [`super::runner::verify_dataset`], so the device runner accepts them.
@@ -44,9 +44,9 @@ pub const TOOL_SCHEMA: &str = "parity-v1";
 /// The source tag of rows made from a member's own verified trajectories.
 pub const SOURCE_HERMES: &str = "hermes-verified";
 
-/// The 37 tools of citrate-core `src/agent/parity/parity-v1.json` (`tools[].name`, in order):
+/// The 40 tools of citrate-core `src/agent/parity/parity-v1.json` (`tools[].name`, in order):
 /// the core-hosted tool surface the shipping agent offers.
-pub const PARITY_V1_TOOLS: [&str; 37] = [
+pub const PARITY_V1_TOOLS: [&str; 40] = [
     "memory_search",
     "memory_recall",
     "app_navigate",
@@ -76,6 +76,9 @@ pub const PARITY_V1_TOOLS: [&str; 37] = [
     "explain_tx",
     "fl_round_plan",
     "fl_round_start",
+    "fl_adapter_gate_read",
+    "fl_adapter_load_propose",
+    "fl_adapter_unload",
     "worker_terms_propose",
     "round_draft_propose",
     "belnap_codec",
@@ -91,7 +94,7 @@ pub const TOOLCALL_V2_HELDOUT: &str = include_str!("../../fl-data/toolcall-v2.he
 /// Its sha256. citrate-core's `heldout.test.ts` regenerates the file from the eval set; a new
 /// copy here must come with a new pin.
 pub const TOOLCALL_V2_HELDOUT_SHA256: &str =
-    "f50de4491e5f647fa057ab11096960c687dba1352d29d5105944ea5e445c89ba";
+    "5b228fd6c3b7d7ed045b985bf499d5cee9a8e3272bfe35625c077ae25405e1b2";
 /// The manifest format this module reads.
 pub const HELDOUT_FORMAT: &str = "citrate-heldout-v1";
 
